@@ -1,0 +1,243 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: #f5f6f7;
+    --bg-surface: #ffffff;
+    --bg-subtle: #f2f3f5;
+    --bg-accent-soft: #ebf2ff;
+    --bg-accent-hover: #dce8ff;
+    --border-default: #dee0e3;
+    --border-subtle: #eceef2;
+    --border-hover: #bbbfc4;
+    --primary: #1456f0;
+    --primary-hover: #3370ff;
+    --text-primary: #1f2329;
+    --text-secondary: #4e5969;
+    --text-muted: #646a73;
+    --danger: #d83931;
+    --danger-soft: #ffece8;
+    --highlight-yellow: #fff299;
+    --highlight-yellow-hover: #ffe46b;
+    --highlight-border: #e3c846;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background-color: var(--bg-canvas);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #root {
+    height: 100%;
+  }
+}
+
+/* 隐藏滚动条但保留鼠标滚轮顺滑滚动（用于实时字幕窗等纯净区域） */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 无边框自定义窗口拖拽区标记（由 Win32 高刷原生光标追踪驱动，不拦截双击、滚轮与子按钮点击） */
+.pywebview-drag-region {
+  user-select: none;
+}
+
+.app-no-drag {
+  user-select: auto;
+}
+
+/* 无边框桌面端主窗口与实时字幕小窗：根画布完全透明，以呈现抗锯齿 16px 自定义圆角与桌面歌词穿透效果 */
+html.desktop-shell-mode,
+html.desktop-shell-mode body,
+html.desktop-shell-mode #root,
+html.mini-overlay-mode,
+html.mini-overlay-mode body,
+html.mini-overlay-mode #root {
+  background: transparent !important;
+  background-color: transparent !important;
+  overflow: hidden;
+}
+
+.lyric-speaker {
+  color: #69a1ff;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3px rgba(15, 20, 30, 0.92);
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.85),
+    0 0 8px rgba(15, 20, 30, 0.55);
+}
+
+.lyric-text {
+  color: #ffffff;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3.2px rgba(17, 22, 32, 0.92);
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.88),
+    0 2px 10px rgba(15, 20, 30, 0.52);
+}
+
+.lyric-partial {
+  color: #ffe97a;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 3.2px rgba(17, 22, 32, 0.94);
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    0 2px 12px rgba(20, 86, 240, 0.38);
+}
+
+.lyric-muted {
+  color: #e5e9f2;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 2.8px rgba(17, 22, 32, 0.88);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+}
+
+/* 统一滚动条视觉样式（简洁办公风） */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d0d3d6;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #adb1b8;
+}
+
+@keyframes wavePulse {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-wave-1 {
+  animation: wavePulse 0.9s ease-in-out infinite;
+}
+.animate-wave-2 {
+  animation: wavePulse 0.9s ease-in-out 0.2s infinite;
+}
+.animate-wave-3 {
+  animation: wavePulse 0.9s ease-in-out 0.4s infinite;
+}
+
+/* KaTeX 公式与流式排版细节优化 */
+.katex {
+  font-size: 1.04em;
+}
+
+.katex-display {
+  margin: 0.65rem 0;
+  padding: 0.35rem 0.25rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.katex-display > .katex {
+  text-align: center;
+}
+
+/* OpenAI / DeepSeek 风格思考状态流光文字动画 */
+@keyframes thinkingShimmer {
+  0% {
+    background-position: 200% 50%;
+  }
+  100% {
+    background-position: -200% 50%;
+  }
+}
+
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    #646a73 0%,
+    #646a73 36%,
+    #1456f0 50%,
+    #646a73 64%,
+    #646a73 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: thinkingShimmer 2.2s linear infinite;
+}
+
+/* 流式段落轻盈浮现与呼吸光标动画 */
+@keyframes streamBlockReveal {
+  from {
+    opacity: 0.28;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-stream-block {
+  animation: streamBlockReveal 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.streaming-markdown > * {
+  animation: streamBlockReveal 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes streamCaretPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+
+.streaming-markdown > p:last-child::after,
+.streaming-markdown > h1:last-child::after,
+.streaming-markdown > h2:last-child::after,
+.streaming-markdown > h3:last-child::after,
+.streaming-markdown > ul:last-child > li:last-child::after,
+.streaming-markdown > ol:last-child > li:last-child::after,
+.streaming-markdown > blockquote:last-child > p:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.02em;
+  margin-left: 3px;
+  vertical-align: -0.14em;
+  border-radius: 9999px;
+  background-color: #1456f0;
+  animation: streamCaretPulse 0.85s ease-in-out infinite;
+}

@@ -1,0 +1,11 @@
+Opus 1.6.1
+License identifier  BSD-3-Clause
+Original license text and patent notices  COPYING
+
+Windows x64 binary from MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-opus 1.6.1-2.
+The original libopus-0.dll was renamed to opus.dll. The binary is unchanged.
+
+Upstream  https://opus-codec.org/
+Package   https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-opus
+Source    https://mirror.msys2.org/mingw/sources/mingw-w64-opus-1.6.1-2.src.tar.zst
+SHA-256   e747edad6bf02cf5cdcce417b95be3b7ba108f93df1b024778be5d73fa6dae39

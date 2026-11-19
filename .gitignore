@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+node_modules/
+/dist/
+/build/
+/release/
+/build.zip
+/backend/data/
+.venv/
+__pycache__/
+.pytest_cache/
+.codegraph/
+*.py[cod]
+*.tsbuildinfo
+*.sqlite*
+*.db

@@ -1,0 +1,3 @@
+-r requirements-runtime.txt
+# Source development. See docs/WINDOWS_PACKAGING_LICENSES.md for redistribution.
+doubaoime-asr @ git+https://github.com/yangmoling/doubaoime-asr.git@267972f815f519fd7c6149f85a8b7cc99daf61a5
