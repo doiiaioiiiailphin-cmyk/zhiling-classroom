@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Aec3DownloadModal } from './components/classroom/Aec3DownloadModal';
-import { BuiltinAsrDownloadModal } from './components/classroom/BuiltinAsrDownloadModal';
 import { ClassroomView } from './components/classroom/ClassroomView';
 import { SessionNotesExportModal } from './components/classroom/SessionNotesExportModal';
 import { HomeWorkspace } from './components/home/HomeWorkspace';
@@ -13,6 +12,7 @@ import {
   type OverlaySyncSnapshot,
 } from './components/overlay/MiniOverlayView';
 import { SettingsModal } from './components/settings/SettingsModal';
+import { AddonDownloadModal } from './components/ui/AddonDownloadModal';
 import { NoticeToast } from './components/ui/NoticeToast';
 import { WindowResizeHandles } from './components/ui/WindowResizeHandles';
 import { classroomSocket } from './services/classroomSocket';
@@ -310,7 +310,7 @@ export const App: React.FC = () => {
       <Aec3DownloadModal />
       <SessionNotesExportModal />
       <ImportAudioModal />
-      <BuiltinAsrDownloadModal />
+      <AddonDownloadModal />
       <NoticeToast />
     </div>
   );

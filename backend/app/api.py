@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, Request, Response, WebSocket
 from fastapi.responses import StreamingResponse
+from pydantic import StrictBool
 
 from .errors import AppError
 from .providers.asr import list_asr_models
@@ -308,6 +309,12 @@ async def asr_models(body: ASRModelsRequest, request: Request) -> Data[list[str]
 async def get_builtin_asr(request: Request, response: Response) -> Data[bool]:
     response.headers["Cache-Control"] = "no-store"
     return Data(data=request.app.state.builtin_asr.ready())
+
+
+@router.post("/addons/opencode/download", status_code=204)
+async def download_opencode(request: Request, confirmed: Annotated[StrictBool, Body(embed=True)]) -> Response:
+    await request.app.state.opencode.decide_download(confirmed)
+    return Response(status_code=204)
 
 
 @router.post("/addons/builtin-free-asr/download", status_code=204)

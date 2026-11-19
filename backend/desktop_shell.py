@@ -441,6 +441,7 @@ def main() -> None:
     fastapi_app = create_app(
         data_dir=data_dir,
         builtin_asr_dir=(data_dir if is_self_test else app_home) / "addons" / "builtin-free-asr",
+        opencode_cli_dir=(data_dir if is_self_test else app_home) / "addons" / "opencode-free",
         dist_dir=dist_dir,
         origins=allowed_origins,
         enable_os_hotkeys=not is_self_test,

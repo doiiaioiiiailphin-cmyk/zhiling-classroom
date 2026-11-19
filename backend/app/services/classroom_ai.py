@@ -11,7 +11,7 @@ import httpx
 
 from ..errors import AppError
 from ..providers.llm import ImageInput, LLMClientAdapter, Turn, llm_adapter
-from ..providers.opencode_bridge import OpenCodeBridge
+from ..providers.opencode_bridge import OPENCODE_CLI_REQUIRED, OpenCodeBridge
 from ..repository import Locks, Repository
 from ..schemas import (
     AppSettings, BatchCorrection, BatchRegrouping, ChatMessage, CorrectedEvent, Correction, ExtractedTerms, Feature,
@@ -23,7 +23,8 @@ from .attachments import AttachmentStorage
 from .context import classroom_context
 
 logger = logging.getLogger(__name__)
-Publish = Callable[[str, str, dict], Awaitable[None]]
+Publish = Callable[[str, str, dict], Awaitable[bool]]
+AUTOMATIC_FEATURES: tuple[Feature, ...] = ("sentenceCorrection", "resegmentation", "keyTermHighlight")
 
 SHORT_FILLER_WORDS = frozenset({
     "嗯", "嗯嗯", "啊", "啊啊", "哦", "噢", "呃", "额", "欸", "诶", "唉", "哎", "哎呀", "哇", "哈",
@@ -551,6 +552,41 @@ class TranscriptPipeline:
         self.queues: dict[str, deque[str]] = {}
         self.workers: dict[str, asyncio.Task] = {}
 
+    def _open_code_features(self, settings: AppSettings) -> list[Feature]:
+        if OPENCODE_FREE_PROVIDER_ID not in settings.llm_providers:
+            return []
+        return [
+            feature for feature in AUTOMATIC_FEATURES
+            if (binding := settings.feature_routing.binding(feature)).enabled
+            and binding.provider_id == OPENCODE_FREE_PROVIDER_ID
+        ]
+
+    def should_prompt_for_opencode(self, settings: AppSettings) -> bool:
+        bridge = self.ai.opencode
+        return bool(
+            bridge and not bridge.automatic_download_decision.is_set()
+            and self._open_code_features(settings) and bridge.needs_download()
+        )
+
+    async def automatic_settings(
+        self, session_id: str, settings: AppSettings, *, download_prompt_sent: bool = False,
+    ) -> AppSettings:
+        bridge = self.ai.opencode
+        features = self._open_code_features(settings)
+        if not bridge or not features or not bridge.needs_download():
+            return settings
+        if not bridge.automatic_download_decision.is_set():
+            if download_prompt_sent or await self.publish(session_id, "error", {
+                "code": OPENCODE_CLI_REQUIRED, "message": "请先下载 OpenCode 组件",
+            }):
+                await bridge.await_automatic_download()
+        if not bridge.needs_download():
+            return settings
+        available = settings.model_copy(deep=True)
+        for feature in features:
+            available.feature_routing.binding(feature).enabled = False
+        return available
+
     def submit(self, session_id: str, utterance_id: str) -> bool:
         queue = self.queues.setdefault(session_id, deque())
         if len(queue) >= 2048:
@@ -621,6 +657,7 @@ class TranscriptPipeline:
                     )
                     if not substantive:
                         continue
+                    settings = await self.automatic_settings(session_id, settings)
                     if settings.feature_routing.sentence_correction.enabled:
                         await self.run_stage(session_id, utterance_id, settings, "sentenceCorrection", self.correct)
                         if not await self.repo.filter_non_empty_refined([utterance_id]):
@@ -635,7 +672,10 @@ class TranscriptPipeline:
             self.queues.pop(session_id, None)
             self.workers.pop(session_id, None)
 
-    async def process_batch(self, session_id: str, utterance_ids: list[str], settings: AppSettings):
+    async def process_batch(
+        self, session_id: str, utterance_ids: list[str], settings: AppSettings, *, download_prompt_sent: bool = False,
+    ):
+        settings = await self.automatic_settings(session_id, settings, download_prompt_sent=download_prompt_sent)
         if settings.feature_routing.sentence_correction.enabled:
             await self.run_stage(session_id, utterance_ids, settings, "sentenceCorrection", self.correct_batch)
             utterance_ids = await self.repo.filter_non_empty_refined(utterance_ids)

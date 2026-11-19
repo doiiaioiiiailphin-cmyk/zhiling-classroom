@@ -13,6 +13,7 @@ import {
 } from '@floating-ui/react';
 import { AlertCircle, MessageSquareQuote } from 'lucide-react';
 import type { KnowledgeSegment, SegmentDetailedExplanation } from '../../types/domain';
+import { AddonDownloadCancelled } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { ThinkingDisclosure } from '../ui/ThinkingDisclosure';
@@ -56,6 +57,10 @@ export const KnowledgeBubblePopover: React.FC<KnowledgeBubblePopoverProps> = ({
         })
           .then((res) => setDetail(res))
           .catch((err: unknown) => {
+            if (err instanceof AddonDownloadCancelled) {
+              setIsOpen(false);
+              return;
+            }
             setErrorMessage(
               err instanceof Error ? err.message : '生成知识点解析失败，请检查模型配置'
             );

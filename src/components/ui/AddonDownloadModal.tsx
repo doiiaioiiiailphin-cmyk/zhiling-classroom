@@ -1,18 +1,27 @@
 import { Download, Loader2 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { Modal } from '../ui/Modal';
+import { Modal } from './Modal';
 
-export function BuiltinAsrDownloadModal() {
-  const prompt = useAppStore((s) => s.builtinAsrPrompt);
-  const close = useAppStore((s) => s.closeBuiltinAsrPrompt);
-  const download = useAppStore((s) => s.confirmBuiltinAsrDownload);
-  const downloading = prompt === 'downloading';
+export function AddonDownloadModal() {
+  const { addon, stage } = useAppStore((s) => s.addonDownload);
+  const close = useAppStore((s) => s.closeAddonDownload);
+  const download = useAppStore((s) => s.confirmAddonDownload);
+  const downloading = stage === 'downloading';
+  const opencode = addon === 'opencode';
 
   return (
-    <Modal open={prompt !== null} onClose={close} title="下载默认语音组件" widthClass="max-w-md">
+    <Modal
+      open={stage !== 'closed'}
+      onClose={close}
+      title={opencode ? '下载 OpenCode 组件' : '下载默认语音组件'}
+      widthClass="max-w-md"
+      layerClass="z-[80]"
+    >
       <div className="space-y-5 p-6">
         <p className="text-[15px] leading-relaxed text-[#1F2329]">
-          首次使用默认免登录语音需要下载语音组件。
+          {opencode
+            ? '首次使用 OpenCode 免费模型需要下载组件（约 126 MB）。'
+            : '首次使用默认免登录语音需要下载语音组件。'}
         </p>
         <div className="flex items-center justify-end gap-3">
           <button

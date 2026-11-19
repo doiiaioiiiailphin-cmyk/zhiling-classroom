@@ -12,7 +12,7 @@
 
 从 [Releases](../../releases) 下载 Windows x64 压缩包，完整解压后运行 `ZhilingClassroom.exe`。
 
-默认免登录语音在首次使用时会弹窗确认下载。文字功能默认使用「OpenCode 免费模型」，需要本机有 OpenCode 2 CLI，应用会在后台启动它。语音和文字供应商均可在设置中切换。 [供应商配置](backend/README.md#供应商接入) · [Windows 打包](docs/WINDOWS_PACKAGING_LICENSES.md)
+首次使用默认免登录语音或「OpenCode 免费模型」时，按弹窗确认下载相应组件。下载后保存在用户目录，下次直接复用。语音和文字供应商均可在设置中切换。 [供应商配置](backend/README.md#供应商接入) · [Windows 打包](docs/WINDOWS_PACKAGING_LICENSES.md)
 
 ## 前端开发预览
 

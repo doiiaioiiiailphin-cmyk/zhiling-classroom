@@ -94,6 +94,7 @@ def create_app(
     data_dir: Path | None = None,
     *,
     builtin_asr_dir: Path | None = None,
+    opencode_cli_dir: Path | None = None,
     dist_dir: Path | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
     origins: tuple[str, ...] | None = None,
@@ -132,7 +133,10 @@ def create_app(
                 headers={"User-Agent": "zhiling-classroom/1.0"},
                 follow_redirects=False,
             ) as client:
-                opencode = OpenCodeBridge(data_dir / "addons" / "opencode-free", client, settings.save_opencode_catalog)
+                opencode = OpenCodeBridge(
+                    data_dir / "addons" / "opencode-free", client, settings.save_opencode_catalog,
+                    runtime_dir=opencode_cli_dir,
+                )
                 ai = ClassroomAI(repo, settings, client, locks, attachments=attachments, opencode=opencode)
                 builtin_asr = BuiltinAsrRuntime(builtin_asr_dir or data_dir / "addons" / "builtin-free-asr")
                 streams = ClassroomStreams(repo, settings, client, locks, audio, ai, builtin_asr)

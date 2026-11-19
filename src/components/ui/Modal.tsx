@@ -8,6 +8,7 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   widthClass?: string;
+  layerClass?: string;
   children: React.ReactNode;
 }
 
@@ -19,6 +20,7 @@ export const Modal: React.FC<ModalProps> = ({
   onClose,
   title,
   widthClass = 'max-w-3xl',
+  layerClass = 'z-50',
   children,
 }) => {
   const modalId = useId();
@@ -48,7 +50,7 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-all duration-160 ${
+      className={`fixed inset-0 ${layerClass} flex items-center justify-center p-4 transition-all duration-160 ${
         isVisible
           ? 'bg-[#1F2329]/35 backdrop-blur-[1.5px] opacity-100'
           : 'bg-[#1F2329]/0 opacity-0 pointer-events-none'

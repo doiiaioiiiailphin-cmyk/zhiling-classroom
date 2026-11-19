@@ -75,10 +75,12 @@ class ClassroomStreams:
             self.builtin_asr.require()
         return config
 
-    async def publish(self, session_id: str, kind: str, payload: dict):
+    async def publish(self, session_id: str, kind: str, payload: dict) -> bool:
         sink = self.sinks.get(session_id)
         if sink is not None:
             await sink.send(kind, payload)
+            return sink.connected
+        return False
 
     async def delete_session(self, session_id: str):
         lease = self.locks.get("recording:" + session_id)
@@ -301,9 +303,14 @@ class ClassroomStreams:
                 substantive = await self.pipeline._filter_fillers(
                     utt_ids, session_id=session_id, settings=settings,
                 )
+                download_prompt_sent = bool(substantive) and self.pipeline.should_prompt_for_opencode(settings)
+                if download_prompt_sent:
+                    yield {"type": "opencode-required"}
                 for i in range(0, len(substantive), 10):
                     batch = substantive[i:i + 10]
-                    await self.pipeline.process_batch(session_id, batch, settings)
+                    await self.pipeline.process_batch(
+                        session_id, batch, settings, download_prompt_sent=download_prompt_sent,
+                    )
 
             final_ws = await self.repo.workspace(session_id, audio_duration_ms=duration_ms)
             yield {"type": "done", "data": final_ws.wire()}

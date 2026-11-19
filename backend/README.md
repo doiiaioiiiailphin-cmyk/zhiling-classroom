@@ -23,7 +23,9 @@ python backend/run.py --with-frontend
 
 ## 供应商接入
 
-首次配置时，文本功能默认走「OpenCode 免费模型」。安装 [OpenCode 2 CLI](https://opencode.ai/docs/#cli) 后可直接使用。知聆课堂按需启动隔离的本机 OpenCode 和 [opencode-free-bridge](https://github.com/prestonw/opencode-free-bridge)，在设置中点击刷新可取得当前免费文本模型。也可以把功能模型设为「自动选择免费模型」。长文本一次返回，图片问答可单独选用视觉供应商。
+文本功能默认走「OpenCode 免费模型」。Windows x64 首次使用时确认下载，应用会获取并校验固定的 OpenCode 2.3.2 CLI，保存在 `%LOCALAPPDATA%\ZhilingClassroom\addons\opencode-free`。下载优先走国内 npm 镜像，后续使用直接加载缓存，并按需启动隔离的本机服务和桥接器。 [OpenCode 2.3.2](https://github.com/anomalyco/opencode/releases/tag/v2.3.2) · [opencode-free-bridge](https://github.com/prestonw/opencode-free-bridge)
+
+在设置中点击刷新可取得当前免费文本模型。也可以把功能模型设为「自动选择免费模型」。长文本一次返回，图片问答可单独选用视觉供应商。
 
 如果系统同时装有多个版本，可在 `ZHILING_OPENCODE_EXECUTABLE` 指定 OpenCode 2 的绝对路径，或在应用数据目录的 `addons/opencode-free/executable.txt` 写入该路径。云端额度限制会在课堂中显示。
 

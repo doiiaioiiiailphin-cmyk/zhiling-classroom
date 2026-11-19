@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
-import { api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
+import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
 import { getDesktopBridge } from '../utils/desktopBridge';
 import type {
@@ -28,6 +28,9 @@ export interface AppNotice {
   kind: 'info' | 'error';
   message: string;
 }
+
+type DownloadAddon = 'asr' | 'opencode';
+const OPENCODE_CLI_REQUIRED = 'OPENCODE_CLI_REQUIRED';
 
 export function deriveAudioInputSource(
   micEnabled: boolean,
@@ -165,7 +168,7 @@ interface AppStoreState {
 
   // 全局设置状态与 WebRTC AEC3 组件状态
   settings: AppSettings | null;
-  builtinAsrPrompt: 'confirm' | 'downloading' | null;
+  addonDownload: { addon: DownloadAddon; stage: 'closed' | 'confirm' | 'downloading' };
   aec3Addon: Aec3AddonStatus | null;
   aec3Modal: {
     open: boolean;
@@ -182,8 +185,8 @@ interface AppStoreState {
   clearNotice: () => void;
 
   ensureBuiltinAsrReady: () => Promise<boolean>;
-  confirmBuiltinAsrDownload: () => Promise<void>;
-  closeBuiltinAsrPrompt: () => void;
+  confirmAddonDownload: () => Promise<void>;
+  closeAddonDownload: () => void;
   refreshAec3AddonStatus: () => Promise<Aec3AddonStatus>;
   requestToggleWebrtcAec3: (enabled: boolean) => Promise<void>;
   confirmDownloadAec3Modal: () => Promise<void>;
@@ -291,14 +294,42 @@ interface AppStoreState {
 
 export const useAppStore = create<AppStoreState>((set, get) => {
   let checkingBuiltinAsr = false;
-  let replyToBuiltinAsr: ((ready: boolean) => void) | null = null;
+  let pendingDownload: {
+    addon: DownloadAddon;
+    promise: Promise<boolean>;
+    settle: (ready: boolean) => void;
+  } | null = null;
   let pendingDualTalkContinuation: (() => Promise<void>) | null = null;
 
-  const finishBuiltinAsrPrompt = (ready: boolean) => {
-    const reply = replyToBuiltinAsr;
-    replyToBuiltinAsr = null;
-    set({ builtinAsrPrompt: null });
-    reply?.(ready);
+  const askToDownload = (addon: DownloadAddon): Promise<boolean> => {
+    if (pendingDownload) {
+      return pendingDownload.addon === addon
+        ? pendingDownload.promise
+        : pendingDownload.promise.then(() => askToDownload(addon));
+    }
+    let settle!: (ready: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => { settle = resolve; });
+    pendingDownload = { addon, promise, settle };
+    set({ addonDownload: { addon, stage: 'confirm' } });
+    void getDesktopBridge()?.focus_main_window?.().catch(() => undefined);
+    return promise;
+  };
+
+  const finishDownloadPrompt = (ready: boolean) => {
+    const pending = pendingDownload;
+    pendingDownload = null;
+    set((state) => ({ addonDownload: { ...state.addonDownload, stage: 'closed' } }));
+    pending?.settle(ready);
+  };
+
+  const withOpenCodeDownload = async <T,>(request: () => Promise<T>): Promise<T> => {
+    try {
+      return await request();
+    } catch (err) {
+      if (!(err instanceof ApiRequestError) || err.code !== OPENCODE_CLI_REQUIRED) throw err;
+      if (!(await askToDownload('opencode'))) throw new AddonDownloadCancelled();
+      return request();
+    }
   };
 
   const showNotice = (kind: 'info' | 'error', message: string) => {
@@ -453,6 +484,10 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         break;
 
       case 'error': {
+        if (event.payload.code === OPENCODE_CLI_REQUIRED) {
+          void askToDownload('opencode');
+          break;
+        }
         showNotice('error', event.payload.message);
         const isLlmStageWarning = LLM_STAGE_PREFIXES.some((prefix) =>
           event.payload.message.startsWith(prefix)
@@ -526,7 +561,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
     settings: null,
     aec3Addon: null,
-    builtinAsrPrompt: null,
+    addonDownload: { addon: 'asr', stage: 'closed' },
     aec3Modal: { open: false, mode: 'enable-setting' },
     aec3Downloading: false,
     aec3DownloadProgress: null,
@@ -606,11 +641,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       checkingBuiltinAsr = true;
       try {
         if (await api.getBuiltinAsrReady()) return true;
-        return await new Promise<boolean>((resolve) => {
-          replyToBuiltinAsr = resolve;
-          set({ builtinAsrPrompt: 'confirm' });
-          void getDesktopBridge()?.focus_main_window?.().catch(() => undefined);
-        });
+        return await askToDownload('asr');
       } catch (err) {
         showNotice('error', err instanceof Error ? err.message : '无法检查默认语音组件，请重试');
         return false;
@@ -619,20 +650,24 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       }
     },
 
-    confirmBuiltinAsrDownload: async () => {
-      if (get().builtinAsrPrompt !== 'confirm') return;
-      set({ builtinAsrPrompt: 'downloading' });
+    confirmAddonDownload: async () => {
+      const { addon, stage } = get().addonDownload;
+      if (stage !== 'confirm') return;
+      set({ addonDownload: { addon, stage: 'downloading' } });
       try {
-        await api.downloadBuiltinAsr();
-        finishBuiltinAsrPrompt(true);
+        await (addon === 'opencode' ? api.decideOpenCodeDownload(true) : api.downloadBuiltinAsr());
+        finishDownloadPrompt(true);
       } catch (err) {
-        set({ builtinAsrPrompt: 'confirm' });
-        showNotice('error', err instanceof Error ? err.message : '语音组件下载失败，请重试');
+        set({ addonDownload: { addon, stage: 'confirm' } });
+        showNotice('error', err instanceof Error ? err.message : '组件下载失败，请重试');
       }
     },
 
-    closeBuiltinAsrPrompt: () => {
-      if (get().builtinAsrPrompt === 'confirm') finishBuiltinAsrPrompt(false);
+    closeAddonDownload: () => {
+      const { addon, stage } = get().addonDownload;
+      if (stage !== 'confirm') return;
+      if (addon === 'opencode') void api.decideOpenCodeDownload(false).catch(() => undefined);
+      finishDownloadPrompt(false);
     },
 
     confirmDownloadAec3Modal: async () => {
@@ -1039,7 +1074,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       if (!session) throw new Error('无活动课堂');
       const startedAt = performance.now();
       let thinkingFinishedAt: number | null = null;
-      const detail = await api.streamExplainSegment(session.id, segmentId, {
+      const detail = await withOpenCodeDownload(() => api.streamExplainSegment(session.id, segmentId, {
         onThinkingDelta: (delta) => {
           callbacks?.onThinkingDelta?.(delta);
         },
@@ -1049,7 +1084,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           }
           callbacks?.onStageChange?.(stage);
         },
-      });
+      }));
       const enrichedDetail: SegmentDetailedExplanation = detail.thinking
         ? {
             ...detail,
@@ -1110,7 +1145,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       let streamedThinking = '';
 
       try {
-        const aiReply = await api.streamChatMessage(session.id, trimmed, {
+        const aiReply = await withOpenCodeDownload(() => api.streamChatMessage(session.id, trimmed, {
           attachmentIds,
           onThinkingDelta: (delta) => {
             streamedThinking += delta;
@@ -1154,7 +1189,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               };
             });
           },
-        });
+        }));
 
         const finalThinking = aiReply.thinking ?? (streamedThinking.trim() || undefined);
         const finalThinkingSec = finalThinking
@@ -1188,7 +1223,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           ),
           isSendingChat: false,
         }));
-        showNotice('error', err instanceof Error ? err.message : '问答请求失败');
+        if (!(err instanceof AddonDownloadCancelled)) {
+          showNotice('error', err instanceof Error ? err.message : '问答请求失败');
+        }
         throw err;
       }
     },
@@ -1213,12 +1250,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       const cfg = settings?.llmProviders[providerId];
       if (!settings || !cfg) return [];
       try {
-        const models = await api.fetchProviderModels({
+        const models = await withOpenCodeDownload(() => api.fetchProviderModels({
           providerId,
           protocol: cfg.protocol,
           baseUrl: cfg.baseUrl,
           apiKey: cfg.apiKey,
-        });
+        }));
         if (providerId === OPENCODE_FREE_PROVIDER_ID) {
           set((state) => {
             if (!state.settings) return state;
@@ -1289,7 +1326,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         showNotice('info', `已成功获取 ${models.length} 个可用模型`);
         return models;
       } catch (err) {
-        showNotice('error', err instanceof Error ? err.message : '拉取模型列表失败');
+        if (!(err instanceof AddonDownloadCancelled)) {
+          showNotice('error', err instanceof Error ? err.message : '拉取模型列表失败');
+        }
         return [];
       }
     },
@@ -1348,7 +1387,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     streamGenerateStudyNote: async (sessionId, callbacks) => {
-      const note = await api.streamSessionNotes(sessionId, callbacks);
+      const note = await withOpenCodeDownload(() => api.streamSessionNotes(sessionId, callbacks));
       if (get().activeSession?.id === sessionId) {
         set({ studyNote: note });
       }
@@ -1356,7 +1395,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     generateSessionFlashcards: async (sessionId) => {
-      const cards = await api.generateFlashcards(sessionId);
+      const cards = await withOpenCodeDownload(() => api.generateFlashcards(sessionId));
       if (get().activeSession?.id === sessionId) {
         set({ flashcards: cards });
       }
@@ -1473,7 +1512,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           title: options.title,
           folderId: get().currentFolderId,
         },
-        onProgress
+        onProgress,
+        () => { void askToDownload('opencode'); }
       );
       classroomSocket.connect(payload.session.id, handleServerEvent);
       set((state) => ({

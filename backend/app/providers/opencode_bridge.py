@@ -7,6 +7,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import sysconfig
 from collections.abc import Awaitable, Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +20,7 @@ from types import ModuleType
 import httpx
 
 from ..errors import AppError
+from .opencode_runtime import OPENCODE_VERSION, install_cli, matches_cli
 
 
 SOURCE_COMMIT = "cf104aae85607b12d815a61906a0b65c25f8d457"
@@ -26,17 +28,28 @@ SOURCE_URL = f"https://raw.githubusercontent.com/prestonw/opencode-free-bridge/{
 SOURCE_SHA256 = "b887659fd172c4632d9a0143117665a8a77de744dbee1a289787351ac23ba2cf"
 CLOUD_CATALOG = "https://opencode.ai/inference/v1/models"
 CATALOG_LIFETIME = 300
+OPENCODE_CLI_REQUIRED = "OPENCODE_CLI_REQUIRED"
 
 
 class OpenCodeBridge:
     """Host the upstream bridge against an isolated, authenticated OpenCode 2 process."""
 
-    def __init__(self, directory: Path, network: httpx.AsyncClient, save_catalog: Callable[[list[str]], Awaitable[None]]):
+    def __init__(
+        self, directory: Path, network: httpx.AsyncClient, save_catalog: Callable[[list[str]], Awaitable[None]],
+        *, runtime_dir: Path | None = None,
+    ):
         self.directory = directory
         self.network = network
         self.save_catalog = save_catalog
         self.loopback = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(100, connect=3))
         self.lock = asyncio.Lock()
+        self.managed_executable = (
+            (runtime_dir or directory) / f"{OPENCODE_VERSION}-windows-x64" / "opencode.exe"
+            if sysconfig.get_platform() == "win-amd64" else None
+        )
+        self._verified_stamp: tuple[int, int] | None = None
+        self._managed_valid = False
+        self.automatic_download_decision = asyncio.Event()
         self.process: subprocess.Popen | None = None
         self.profile: TemporaryDirectory | None = None
         self.server: ThreadingHTTPServer | None = None
@@ -47,6 +60,20 @@ class OpenCodeBridge:
         self.catalog_time = 0.0
         self.retry_at = 0.0
 
+    def _cached_cli(self) -> str | None:
+        path = self.managed_executable
+        if path is None:
+            return None
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        stamp = (info.st_mtime_ns, info.st_size)
+        if self._verified_stamp != stamp:
+            self._managed_valid = matches_cli(path)
+            self._verified_stamp = stamp
+        return str(path) if self._managed_valid else None
+
     def executable(self) -> str:
         override = os.getenv("ZHILING_OPENCODE_EXECUTABLE", "").strip()
         pointer = self.directory / "executable.txt"
@@ -56,9 +83,11 @@ class OpenCodeBridge:
             except (OSError, UnicodeError):
                 raise AppError(503, "OPENCODE_EXECUTABLE_CONFIG", "无法读取本机 OpenCode 程序路径") from None
         local_binary = self.directory / ("opencode.exe" if os.name == "nt" else "opencode")
-        resolved = override or (
-            str(local_binary) if local_binary.is_file() else shutil.which("opencode2") or shutil.which("opencode")
-        )
+        resolved = override or (str(local_binary) if local_binary.is_file() else None) or self._cached_cli()
+        if not resolved and self.managed_executable is not None:
+            raise AppError(409, OPENCODE_CLI_REQUIRED, "请先下载 OpenCode 组件")
+        if not resolved:
+            resolved = shutil.which("opencode2") or shutil.which("opencode")
         if not resolved or not Path(resolved).is_file():
             raise AppError(503, "OPENCODE_NOT_INSTALLED", "请先安装 OpenCode 2，再刷新免费模型")
         if not override and os.name == "nt" and Path(resolved).suffix.lower() in {".cmd", ".bat"}:
@@ -73,6 +102,29 @@ class OpenCodeBridge:
             if not resolved:
                 raise AppError(503, "OPENCODE_EXECUTABLE_CONFIG", "请指定 OpenCode 2 原生程序的绝对路径")
         return str(Path(resolved).resolve())
+
+    def needs_download(self) -> bool:
+        try:
+            self.executable()
+        except AppError as error:
+            return error.code == OPENCODE_CLI_REQUIRED
+        return False
+
+    async def decide_download(self, confirmed: bool) -> None:
+        if confirmed:
+            async with self.lock:
+                if self.needs_download() and self.managed_executable is not None:
+                    await install_cli(self.network, self.managed_executable)
+                    self._verified_stamp = None
+                await self.start()
+        self.automatic_download_decision.set()
+
+    async def await_automatic_download(self) -> None:
+        try:
+            async with asyncio.timeout(320):
+                await self.automatic_download_decision.wait()
+        except TimeoutError:
+            self.automatic_download_decision.set()
 
     async def bridge_module(self) -> ModuleType:
         path = self.directory / "upstream_bridge.py"

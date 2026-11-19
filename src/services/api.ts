@@ -38,6 +38,15 @@ export class ApiRequestError extends Error {
   }
 }
 
+export class AddonDownloadCancelled extends Error {}
+
+async function responseError(response: Response): Promise<ApiRequestError> {
+  const body = await response.json().catch(() => null) as {
+    error?: { message?: string; code?: string };
+  } | null;
+  return new ApiRequestError(body?.error?.message || `HTTP ${response.status}`, body?.error?.code);
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -47,20 +56,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
 
-  if (!response.ok) {
-    let errorDetail = `HTTP ${response.status}`;
-    let errorCode: string | undefined;
-    try {
-      const errBody = (await response.json()) as { error?: { message?: string; code?: string } };
-      errorCode = errBody.error?.code;
-      if (errBody?.error?.message) {
-        errorDetail = errBody.error.message;
-      }
-    } catch {
-      // 保持默认状态码描述
-    }
-    throw new ApiRequestError(errorDetail, errorCode);
-  }
+  if (!response.ok) throw await responseError(response);
 
   if (response.status === 204) {
     return undefined as T;
@@ -82,6 +78,7 @@ type SseServerFrame<T> =
       percent: number;
     }
   | { type: 'done'; data: T }
+  | { type: 'opencode-required' }
   | { type: 'error'; error?: { code?: string; message?: string } };
 
 async function requestSse<T>(
@@ -98,18 +95,7 @@ async function requestSse<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  if (!response.ok) {
-    let errorDetail = `HTTP ${response.status}`;
-    try {
-      const errBody = (await response.json()) as { error?: { message?: string } };
-      if (errBody?.error?.message) {
-        errorDetail = errBody.error.message;
-      }
-    } catch {
-      // 保持默认状态码描述
-    }
-    throw new Error(errorDetail);
-  }
+  if (!response.ok) throw await responseError(response);
 
   if (!response.body) {
     throw new Error('当前环境不支持流式响应读取');
@@ -132,7 +118,7 @@ async function requestSse<T>(
     if (!rawJson || rawJson === '[DONE]') return;
     const parsed = JSON.parse(rawJson) as SseServerFrame<T>;
     if (parsed.type === 'error') {
-      throw new Error(parsed.error?.message || '流式生成请求失败');
+      throw new ApiRequestError(parsed.error?.message || '流式生成请求失败', parsed.error?.code);
     }
     if (parsed.type === 'done') {
       donePayload = parsed.data;
@@ -419,7 +405,8 @@ export const api = {
   async streamImportAudio(
     file: Blob,
     options: { fileName: string; title?: string; folderId?: string | null },
-    onProgress?: (progress: AudioImportProgress) => void
+    onProgress?: (progress: AudioImportProgress) => void,
+    onOpenCodeRequired?: () => void
   ): Promise<SessionWorkspacePayload> {
     if (IS_MOCK_MODE) {
       return mockAdapter.streamImportAudio(file, options, onProgress);
@@ -473,6 +460,8 @@ export const api = {
           totalBytes: parsed.totalBytes,
           percent: parsed.percent,
         });
+      } else if (parsed.type === 'opencode-required') {
+        onOpenCodeRequired?.();
       } else if (parsed.type === 'done') {
         donePayload = parsed.data;
       }
@@ -641,6 +630,13 @@ export const api = {
     return requestJson<void>('/addons/builtin-free-asr/download', {
       method: 'POST',
       body: JSON.stringify({ confirmed: true }),
+    });
+  },
+
+  decideOpenCodeDownload(confirmed: boolean): Promise<void> {
+    return requestJson<void>('/addons/opencode/download', {
+      method: 'POST',
+      body: JSON.stringify({ confirmed }),
     });
   },
 

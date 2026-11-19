@@ -15,7 +15,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { useSmoothStream } from '../../hooks/useSmoothStream';
-import { api } from '../../services/api';
+import { AddonDownloadCancelled, api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type {
   FlashcardItem,
@@ -153,6 +153,7 @@ export const SessionNotesExportModal: React.FC = () => {
       });
       setLocalNote(saved);
     } catch (err) {
+      if (err instanceof AddonDownloadCancelled) return;
       showNotice(
         'error',
         err instanceof Error ? err.message : '生成全课精编笔记失败'
@@ -184,6 +185,7 @@ export const SessionNotesExportModal: React.FC = () => {
       setCardIndex(0);
       setFlipped(false);
     } catch (err) {
+      if (err instanceof AddonDownloadCancelled) return;
       showNotice(
         'error',
         err instanceof Error ? err.message : '生成巩固自测闪卡失败'
