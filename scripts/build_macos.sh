@@ -107,6 +107,7 @@ MAC_DIST="$ROOT/build/pyinstaller-macos/dist"
   --hidden-import "websockets.legacy" \
   --hidden-import "websockets.legacy.server" \
   --hidden-import "websockets.legacy.client" \
+  --collect-data "certifi" \
   --collect-data "tzdata" \
   --collect-data "webview" \
   --exclude-module "pygame" \
@@ -143,6 +144,7 @@ data["CFBundleShortVersionString"] = "0.1.1"
 data["CFBundleVersion"] = "0.1.1"
 data["LSMinimumSystemVersion"] = "13.0"
 data["NSHighResolutionCapable"] = True
+data["NSAppTransportSecurity"] = {"NSAllowsLocalNetworking": True}
 data["NSMicrophoneUsageDescription"] = "知聆课堂需要访问麦克风以进行课堂实时语音转写与双讲拾音。"
 data["NSScreenCaptureUsageDescription"] = "知聆课堂需要屏幕与系统音频录制权限，以实现免虚拟声卡的网课内录与一键抓拍黑板画面。"
 
@@ -165,6 +167,9 @@ if dist_index is None:
     sys.exit("应用包缺少前端静态产物 dist/index.html")
 if audio_helper is None:
     sys.exit("应用包缺少 macOS 系统内录助手 bin/ZhilingAudioCapture")
+cacert = next((root / "certifi/cacert.pem" for root in roots if (root / "certifi/cacert.pem").is_file()), None)
+if cacert is None:
+    sys.exit("应用包缺少 TLS 根证书 certifi/cacert.pem")
 dylib = next((root / "asr/libopus.dylib" for root in roots if (root / "asr/libopus.dylib").is_file()), None)
 notice = next((root / "licenses/opus/COPYING" for root in roots if (root / "licenses/opus/COPYING").is_file()), None)
 if dylib is None or notice is None or notice.read_bytes() != Path(sys.argv[2]).read_bytes():

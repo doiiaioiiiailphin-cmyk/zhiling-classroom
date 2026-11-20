@@ -67,6 +67,7 @@ python -m PyInstaller `
     --exclude-module "doubaoime_asr" `
     --hidden-import "cffi" `
     --hidden-import "_cffi_backend" `
+    --hidden-import "greenlet" `
     --hidden-import "aiosqlite" `
     --hidden-import "sqlalchemy.dialects.sqlite.aiosqlite" `
     --hidden-import "uvicorn.logging" `

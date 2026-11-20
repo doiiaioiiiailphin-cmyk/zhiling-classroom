@@ -1,7 +1,11 @@
 import asyncio
 import json
+import logging
 import math
+import os
+from pathlib import Path
 import re
+import ssl
 import sys
 from abc import ABC, abstractmethod
 from array import array
@@ -16,8 +20,25 @@ from ...errors import AppError
 from ...schemas import Language, SpeakerMode
 from ..http import UpstreamRejected, endpoint, invalid_response
 
+logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000
 BYTES_PER_MS = SAMPLE_RATE * 2 // 1000
+
+
+def _wss_ssl_context() -> ssl.SSLContext:
+    """为 wss:// 构造带可靠根证书的 SSLContext（兼容 macOS 打包版 Python 无系统 OpenSSL CA 目录的问题）。"""
+    env_ca = os.environ.get("SSL_CERT_FILE")
+    if env_ca and Path(env_ca).is_file():
+        return ssl.create_default_context(cafile=env_ca)
+    try:
+        import certifi  # type: ignore
+
+        ca_file = certifi.where()
+        if ca_file and Path(ca_file).is_file():
+            return ssl.create_default_context(cafile=ca_file)
+    except Exception:
+        pass
+    return ssl.create_default_context()
 
 
 def pcm_samples(pcm: bytes) -> array:
@@ -153,16 +174,25 @@ class SocketASR(ASRStreamAdapter):
 
     async def open(self, url: str, headers: dict[str, str] | None = None):
         url = endpoint(url, {"ws", "wss"})
+        connect_kwargs: dict[str, object] = {
+            "extra_headers": headers,
+            "open_timeout": 8,
+            "close_timeout": 1,
+            "max_size": 2**20,
+            "max_queue": 32,
+            "ping_interval": 20,
+            "ping_timeout": 15,
+        }
+        if url.startswith("wss://"):
+            connect_kwargs["ssl"] = _wss_ssl_context()
         try:
-            self.socket = await DirectConnect(
-                url, extra_headers=headers, open_timeout=8, close_timeout=1, max_size=2**20,
-                max_queue=32, ping_interval=20, ping_timeout=15,
-            )
+            self.socket = await DirectConnect(url, **connect_kwargs)
         except InvalidStatusCode as error:
             raise UpstreamRejected(error.status_code) from None
         except TimeoutError:
             raise AppError(502, "ASR_TIMEOUT", "语音供应商连接超时") from None
-        except (OSError, WebSocketException, ValueError):
+        except (OSError, WebSocketException, ValueError) as error:
+            logger.warning("ASR websocket connection failed: %s: %s", type(error).__name__, error)
             raise AppError(502, "ASR_UNREACHABLE", "无法连接语音供应商") from None
 
     async def send(self, message: str | bytes):

@@ -30,6 +30,25 @@ if sys.platform == "win32":
     os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0")
 
 
+def _configure_tls_ca_bundle() -> None:
+    """在 macOS / 打包版 Python 环境下绑定 certifi 根证书，避免 OpenSSL 找不到系统 CA 导致 wss:// 与 HTTPS 校验失败。"""
+    existing = os.environ.get("SSL_CERT_FILE")
+    if existing and Path(existing).is_file():
+        return
+    try:
+        import certifi  # type: ignore
+
+        ca_path = Path(certifi.where())
+        if ca_path.is_file():
+            os.environ["SSL_CERT_FILE"] = str(ca_path)
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", str(ca_path))
+    except Exception:
+        pass
+
+
+_configure_tls_ca_bundle()
+
+
 def _resolve_app_home() -> Path:
     if sys.platform == "darwin":
         from desktop_macos import resolve_macos_app_home

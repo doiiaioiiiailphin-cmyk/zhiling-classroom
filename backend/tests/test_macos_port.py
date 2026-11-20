@@ -108,6 +108,13 @@ class MacOSPortTests(unittest.TestCase):
                 dist_dir, _, _ = desktop_shell._resolve_runtime_paths(root / "home")
                 self.assertEqual(dist_dir, dist_index.parent.resolve())
 
+    def test_wss_ssl_context_loads_ca_bundle(self):
+        from backend.app.providers.asr.base import _wss_ssl_context
+
+        ctx = _wss_ssl_context()
+        stats = ctx.cert_store_stats()
+        self.assertGreater(stats.get("x509_ca", 0), 0)
+
     def test_capture_macos_desktop_png_success_and_permission_error(self):
         sample_png = encode_rgb_to_png(b"\x10\x20\x30" * (4 * 3), 4, 3)
 
