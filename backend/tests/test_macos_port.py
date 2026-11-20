@@ -104,7 +104,7 @@ class MacOSPortTests(unittest.TestCase):
                 patch.object(sys, "executable", str(exe)),
                 patch.object(sys, "_MEIPASS", str(root / "ZhilingClassroom.app" / "Contents" / "Frameworks"), create=True),
             ):
-                self.assertEqual(find_mac_audio_helper(repo_root=root), helper)
+                self.assertEqual(find_mac_audio_helper(repo_root=root), helper.resolve())
                 dist_dir, _, _ = desktop_shell._resolve_runtime_paths(root / "home")
                 self.assertEqual(dist_dir, dist_index.parent.resolve())
 
