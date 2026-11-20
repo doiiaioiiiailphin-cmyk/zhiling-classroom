@@ -1,7 +1,6 @@
 import asyncio
 import ctypes
-from ctypes import HRESULT, POINTER, Structure, byref, c_int, c_longlong, c_short, c_ubyte, c_ulong, c_ushort, c_void_p
-from ctypes.wintypes import DWORD, LPWSTR, UINT, WORD
+from ctypes import POINTER, Structure, byref, c_int, c_longlong, c_short, c_ubyte, c_ulong, c_ushort, c_void_p
 import logging
 import os
 import sys
@@ -22,6 +21,8 @@ LOOPBACK_FRAME_BYTES = LOOPBACK_FRAME_SAMPLES * 2  # 640 bytes
 
 
 if os.name == "nt":
+    from ctypes import HRESULT
+    from ctypes.wintypes import DWORD, LPWSTR, UINT, WORD
     _ole32 = ctypes.WinDLL("ole32")
 
     class _GUID(Structure):
@@ -398,7 +399,17 @@ def _enqueue_nonblocking(queue: asyncio.Queue, item: bytes | Exception | None):
 
 
 class WindowsAudioBackend:
+    """跨平台原生音频后端门面（Windows 走 WASAPI Loopback，macOS 委托 ScreenCaptureKit）。"""
+
+    def __init__(self):
+        self._mac_backend = None
+        if sys.platform == "darwin":
+            from .mac_audio import MacAudioBackend
+            self._mac_backend = MacAudioBackend()
+
     async def list_devices(self) -> NativeAudioDevices:
+        if self._mac_backend is not None:
+            return await self._mac_backend.list_devices()
         if os.name != "nt":
             return NativeAudioDevices(
                 platform=sys.platform, wasapi_supported=False, inputs=[], loopbacks=[],
@@ -406,11 +417,14 @@ class WindowsAudioBackend:
         return await asyncio.to_thread(_enumerate_windows_devices)
 
     async def serve_loopback(self, websocket: WebSocket, device_id: str = "default"):
+        if self._mac_backend is not None:
+            await self._mac_backend.serve_loopback(websocket, device_id)
+            return
         await websocket.accept()
         if os.name != "nt":
             await websocket.send_json({
                 "type": "error",
-                "payload": {"code": "WASAPI_UNSUPPORTED", "message": "当前操作系统不支持 WASAPI 内录"},
+                "payload": {"code": "WASAPI_UNSUPPORTED", "message": "当前操作系统不支持原生系统内录"},
             })
             await websocket.close(code=1008)
             return

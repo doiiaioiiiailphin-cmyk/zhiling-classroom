@@ -327,6 +327,94 @@ class Phases1To5BackendTests(unittest.TestCase):
 
         asyncio.run(check_provider())
 
+    def test_phase6_opencode_download_stream_and_diarization_suppression(self):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        from backend.app.providers.asr.base import ASRStreamAdapter
+
+        with self.make_client() as client:
+            bridge = client.app.state.opencode
+
+            async def fake_install(http_client, target, artifact, *, on_progress=None):
+                if on_progress is not None:
+                    total = artifact.archive_bytes
+                    await on_progress("connecting", 0, total, 0)
+                    await on_progress("downloading", (total + 1) // 2, total, 50)
+                    await on_progress("verifying", total, total, 100)
+
+            with (
+                patch.object(bridge, "needs_download", return_value=True),
+                patch.object(bridge, "start", new=AsyncMock()),
+                patch("backend.app.providers.opencode_bridge.install_cli", new=fake_install),
+            ):
+                path = "/api/v1/addons/opencode/download/stream"
+                self.assertEqual(client.post(path).status_code, 400)
+                self.assertEqual(client.post(path, json={"confirmed": False}).status_code, 400)
+                bridge.start.assert_not_awaited()
+                resp = client.post(path, json={"confirmed": True})
+                self.assertEqual(resp.status_code, 200)
+                frames = [
+                    json.loads(line[5:].strip())
+                    for line in resp.text.splitlines()
+                    if line.startswith("data:")
+                ]
+                stages = [f["stage"] for f in frames if f.get("type") == "progress"]
+                self.assertEqual(stages, ["connecting", "downloading", "verifying", "starting", "ready"])
+                self.assertEqual(frames[-1], {"type": "done", "data": True})
+                self.assertTrue(bridge.automatic_download_decision.is_set())
+
+            # Verify builtin-free-asr does not spam ASR_DIARIZATION_UNAVAILABLE on recording start
+            class SilentSingleChannelAdapter(ASRStreamAdapter):
+                supports_diarization = False
+
+                def __init__(self):
+                    self.finished = asyncio.Event()
+
+                async def start(self):
+                    pass
+
+                async def send_audio(self, pcm: bytes):
+                    pass
+
+                async def finish(self):
+                    self.finished.set()
+
+                async def results(self):
+                    await self.finished.wait()
+                    if False:
+                        yield None
+
+                async def close(self):
+                    pass
+
+            async def receive(socket):
+                async with asyncio.timeout(5):
+                    message = await socket._send_rx.receive()
+                return json.loads(message["text"])
+
+            settings = client.get("/api/v1/settings").json()["data"]
+            settings["enableSpeakerDiarization"] = True
+            settings["enableDualChannelSpeakerSplit"] = False
+            self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
+            sid = client.post("/api/v1/sessions", json={}).json()["data"]["session"]["id"]
+            with (
+                patch.object(client.app.state.builtin_asr, "ready", return_value=True),
+                patch("backend.app.services.stream.build_adapter", return_value=SilentSingleChannelAdapter()),
+            ):
+                with client.websocket_connect(f"ws://localhost/ws/v1/sessions/{sid}/stream") as ws:
+                    ws.send_json({
+                        "type": "recording.start",
+                        "payload": {"sampleRate": 16000, "channels": 1, "encoding": "pcm_s16le"},
+                    })
+                    started = ws.portal.call(receive, ws)
+                    self.assertEqual(started["type"], "session.duration", started)
+                    ws.send_bytes(b"\x00" * 3200)
+                    ws.send_json({"type": "recording.stop"})
+                    stopped = ws.portal.call(receive, ws)
+                    self.assertEqual(stopped["type"], "session.duration", stopped)
+                    workspace = client.get(f"/api/v1/sessions/{sid}/workspace").json()["data"]
+                    self.assertEqual(workspace["session"]["status"], "paused")
+
 
 if __name__ == "__main__":
     unittest.main()

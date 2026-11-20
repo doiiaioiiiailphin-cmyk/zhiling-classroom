@@ -1,0 +1,60 @@
+name: Build macOS Desktop App
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Target Mac architecture
+        type: choice
+        options: [arm64, x86_64]
+        default: arm64
+      verify_addons:
+        description: Verify the pinned add-ons with real downloads
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    runs-on: ${{ inputs.architecture == 'x86_64' && 'macos-15-intel' || 'macos-15' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install backend test dependencies
+        run: python3 -m pip install -r backend/requirements-runtime.txt
+
+      - name: Run frontend typecheck & backend unit tests
+        run: |
+          npm run typecheck
+          python3 -X utf8 -m unittest discover -s backend/tests -v
+
+      - name: Build ZhilingClassroom.app and .dmg
+        run: bash scripts/build_macos.sh
+
+      - name: Verify desktop add-ons
+        if: ${{ inputs.verify_addons }}
+        run: python3 -X utf8 scripts/verify_desktop_addons.py
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhilingClassroom-macOS-${{ runner.arch == 'X64' && 'x86_64' || 'arm64' }}
+          path: release/ZhilingClassroom-macOS-*.dmg
+          retention-days: 14

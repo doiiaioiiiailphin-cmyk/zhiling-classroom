@@ -317,6 +317,16 @@ async def download_opencode(request: Request, confirmed: Annotated[StrictBool, B
     return Response(status_code=204)
 
 
+@router.post("/addons/opencode/download/stream")
+async def download_opencode_stream(
+    request: Request, confirmed: Annotated[StrictBool, Body(embed=True)],
+) -> StreamingResponse:
+    if not confirmed:
+        raise AppError(400, "OPENCODE_DOWNLOAD_NOT_CONFIRMED", "请先确认下载 OpenCode 组件")
+    events = request.app.state.opencode.download_stream()
+    return StreamingResponse(sse_encode(events), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 @router.post("/addons/builtin-free-asr/download", status_code=204)
 async def download_builtin_asr(
     request: Request, confirmed: Annotated[Literal[True], Body(embed=True)],

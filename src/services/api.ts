@@ -10,6 +10,7 @@ import type {
   FlashcardItem,
   FolderItem,
   NativeAudioDevices,
+  OpenCodeDownloadProgress,
   SearchHitItem,
   SegmentDetailedExplanation,
   SessionAttachmentItem,
@@ -72,7 +73,7 @@ type SseServerFrame<T> =
   | { type: 'status'; stage: 'generating' }
   | {
       type: 'progress';
-      stage: Aec3DownloadProgress['stage'] | AudioImportProgress['stage'];
+      stage: OpenCodeDownloadProgress['stage'] | AudioImportProgress['stage'];
       downloadedBytes: number;
       totalBytes: number;
       percent: number;
@@ -638,6 +639,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ confirmed }),
     });
+  },
+
+  streamDownloadOpenCode(
+    onProgress?: (progress: OpenCodeDownloadProgress) => void
+  ): Promise<boolean> {
+    return requestSse<boolean>(
+      '/addons/opencode/download/stream',
+      { confirmed: true },
+      (frame) => {
+        if (frame.type === 'progress') {
+          onProgress?.({
+            stage: frame.stage as OpenCodeDownloadProgress['stage'],
+            downloadedBytes: frame.downloadedBytes,
+            totalBytes: frame.totalBytes,
+            percent: frame.percent,
+          });
+        }
+      }
+    );
   },
 
   // ---------------- WebRTC AEC3 组件与系统音频源 ----------------

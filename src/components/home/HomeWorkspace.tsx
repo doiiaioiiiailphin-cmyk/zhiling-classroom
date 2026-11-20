@@ -32,6 +32,7 @@ import { WindowControls } from '../ui/WindowControls';
 import { api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type { ClassSessionCard, FolderItem, SearchHitItem } from '../../types/domain';
+import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
 import { formatDuration, formatShortDate } from '../../utils/format';
 
 const HIT_KIND_LABELS: Record<SearchHitItem['kind'], string> = {
@@ -342,22 +343,37 @@ export const HomeWorkspace: React.FC = () => {
     [startNewClassroom, setImportAudioModalOpen, toggleMiniOverlayWindow, setSettingsOpen]
   );
 
+  const isMac = isMacPlatform();
+
+  const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    if (e.target !== e.currentTarget) return;
+    const bridge = getDesktopBridge();
+    if (bridge?.toggle_maximize_window) {
+      void bridge.toggle_maximize_window().then((nextMax) => {
+        setWindowMaximized(Boolean(nextMax));
+      });
+      return;
+    }
+    setWindowMaximized(!windowMaximized);
+  };
+
   return (
     <div
       className="h-full flex flex-col bg-[#F5F6F7] text-[#1F2329] select-none overflow-hidden"
       onContextMenu={openCanvasContextMenu}
     >
-      {/* 顶部导航栏：飞书文档风格，支持无边框拖拽移动 */}
+      {/* 顶部导航栏：macOS 风格左置红黄绿交通灯 / Windows 风格右置三键，支持无边框拖拽移动 */}
       <header
-        className="h-16 bg-white border-b border-[#DEE0E3] pl-8 pr-4 flex items-center justify-between shrink-0 pywebview-drag-region"
+        className={`border-b border-[#DEE0E3] flex items-center justify-between shrink-0 pywebview-drag-region ${
+          isMac
+            ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
+            : 'h-16 bg-white pl-8 pr-4'
+        }`}
         onContextMenu={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => {
-          if (e.target === e.currentTarget) {
-            setWindowMaximized(!windowMaximized);
-          }
-        }}
+        onDoubleClick={handleHeaderDoubleClick}
       >
         <div className="flex items-center gap-3">
+          {isMac && <WindowControls />}
           <button
             type="button"
             onClick={() => setCurrentFolderId(null)}
@@ -405,7 +421,7 @@ export const HomeWorkspace: React.FC = () => {
             title="工作台导航"
           />
 
-          <WindowControls />
+          {!isMac && <WindowControls />}
         </div>
       </header>
 

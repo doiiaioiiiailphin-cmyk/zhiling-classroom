@@ -1,7 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Copy, Minus, Square, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { getDesktopBridge } from '../../utils/desktopBridge';
+import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
 import { Tooltip } from './Tooltip';
 
 export const WindowControls: React.FC = React.memo(() => {
@@ -13,6 +13,11 @@ export const WindowControls: React.FC = React.memo(() => {
   const showNotice = useAppStore((s) => s.showNotice);
 
   const busyRef = useRef(false);
+  const isMac = isMacPlatform();
+  const [windowFocused, setWindowFocused] = useState(
+    typeof document === 'undefined' ? true : document.hasFocus()
+  );
+  const [groupHovered, setGroupHovered] = useState(false);
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -20,8 +25,16 @@ export const WindowControls: React.FC = React.memo(() => {
         setWindowMaximized(Boolean(document.fullscreenElement));
       }
     };
+    const onFocus = () => setWindowFocused(true);
+    const onBlur = () => setWindowFocused(false);
     document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [setWindowMaximized]);
 
   const handleMinimize = async () => {
@@ -39,7 +52,10 @@ export const WindowControls: React.FC = React.memo(() => {
       }, 165);
       return;
     }
-    showNotice('info', '桌面端打包后点击将直接最小化至任务栏');
+    showNotice(
+      'info',
+      isMac ? '桌面端打包后点击将最小化至程序坞（Dock）' : '桌面端打包后点击将直接最小化至任务栏'
+    );
   };
 
   const handleToggleMaximize = async () => {
@@ -78,6 +94,114 @@ export const WindowControls: React.FC = React.memo(() => {
     window.close();
     showNotice('info', '已安全保存当前课堂状态，桌面端下将直接退出应用窗口');
   };
+
+  if (isMac) {
+    const activeColors = windowFocused || groupHovered;
+    return (
+      <div
+        className="flex items-center gap-2 pr-3 mr-1 border-r border-[#ECEEF2] app-no-drag shrink-0 select-none"
+        onMouseEnter={() => setGroupHovered(true)}
+        onMouseLeave={() => setGroupHovered(false)}
+      >
+        <Tooltip content="关闭窗口" placement="bottom">
+          <button
+            type="button"
+            aria-label="关闭窗口"
+            onClick={() => void handleClose()}
+            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all duration-150 cursor-pointer active:scale-90 border ${
+              activeColors
+                ? 'bg-[#FF5F57] border-[#E0443E] shadow-[inset_0_0_0_0.5px_rgba(0,0,0,0.08)]'
+                : 'bg-[#D8D9DC] border-[#C9CBD0]'
+            }`}
+          >
+            <svg
+              viewBox="0 0 10 10"
+              className={`w-2 h-2 transition-opacity duration-100 ${
+                groupHovered ? 'opacity-100' : 'opacity-0'
+              }`}
+              aria-hidden="true"
+            >
+              <path
+                d="M2.4 2.4L7.6 7.6M7.6 2.4L2.4 7.6"
+                stroke="#4D0000"
+                strokeWidth="1.45"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </Tooltip>
+
+        <Tooltip content="最小化" placement="bottom">
+          <button
+            type="button"
+            aria-label="最小化窗口"
+            onClick={() => void handleMinimize()}
+            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all duration-150 cursor-pointer active:scale-90 border ${
+              activeColors
+                ? 'bg-[#FEBC2E] border-[#DEA123] shadow-[inset_0_0_0_0.5px_rgba(0,0,0,0.08)]'
+                : 'bg-[#D8D9DC] border-[#C9CBD0]'
+            }`}
+          >
+            <svg
+              viewBox="0 0 10 10"
+              className={`w-2 h-2 transition-opacity duration-100 ${
+                groupHovered ? 'opacity-100' : 'opacity-0'
+              }`}
+              aria-hidden="true"
+            >
+              <path
+                d="M2 5H8"
+                stroke="#6E4400"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        </Tooltip>
+
+        <Tooltip content={windowMaximized ? '还原窗口尺寸' : '缩放铺满工作区'} placement="bottom">
+          <button
+            type="button"
+            aria-label={windowMaximized ? '还原窗口' : '缩放窗口'}
+            onClick={() => void handleToggleMaximize()}
+            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all duration-150 cursor-pointer active:scale-90 border ${
+              activeColors
+                ? 'bg-[#28C840] border-[#1AAB29] shadow-[inset_0_0_0_0.5px_rgba(0,0,0,0.08)]'
+                : 'bg-[#D8D9DC] border-[#C9CBD0]'
+            }`}
+          >
+            <svg
+              viewBox="0 0 10 10"
+              className={`w-2 h-2 transition-opacity duration-100 ${
+                groupHovered ? 'opacity-100' : 'opacity-0'
+              }`}
+              aria-hidden="true"
+            >
+              {windowMaximized ? (
+                <path
+                  d="M2.2 4.6H5.4V7.8M7.8 5.4H4.6V2.2"
+                  stroke="#004D00"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                />
+              ) : (
+                <path
+                  d="M2.3 5.5V2.3H5.5M7.7 4.5V7.7H4.5"
+                  stroke="#004D00"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  fill="none"
+                />
+              )}
+            </svg>
+          </button>
+        </Tooltip>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center pl-2 ml-1 border-l border-[#ECEEF2] gap-1 app-no-drag shrink-0">

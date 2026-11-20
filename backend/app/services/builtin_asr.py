@@ -1,4 +1,6 @@
 import asyncio
+import ctypes
+import ctypes.util
 import importlib
 import logging
 import shutil
@@ -15,6 +17,8 @@ import httpx
 
 from ..errors import AppError
 from ..providers.asr.builtin_shell import _use_bundled_opus
+from ..providers.platform_hooks import platform_arch_tag
+from .builtin_asr_macos import MACOS_MINIAUDIO, MACOS_PROTOBUF
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +136,11 @@ def _install_opuslib(data: bytes, target: Path) -> None:
 class BuiltinAsrRuntime:
     def __init__(self, root: Path):
         tag = sys.implementation.cache_tag
-        compatible = sysconfig.get_platform() == "win-amd64" and not sysconfig.get_config_var("Py_GIL_DISABLED")
-        self.audio_wheel = _MINIAUDIO.get(tag) if compatible else None
-        fingerprint = sha256(repr((_SOURCE_SHA256, self.audio_wheel, _WHEELS, _OPUSLIB)).encode()).hexdigest()[:16]
+        platform_tag = platform_arch_tag()
+        miniaudio = _MINIAUDIO if platform_tag == "win-amd64" else MACOS_MINIAUDIO.get(platform_tag, {})
+        self.audio_wheel = miniaudio.get(tag) if not sysconfig.get_config_var("Py_GIL_DISABLED") else None
+        self.wheels = (MACOS_PROTOBUF, *_WHEELS[1:]) if platform_tag in MACOS_MINIAUDIO else _WHEELS
+        fingerprint = sha256(repr((_SOURCE_SHA256, self.audio_wheel, self.wheels, _OPUSLIB)).encode()).hexdigest()[:16]
         self.cache_dir = root / f"{tag}-{fingerprint}"
         self._lock = asyncio.Lock()
         self._active = False
@@ -180,12 +186,21 @@ class BuiltinAsrRuntime:
                 return
             if self.audio_wheel is None:
                 raise AppError(400, "ASR_ADDON_UNSUPPORTED", "当前系统需要在 Python 环境中安装语音依赖")
+            if sys.platform == "darwin":
+                _use_bundled_opus()
+                library = ctypes.util.find_library("opus")
+                try:
+                    if not library:
+                        raise OSError("libopus.dylib not found")
+                    ctypes.CDLL(library)
+                except OSError as error:
+                    raise AppError(503, "ASR_OPUS_UNAVAILABLE", "无法加载 Opus，请检查 Mac 应用包是否完整") from error
 
             # Mark a cache as ready only after extraction and a successful import.
             source, opuslib, *wheels = await asyncio.gather(
                 _fetch(client, _SOURCE_URL),
                 _pypi_file(client, *_OPUSLIB),
-                *(_pypi_file(client, *entry) for entry in (*_WHEELS, self.audio_wheel)),
+                *(_pypi_file(client, *entry) for entry in (*self.wheels, self.audio_wheel)),
                 return_exceptions=True,
             )
             if isinstance(source, BaseException):

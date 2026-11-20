@@ -11,7 +11,6 @@
   4. 自动放行本地回环麦克风与剪贴板权限，开启 ALLOW_DOWNLOADS 原生「另存为」导出对话框。
 """
 import ctypes
-from ctypes import wintypes
 import io
 import json
 import multiprocessing
@@ -25,11 +24,16 @@ import time
 import urllib.request
 import webbrowser
 
-# 必须在 WebView2 初始化前设置默认背景色为全透明 (Alpha=0)，彻底消除启动白屏闪烁与底色遮挡
-os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0")
+if sys.platform == "win32":
+    from ctypes import wintypes
+    # 必须在 WebView2 初始化前设置默认背景色为全透明 (Alpha=0)，彻底消除启动白屏闪烁与底色遮挡
+    os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0")
 
 
 def _resolve_app_home() -> Path:
+    if sys.platform == "darwin":
+        from desktop_macos import resolve_macos_app_home
+        return resolve_macos_app_home()
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     home = Path(base) / "ZhilingClassroom"
     home.mkdir(parents=True, exist_ok=True)
@@ -66,7 +70,15 @@ def _resolve_runtime_paths(app_home: Path) -> tuple[Path, Path, Path | None]:
     elif meipass and (meipass / "dist" / "index.html").is_file():
         dist_dir = (meipass / "dist").resolve()
     else:
-        dist_dir = (repo_root / "dist").resolve()
+        bundle_dist: Path | None = None
+        if frozen:
+            contents = Path(sys.executable).resolve().parent.parent
+            for sub in ("Frameworks", "Resources", "MacOS"):
+                candidate = contents / sub / "dist"
+                if (candidate / "index.html").is_file():
+                    bundle_dist = candidate.resolve()
+                    break
+        dist_dir = bundle_dist if bundle_dist is not None else (repo_root / "dist").resolve()
 
     env_data = os.environ.get("ZHILING_DATA_DIR")
     if env_data:
@@ -126,6 +138,10 @@ def wait_server_ready(
 
 
 def _show_error_dialog(message: str) -> None:
+    if sys.platform == "darwin":
+        from desktop_macos import show_macos_error_dialog
+        show_macos_error_dialog(message)
+        return
     if sys.platform != "win32":
         return
     try:
@@ -136,47 +152,43 @@ def _show_error_dialog(message: str) -> None:
 
 # ==================== Win32 / DWM 逐像素真透明与无边框物理定位支持 ====================
 
-class _MONITORINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", wintypes.RECT),
-        ("rcWork", wintypes.RECT),
-        ("dwFlags", wintypes.DWORD),
-    ]
-
-
-class _MARGINS(ctypes.Structure):
-    _fields_ = [
-        ("cxLeftWidth", ctypes.c_int),
-        ("cxRightWidth", ctypes.c_int),
-        ("cyTopHeight", ctypes.c_int),
-        ("cyBottomHeight", ctypes.c_int),
-    ]
-
-
-class _DWM_BLURBEHIND(ctypes.Structure):
-    _fields_ = [
-        ("dwFlags", wintypes.DWORD),
-        ("fEnable", wintypes.BOOL),
-        ("hRgnBlur", wintypes.HRGN),
-        ("fTransitionOnMaximized", wintypes.BOOL),
-    ]
-
-
-class _PAINTSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("hdc", wintypes.HDC),
-        ("fErase", wintypes.BOOL),
-        ("rcPaint", wintypes.RECT),
-        ("fRestore", wintypes.BOOL),
-        ("fIncUpdate", wintypes.BOOL),
-        ("rgbReserved", ctypes.c_byte * 32),
-    ]
-
-
 _HOOKED_WNDPROCS: dict[int, object] = {}
 
 if sys.platform == "win32":
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    class _MARGINS(ctypes.Structure):
+        _fields_ = [
+            ("cxLeftWidth", ctypes.c_int),
+            ("cxRightWidth", ctypes.c_int),
+            ("cyTopHeight", ctypes.c_int),
+            ("cyBottomHeight", ctypes.c_int),
+        ]
+
+    class _DWM_BLURBEHIND(ctypes.Structure):
+        _fields_ = [
+            ("dwFlags", wintypes.DWORD),
+            ("fEnable", wintypes.BOOL),
+            ("hRgnBlur", wintypes.HRGN),
+            ("fTransitionOnMaximized", wintypes.BOOL),
+        ]
+
+    class _PAINTSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ("hdc", wintypes.HDC),
+            ("fErase", wintypes.BOOL),
+            ("rcPaint", wintypes.RECT),
+            ("fRestore", wintypes.BOOL),
+            ("fIncUpdate", wintypes.BOOL),
+            ("rgbReserved", ctypes.c_byte * 32),
+        ]
+
     _WNDPROC_TYPE = ctypes.WINFUNCTYPE(
         ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
     )
@@ -470,9 +482,10 @@ def main() -> None:
             _show_error_dialog(msg)
         sys.exit(msg)
 
+    platform_tag = "macos" if sys.platform == "darwin" else "windows"
     base_url = f"http://127.0.0.1:{port}" if (dist_dir / "index.html").is_file() else "http://localhost:5173"
-    main_url = f"{base_url}/?shell=desktop"
-    mini_url = f"{base_url}/?mode=mini&shell=desktop"
+    main_url = f"{base_url}/?shell=desktop&platform={platform_tag}"
+    mini_url = f"{base_url}/?mode=mini&shell=desktop&platform={platform_tag}"
 
     try:
         import webview  # type: ignore
@@ -526,7 +539,11 @@ def main() -> None:
             pass
 
     def configure_native_webview(win_obj, *, is_main: bool) -> dict[str, object]:
-        """在 WinForms UI 线程上开启 DWM 逐像素真透明合成、无边框圆角保护与权限放行。"""
+        """按平台开启原生逐像素真透明合成、无边框圆角保护与权限放行。"""
+        if sys.platform == "darwin":
+            from desktop_macos import configure_macos_window
+            return configure_macos_window(win_obj, is_main=is_main, is_self_test=is_self_test)
+
         diag: dict[str, object] = {"configured": False, "alphaComposited": False}
         native = getattr(win_obj, "native", None)
         if native is None:
@@ -606,6 +623,10 @@ def main() -> None:
 
     class DesktopBridge:
         def focus_main_window(self) -> None:
+            if sys.platform == "darwin":
+                from desktop_macos import focus_macos_window
+                focus_macos_window(windows.get("main"))
+                return
             hwnd = get_hwnd("main")
             if hwnd:
                 user32 = ctypes.windll.user32
@@ -623,6 +644,9 @@ def main() -> None:
             return bool(windows.get("maximized"))
 
         def toggle_maximize_window(self) -> bool:
+            if sys.platform == "darwin":
+                from desktop_macos import toggle_macos_zoom
+                return toggle_macos_zoom(windows.get("main"), windows)
             hwnd = get_hwnd("main")
             if not hwnd:
                 return False
@@ -669,7 +693,10 @@ def main() -> None:
                     pass
 
         def start_native_drag(self, target: str) -> bool:
-            """启动 500Hz Win32 物理像素级窗口跟随循环，支持最大化向下拖出自动还原与顶端贴边最大化。"""
+            """启动原生窗口拖拽（Windows 走 500Hz Win32 循环，macOS 走 Cocoa performWindowDragWithEvent_）。"""
+            if sys.platform == "darwin":
+                from desktop_macos import start_macos_drag
+                return start_macos_drag(windows.get(target), windows, is_main=(target == "main"))
             hwnd = get_hwnd(target)
             if not hwnd:
                 return False
@@ -732,9 +759,18 @@ def main() -> None:
             return True
 
         def start_native_resize(self, target: str, mode: str) -> bool:
-            """启动 500Hz Win32 物理像素级八向边缘自由缩放循环。"""
+            """启动原生八向边缘自由缩放。"""
             if target == "main" and windows.get("maximized"):
                 return False
+            if sys.platform == "darwin":
+                from desktop_macos import start_macos_resize
+                return start_macos_resize(
+                    windows.get(target),
+                    mode,
+                    windows,
+                    min_w=1024 if target == "main" else 360,
+                    min_h=680 if target == "main" else 130,
+                )
             hwnd = get_hwnd(target)
             if not hwnd:
                 return False
@@ -968,16 +1004,17 @@ def main() -> None:
             print("SELF_TEST_REPORT:", text)
             bridge.close_window()
 
-    webview_storage = app_home / "webview2"
+    webview_storage = app_home / ("wkwebview" if sys.platform == "darwin" else "webview2")
     webview_storage.mkdir(parents=True, exist_ok=True)
+    gui_backend = "cocoa" if sys.platform == "darwin" else "edgechromium"
 
     try:
         webview.start(
             self_test_worker if is_self_test else None,
-            gui="edgechromium",
+            gui=gui_backend,
             private_mode=False,
             storage_path=str(webview_storage),
-            icon=str(icon_path) if icon_path else None,
+            icon=str(icon_path) if (icon_path and sys.platform != "darwin") else None,
         )
     finally:
         server.should_exit = True

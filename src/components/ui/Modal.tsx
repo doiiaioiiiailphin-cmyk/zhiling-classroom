@@ -9,6 +9,7 @@ interface ModalProps {
   title: string;
   widthClass?: string;
   layerClass?: string;
+  closable?: boolean;
   children: React.ReactNode;
 }
 
@@ -21,6 +22,7 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   widthClass = 'max-w-3xl',
   layerClass = 'z-50',
+  closable = true,
   children,
 }) => {
   const modalId = useId();
@@ -34,7 +36,7 @@ export const Modal: React.FC<ModalProps> = ({
       const topModalId = activeModalStack[activeModalStack.length - 1];
       if (e.key === 'Escape' && topModalId === modalId) {
         e.stopPropagation();
-        onClose();
+        if (closable) onClose();
       }
     };
 
@@ -44,7 +46,7 @@ export const Modal: React.FC<ModalProps> = ({
       const idx = activeModalStack.lastIndexOf(modalId);
       if (idx !== -1) activeModalStack.splice(idx, 1);
     };
-  }, [open, onClose, modalId]);
+  }, [open, onClose, modalId, closable]);
 
   if (!shouldRender) return null;
 
@@ -56,7 +58,7 @@ export const Modal: React.FC<ModalProps> = ({
           : 'bg-[#1F2329]/0 opacity-0 pointer-events-none'
       }`}
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && closable) onClose();
       }}
     >
       <div
@@ -68,7 +70,12 @@ export const Modal: React.FC<ModalProps> = ({
       >
         <div className="flex items-center justify-between border-b border-[#ECEEF2] px-6 py-4 shrink-0">
           <h2 className="text-[17px] font-semibold text-[#1F2329]">{title}</h2>
-          <IconButton icon={X} tooltip="关闭" onClick={onClose} />
+          <IconButton
+            icon={X}
+            tooltip={closable ? '关闭' : undefined}
+            disabled={!closable}
+            onClick={onClose}
+          />
         </div>
         <div className="flex-1 overflow-y-auto">{children}</div>
       </div>

@@ -23,7 +23,7 @@ python backend/run.py --with-frontend
 
 ## 供应商接入
 
-文本功能默认走「OpenCode 免费模型」。Windows x64 首次使用时确认下载，应用会获取并校验固定的 OpenCode 2.3.2 CLI，保存在 `%LOCALAPPDATA%\ZhilingClassroom\addons\opencode-free`。下载优先走国内 npm 镜像，后续使用直接加载缓存，并按需启动隔离的本机服务和桥接器。 [OpenCode 2.3.2](https://github.com/anomalyco/opencode/releases/tag/v2.3.2) · [opencode-free-bridge](https://github.com/prestonw/opencode-free-bridge)
+文本功能默认走「OpenCode 免费模型」。Windows x64、Apple Silicon 和 Intel Mac 首次使用时确认下载，应用会获取并校验对应架构的 OpenCode 2.3.2 CLI。Windows 保存在 `%LOCALAPPDATA%\ZhilingClassroom\addons\opencode-free`，macOS 保存在 `~/Library/Application Support/ZhilingClassroom/addons/opencode-free`。下载优先走国内 npm 镜像，后续使用直接加载缓存，并按需启动隔离的本机服务和桥接器。 [OpenCode 2.3.2](https://github.com/anomalyco/opencode/releases/tag/v2.3.2) · [opencode-free-bridge](https://github.com/prestonw/opencode-free-bridge)
 
 在设置中点击刷新可取得当前免费文本模型。也可以把功能模型设为「自动选择免费模型」。长文本一次返回，图片问答可单独选用视觉供应商。
 
@@ -67,3 +67,7 @@ npm run build
 ```
 
 自动化测试使用临时 SQLite、回环 WebSocket 和协议响应样本。FFmpeg 可用时，测试还会生成并解码一段 Opus WebM 音频。真实供应商验收需在设置中填写可用凭据。
+
+## macOS 移植与打包
+
+默认免登录语音、OpenCode 免费模型的 macOS 入口、原生 Opus 打包和真机验收见 [macOS 语音与免费模型交接](../docs/MACOS_PORT_HANDOFF.md)。

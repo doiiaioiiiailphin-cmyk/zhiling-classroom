@@ -14,6 +14,7 @@ import type {
   FlashcardItem,
   FolderItem,
   KnowledgeSegment,
+  OpenCodeDownloadProgress,
   SearchHitItem,
   SegmentDetailedExplanation,
   SessionAttachmentItem,
@@ -169,6 +170,7 @@ interface AppStoreState {
   // 全局设置状态与 WebRTC AEC3 组件状态
   settings: AppSettings | null;
   addonDownload: { addon: DownloadAddon; stage: 'closed' | 'confirm' | 'downloading' };
+  addonDownloadProgress: OpenCodeDownloadProgress | null;
   aec3Addon: Aec3AddonStatus | null;
   aec3Modal: {
     open: boolean;
@@ -296,21 +298,34 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   let checkingBuiltinAsr = false;
   let pendingDownload: {
     addon: DownloadAddon;
+    notifyBackendOnCancel: boolean;
     promise: Promise<boolean>;
     settle: (ready: boolean) => void;
   } | null = null;
   let pendingDualTalkContinuation: (() => Promise<void>) | null = null;
 
-  const askToDownload = (addon: DownloadAddon): Promise<boolean> => {
+  const askToDownload = (
+    addon: DownloadAddon,
+    notifyBackendOnCancel = false
+  ): Promise<boolean> => {
     if (pendingDownload) {
-      return pendingDownload.addon === addon
-        ? pendingDownload.promise
-        : pendingDownload.promise.then(() => askToDownload(addon));
+      if (pendingDownload.addon === addon) {
+        if (notifyBackendOnCancel) {
+          pendingDownload.notifyBackendOnCancel = true;
+        }
+        return pendingDownload.promise;
+      }
+      return pendingDownload.promise.then(() =>
+        askToDownload(addon, notifyBackendOnCancel)
+      );
     }
     let settle!: (ready: boolean) => void;
     const promise = new Promise<boolean>((resolve) => { settle = resolve; });
-    pendingDownload = { addon, promise, settle };
-    set({ addonDownload: { addon, stage: 'confirm' } });
+    pendingDownload = { addon, notifyBackendOnCancel, promise, settle };
+    set({
+      addonDownload: { addon, stage: 'confirm' },
+      addonDownloadProgress: null,
+    });
     void getDesktopBridge()?.focus_main_window?.().catch(() => undefined);
     return promise;
   };
@@ -318,7 +333,10 @@ export const useAppStore = create<AppStoreState>((set, get) => {
   const finishDownloadPrompt = (ready: boolean) => {
     const pending = pendingDownload;
     pendingDownload = null;
-    set((state) => ({ addonDownload: { ...state.addonDownload, stage: 'closed' } }));
+    set((state) => ({
+      addonDownload: { ...state.addonDownload, stage: 'closed' },
+      addonDownloadProgress: null,
+    }));
     pending?.settle(ready);
   };
 
@@ -485,7 +503,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
       case 'error': {
         if (event.payload.code === OPENCODE_CLI_REQUIRED) {
-          void askToDownload('opencode');
+          void askToDownload('opencode', true);
           break;
         }
         showNotice('error', event.payload.message);
@@ -562,6 +580,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     settings: null,
     aec3Addon: null,
     addonDownload: { addon: 'asr', stage: 'closed' },
+    addonDownloadProgress: null,
     aec3Modal: { open: false, mode: 'enable-setting' },
     aec3Downloading: false,
     aec3DownloadProgress: null,
@@ -653,12 +672,24 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     confirmAddonDownload: async () => {
       const { addon, stage } = get().addonDownload;
       if (stage !== 'confirm') return;
-      set({ addonDownload: { addon, stage: 'downloading' } });
+      set({
+        addonDownload: { addon, stage: 'downloading' },
+        addonDownloadProgress: null,
+      });
       try {
-        await (addon === 'opencode' ? api.decideOpenCodeDownload(true) : api.downloadBuiltinAsr());
+        if (addon === 'opencode') {
+          await api.streamDownloadOpenCode((progress) => {
+            set({ addonDownloadProgress: progress });
+          });
+        } else {
+          await api.downloadBuiltinAsr();
+        }
         finishDownloadPrompt(true);
       } catch (err) {
-        set({ addonDownload: { addon, stage: 'confirm' } });
+        set({
+          addonDownload: { addon, stage: 'confirm' },
+          addonDownloadProgress: null,
+        });
         showNotice('error', err instanceof Error ? err.message : '组件下载失败，请重试');
       }
     },
@@ -666,7 +697,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     closeAddonDownload: () => {
       const { addon, stage } = get().addonDownload;
       if (stage !== 'confirm') return;
-      if (addon === 'opencode') void api.decideOpenCodeDownload(false).catch(() => undefined);
+      const shouldNotifyBackend = Boolean(
+        addon === 'opencode' && pendingDownload?.notifyBackendOnCancel
+      );
+      if (shouldNotifyBackend) {
+        void api.decideOpenCodeDownload(false).catch(() => undefined);
+      }
       finishDownloadPrompt(false);
     },
 
@@ -1513,7 +1549,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           folderId: get().currentFolderId,
         },
         onProgress,
-        () => { void askToDownload('opencode'); }
+        () => { void askToDownload('opencode', true); }
       );
       classroomSocket.connect(payload.session.id, handleServerEvent);
       set((state) => ({

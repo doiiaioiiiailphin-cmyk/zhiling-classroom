@@ -7,8 +7,7 @@ import platform
 import shutil
 import socket
 import subprocess
-import sysconfig
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from secrets import token_urlsafe
@@ -20,7 +19,8 @@ from types import ModuleType
 import httpx
 
 from ..errors import AppError
-from .opencode_runtime import OPENCODE_VERSION, install_cli, matches_cli
+from .opencode_runtime import OPENCODE_ARTIFACTS, OPENCODE_VERSION, DownloadProgress, install_cli, matches_cli
+from .platform_hooks import resolve_opencode_platform_spec
 
 
 SOURCE_COMMIT = "cf104aae85607b12d815a61906a0b65c25f8d457"
@@ -43,11 +43,10 @@ class OpenCodeBridge:
         self.save_catalog = save_catalog
         self.loopback = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(100, connect=3))
         self.lock = asyncio.Lock()
-        self.managed_executable = (
-            (runtime_dir or directory) / f"{OPENCODE_VERSION}-windows-x64" / "opencode.exe"
-            if sysconfig.get_platform() == "win-amd64" else None
-        )
-        self._verified_stamp: tuple[int, int] | None = None
+        spec = resolve_opencode_platform_spec(runtime_dir or directory, OPENCODE_VERSION)
+        self.cli_artifact = OPENCODE_ARTIFACTS.get(spec.npm_package_hint)
+        self.managed_executable = spec.managed_binary_path if self.cli_artifact is not None else None
+        self._verified_stamp: tuple[int, int, int] | None = None
         self._managed_valid = False
         self.automatic_download_decision = asyncio.Event()
         self.process: subprocess.Popen | None = None
@@ -62,15 +61,16 @@ class OpenCodeBridge:
 
     def _cached_cli(self) -> str | None:
         path = self.managed_executable
-        if path is None:
+        artifact = self.cli_artifact
+        if path is None or artifact is None:
             return None
         try:
             info = path.stat()
         except OSError:
             return None
-        stamp = (info.st_mtime_ns, info.st_size)
+        stamp = (info.st_mtime_ns, info.st_size, info.st_mode)
         if self._verified_stamp != stamp:
-            self._managed_valid = matches_cli(path)
+            self._managed_valid = os.access(path, os.X_OK) and matches_cli(path, artifact)
             self._verified_stamp = stamp
         return str(path) if self._managed_valid else None
 
@@ -110,14 +110,56 @@ class OpenCodeBridge:
             return error.code == OPENCODE_CLI_REQUIRED
         return False
 
-    async def decide_download(self, confirmed: bool) -> None:
+    async def decide_download(self, confirmed: bool, *, on_progress: DownloadProgress | None = None) -> None:
+        size = 0
         if confirmed:
             async with self.lock:
-                if self.needs_download() and self.managed_executable is not None:
-                    await install_cli(self.network, self.managed_executable)
+                target, artifact = self.managed_executable, self.cli_artifact
+                if target is not None and artifact is not None and self.needs_download():
+                    await install_cli(self.network, target, artifact, on_progress=on_progress)
                     self._verified_stamp = None
+                    size = artifact.archive_bytes
+                if on_progress is not None:
+                    await on_progress("starting", size, size, 100 if size else 0)
                 await self.start()
         self.automatic_download_decision.set()
+        if confirmed and on_progress is not None:
+            await on_progress("ready", size, size, 100 if size else 0)
+
+    async def download_stream(self) -> AsyncIterator[dict]:
+        queue: asyncio.Queue[dict | Exception | None] = asyncio.Queue()
+
+        async def emit(stage: str, downloaded: int, total: int, percent: int) -> None:
+            await queue.put({
+                "type": "progress",
+                "stage": stage,
+                "downloadedBytes": downloaded,
+                "totalBytes": total,
+                "percent": percent,
+            })
+
+        async def worker() -> None:
+            try:
+                await self.decide_download(True, on_progress=emit)
+                await queue.put({"type": "done", "data": True})
+            except Exception as exc:
+                await queue.put(exc)
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def await_automatic_download(self) -> None:
         try:

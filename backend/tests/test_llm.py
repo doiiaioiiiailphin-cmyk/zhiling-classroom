@@ -247,3 +247,34 @@ class LLMAdapterTests(unittest.IsolatedAsyncioTestCase):
                 {"thinkingBudget": 0, "includeThoughts": False},
             )
             self.assertEqual(deltas, [("content", "简短结论")])
+
+    async def test_opencode_free_splits_inline_think_in_full_and_stream(self):
+        class FakeBridge:
+            async def complete(self, model_id, messages):
+                return "<think>先分析时间复杂度</think>\n归并排序是 O(n log n)。"
+
+        async with httpx.AsyncClient() as http:
+            adapter = llm_adapter(
+                http,
+                LLMModelsRequest(
+                    providerId="opencode-free-bridge",
+                    protocol="openai-compatible",
+                    baseUrl="builtin://opencode-free-bridge",
+                    apiKey="",
+                ),
+                opencode=FakeBridge(),  # type: ignore[arg-type]
+            )
+            content, thinking = await adapter.complete_with_thinking(
+                "", "系统", [Turn("user", "复杂度是多少")]
+            )
+            self.assertEqual(content, "归并排序是 O(n log n)。")
+            self.assertEqual(thinking, "先分析时间复杂度")
+
+            deltas = [
+                (d.kind, d.text)
+                async for d in adapter.stream("", "系统", [Turn("user", "复杂度是多少")])
+            ]
+            self.assertEqual(
+                deltas,
+                [("thinking", "先分析时间复杂度"), ("content", "归并排序是 O(n log n)。")],
+            )

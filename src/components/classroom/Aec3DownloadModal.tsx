@@ -43,6 +43,7 @@ export const Aec3DownloadModal: React.FC = () => {
     <Modal
       open={aec3Modal.open}
       onClose={closeAec3Modal}
+      closable={!aec3Downloading}
       title="启用 WebRTC AEC3 双讲回声消除"
       widthClass="max-w-lg"
     >

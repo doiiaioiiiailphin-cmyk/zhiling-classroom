@@ -1,30 +1,28 @@
 import asyncio
 import os
 import sys
-import sysconfig
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from functools import cache
-from pathlib import Path
 
 from ...errors import AppError
+from ..platform_hooks import resolve_opus_library_path
 from .base import SAMPLE_RATE, ASRStreamAdapter, Recognition, Transcript, asr_error
 
 
 def _use_bundled_opus() -> None:
-    if sys.platform != "win32":
+    if sys.platform not in {"win32", "darwin"}:
         return
-    bundle = getattr(sys, "_MEIPASS", None)
-    directory = (
-        Path(bundle) / "asr"
-        if bundle
-        else Path(__file__).resolve().parents[4] / "assets" / "opus" / sysconfig.get_platform()
-    )
-    if (directory / "opus.dll").is_file():
-        # opuslib uses ctypes.util.find_library, which searches this process's PATH on Windows.
-        path = os.environ.get("PATH", "")
-        if path.split(os.pathsep, 1)[0] != str(directory):
-            os.environ["PATH"] = os.pathsep.join(filter(None, (str(directory), path)))
+    library = resolve_opus_library_path().resolved_opus_file
+    if library is None:
+        return
+    # opuslib calls ctypes.util.find_library. Its macOS implementation consults
+    # this process's environment when resolving the absolute library path.
+    variable = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "PATH"
+    path = os.environ.get(variable, "")
+    directory = str(library.parent)
+    if path.split(os.pathsep, 1)[0] != directory:
+        os.environ[variable] = os.pathsep.join(filter(None, (directory, path)))
 
 
 @cache

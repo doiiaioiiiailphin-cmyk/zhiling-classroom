@@ -595,7 +595,9 @@ class OpenCodeFree(LLMClientAdapter):
             raise AppError(400, "OPENCODE_TEXT_ONLY", "OpenCode 免费桥接支持文字，请为图片问答选择支持视觉的供应商")
         messages = [{"role": "system", "content": system}]
         messages.extend({"role": turn.role, "content": turn.content} for turn in turns)
-        return CompletionResult(await self.bridge.complete(model_id, messages))
+        raw = await self.bridge.complete(model_id, messages)
+        content, inline_thinking = split_inline_think(raw)
+        return CompletionResult(content=content, thinking=inline_thinking)
 
     async def stream_raw(
         self, model_id: str, system: str, turns: list[Turn], schema: type[WireModel] | None,
@@ -606,7 +608,10 @@ class OpenCodeFree(LLMClientAdapter):
             model_id, system, turns, schema,
             session_id=session_id, thinking=thinking, max_output_tokens=max_output_tokens,
         )
-        yield StreamDelta("content", result.content)
+        if result.thinking:
+            yield StreamDelta("thinking", result.thinking)
+        if result.content:
+            yield StreamDelta("content", result.content)
 
 
 class AnthropicMessages(LLMClientAdapter):

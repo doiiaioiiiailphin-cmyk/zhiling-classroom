@@ -1,11 +1,12 @@
 import asyncio
 import base64
 import ctypes
-from ctypes import wintypes
 from pathlib import Path
 import re
 import struct
+import subprocess
 import sys
+import tempfile
 from uuid import uuid4
 import zlib
 
@@ -129,9 +130,50 @@ def extract_material_text(file_name: str, mime_type: str, data: bytes) -> str:
     raise AppError(400, "UNSUPPORTED_ATTACHMENT", "仅支持上传 PNG/JPG/WebP 图片，或 MD/TXT/PDF/代码讲义文件")
 
 
+def capture_macos_desktop_png() -> tuple[bytes, int, int]:
+    """使用 macOS 内置 screencapture 静默抓拍主屏为 PNG（支持 Retina 高分屏）。"""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        proc = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-t", "png", str(tmp_path)],
+            capture_output=True,
+            timeout=10.0,
+            check=False,
+        )
+        if proc.returncode != 0 or not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            err_msg = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise AppError(
+                403,
+                "MACOS_SCREEN_PERMISSION_REQUIRED",
+                "桌面抓拍失败：请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中授权知聆课堂"
+                + (f"（{err_msg}）" if err_msg else ""),
+            )
+        data = tmp_path.read_bytes()
+        width, height = parse_image_dimensions(data, "image/png")
+        if not width or not height:
+            raise AppError(500, "SCREEN_CAPTURE_FAILED", "无法解析 macOS 截图尺寸")
+        return data, width, height
+    except FileNotFoundError:
+        raise AppError(500, "SCREEN_CAPTURE_UNSUPPORTED", "未找到 macOS 系统 screencapture 工具") from None
+    except subprocess.TimeoutExpired:
+        raise AppError(504, "SCREEN_CAPTURE_TIMEOUT", "macOS 桌面抓拍超时，请检查屏幕录制权限弹窗") from None
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def capture_desktop_png() -> tuple[bytes, int, int]:
+    if sys.platform == "darwin":
+        return capture_macos_desktop_png()
+    if sys.platform == "win32":
+        return capture_windows_desktop_png()
+    raise AppError(400, "SCREEN_CAPTURE_UNSUPPORTED", "当前操作系统不支持原生桌面抓屏，请使用浏览器画面抓拍或粘贴截图")
+
+
 def capture_windows_desktop_png() -> tuple[bytes, int, int]:
     if sys.platform != "win32":
         raise AppError(400, "SCREEN_CAPTURE_UNSUPPORTED", "当前操作系统不支持原生桌面抓屏，请使用浏览器画面抓拍或粘贴截图")
+    from ctypes import wintypes
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -241,7 +283,7 @@ class AttachmentStorage:
         self.directory = directory.resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.repo = repo
-        self.screen_capturer = screen_capturer or capture_windows_desktop_png
+        self.screen_capturer = screen_capturer or capture_desktop_png
 
     def _session_dir(self, session_id: str) -> Path:
         if not SAFE_ID.fullmatch(session_id):

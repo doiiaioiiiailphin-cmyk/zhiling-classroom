@@ -128,6 +128,25 @@ def build_ico(sizes: tuple[int, ...] = (16, 32, 48, 64, 128, 256)) -> bytes:
     return header + bytes(entries) + bytes(payloads)
 
 
+def build_icns() -> bytes:
+    """构建原生 macOS .icns 图标容器（PNG 编码块：128 / 256 / 512 / 1024）。"""
+    # Apple ICNS OSType -> PNG 像素尺寸
+    icns_entries = (
+        (b"ic07", 128),
+        (b"ic08", 256),
+        (b"ic09", 512),
+        (b"ic10", 1024),
+    )
+    body = bytearray()
+    for tag, size in icns_entries:
+        png = encode_rgba_png(render_icon_rgba(size), size)
+        body.extend(tag)
+        body.extend(struct.pack(">I", 8 + len(png)))
+        body.extend(png)
+    total_len = 8 + len(body)
+    return b"icns" + struct.pack(">I", total_len) + bytes(body)
+
+
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     ico_bytes = build_ico()
@@ -136,11 +155,18 @@ def main() -> None:
     assets_ico.parent.mkdir(parents=True, exist_ok=True)
     assets_ico.write_bytes(ico_bytes)
 
+    assets_icns = root / "assets" / "zhiling.icns"
+    icns_bytes = build_icns()
+    assets_icns.write_bytes(icns_bytes)
+
     public_ico = root / "public" / "favicon.ico"
     public_ico.parent.mkdir(parents=True, exist_ok=True)
     public_ico.write_bytes(build_ico((16, 32, 48)))
 
-    print(f"Generated {assets_ico} ({len(ico_bytes)} bytes) and {public_ico}")
+    print(
+        f"Generated {assets_ico} ({len(ico_bytes)} bytes), "
+        f"{assets_icns} ({len(icns_bytes)} bytes), and {public_ico}"
+    )
 
 
 if __name__ == "__main__":

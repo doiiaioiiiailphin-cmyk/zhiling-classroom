@@ -13,6 +13,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
 import { formatDuration } from '../../utils/format';
 import { IconButton } from '../ui/IconButton';
 import { MoreGridMenu, type GridMenuItem } from '../ui/MoreGridMenu';
@@ -240,6 +241,20 @@ export const ClassroomView: React.FC = () => {
 
   if (!sessionId) return null;
 
+  const isMac = isMacPlatform();
+
+  const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    if (e.target !== e.currentTarget) return;
+    const bridge = getDesktopBridge();
+    if (bridge?.toggle_maximize_window) {
+      void bridge.toggle_maximize_window().then((nextMax) => {
+        setWindowMaximized(Boolean(nextMax));
+      });
+      return;
+    }
+    setWindowMaximized(!windowMaximized);
+  };
+
   const commitTitle = async () => {
     setEditingTitle(false);
     const trimmed = titleDraft.trim();
@@ -271,16 +286,17 @@ export const ClassroomView: React.FC = () => {
         }}
       />
 
-      {/* 顶部课堂控制栏：克制精炼，支持无边框拖拽移动，扩展工具收纳进 ··· 宫格导航 */}
+      {/* 顶部课堂控制栏：macOS 左置红黄绿交通灯 / Windows 右置三键，支持无边框拖拽移动 */}
       <header
-        onDoubleClick={(e) => {
-          if (e.target === e.currentTarget) {
-            setWindowMaximized(!windowMaximized);
-          }
-        }}
-        className="h-15 bg-white border-b border-[#DEE0E3] pl-5 pr-3.5 flex items-center justify-between gap-3 shrink-0 pywebview-drag-region"
+        onDoubleClick={handleHeaderDoubleClick}
+        className={`border-b border-[#DEE0E3] flex items-center justify-between gap-3 shrink-0 pywebview-drag-region ${
+          isMac
+            ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
+            : 'h-15 bg-white pl-5 pr-3.5'
+        }`}
       >
         <div className="flex items-center gap-2.5 min-w-0">
+          {isMac && <WindowControls />}
           <IconButton
             icon={ArrowLeft}
             variant="ghost"
@@ -343,7 +359,7 @@ export const ClassroomView: React.FC = () => {
             title="课堂百宝箱"
           />
 
-          <WindowControls />
+          {!isMac && <WindowControls />}
         </div>
       </header>
 

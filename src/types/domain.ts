@@ -234,6 +234,10 @@ export interface Aec3DownloadProgress {
   percent: number;
 }
 
+export type OpenCodeDownloadProgress = Omit<Aec3DownloadProgress, 'stage'> & {
+  stage: Aec3DownloadProgress['stage'] | 'starting';
+};
+
 export interface NativeAudioEndpoint {
   id: string;
   rawId: string;

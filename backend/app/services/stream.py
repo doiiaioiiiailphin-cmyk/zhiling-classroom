@@ -403,7 +403,17 @@ class RecognitionRun:
                 self.options,
             )
             await adapter.start()
-            if self.options.diarization and not adapter.supports_diarization:
+            has_physical_dual_split = (
+                self.settings.enable_dual_channel_speaker_split
+                and self.settings.mic_enabled
+                and self.settings.system_audio_enabled
+            )
+            if (
+                self.options.diarization
+                and not adapter.supports_diarization
+                and config.protocol != "builtin-free-asr"
+                and not has_physical_dual_split
+            ):
                 await sink.error(AppError(400, "ASR_DIARIZATION_UNAVAILABLE", "当前语音模型只提供单路转写"))
             sender = asyncio.create_task(self.send_audio(adapter))
             receiver = asyncio.create_task(self.read_results(adapter))

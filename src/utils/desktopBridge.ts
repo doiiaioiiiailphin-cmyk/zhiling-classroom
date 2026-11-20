@@ -1,4 +1,5 @@
 export type DesktopWindowTarget = 'main' | 'mini';
+export type DesktopPlatform = 'macos' | 'windows' | 'web';
 export type DesktopWindowOpMode =
   | 'move'
   | 'n'
@@ -32,6 +33,36 @@ export interface DesktopBridgeApi {
 export const IS_DESKTOP_SHELL_PARAM =
   typeof window !== 'undefined' &&
   new URLSearchParams(window.location.search).get('shell') === 'desktop';
+
+export function getDesktopPlatform(): DesktopPlatform {
+  if (typeof window === 'undefined') return 'web';
+  const param = new URLSearchParams(window.location.search).get('platform')?.toLowerCase();
+  if (param === 'macos' || param === 'mac' || param === 'darwin') return 'macos';
+  if (param === 'windows' || param === 'win' || param === 'win32') return 'windows';
+
+  const nav = window.navigator as Navigator & {
+    userAgentData?: { platform?: string };
+  };
+  const uaPlatform = (nav.userAgentData?.platform || nav.platform || nav.userAgent || '').toLowerCase();
+  if (uaPlatform.includes('mac')) return 'macos';
+  if (uaPlatform.includes('win')) return 'windows';
+  return 'web';
+}
+
+export function isMacPlatform(): boolean {
+  return getDesktopPlatform() === 'macos';
+}
+
+export function formatShortcutLabel(combo: string): string {
+  if (!isMacPlatform()) return combo;
+  return combo
+    .replace(/\bAlt\+/gi, '⌥')
+    .replace(/\bOption\+/gi, '⌥')
+    .replace(/\bShift\+/gi, '⇧')
+    .replace(/\bCtrl\+/gi, '⌃')
+    .replace(/\bControl\+/gi, '⌃')
+    .replace(/\b(Cmd|Command|Meta|Win)\+/gi, '⌘');
+}
 
 export function isDesktopShell(): boolean {
   if (IS_DESKTOP_SHELL_PARAM) return true;

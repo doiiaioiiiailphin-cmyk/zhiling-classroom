@@ -13,6 +13,7 @@ import {
   getDesktopBridge,
   isDesktopShell,
   isInteractiveDragBlocker,
+  isMacPlatform,
 } from '../../utils/desktopBridge';
 import { Tooltip } from '../ui/Tooltip';
 import { WindowResizeHandles } from '../ui/WindowResizeHandles';
@@ -208,8 +209,43 @@ export const MiniOverlayView: React.FC = () => {
     >
       <WindowResizeHandles target="mini" />
 
-      {/* 右上角单行并列快捷图标组：功能键与 — / × 同列排布，无独立顶栏 */}
-      <div className="fixed top-2.5 right-2.5 z-30 flex items-center gap-1 rounded-xl bg-[#181D26]/52 hover:bg-[#181D26]/84 backdrop-blur-md border border-white/15 px-1.5 py-1 shadow-[0_6px_20px_rgba(0,0,0,0.22)] transition-all app-no-drag">
+      {/* 顶部悬浮快捷图标组：macOS 左侧红黄双交通灯 / Windows 右侧 — ×，无独立顶栏 */}
+      <div
+        className={`fixed top-2.5 z-30 flex items-center gap-1 rounded-xl bg-[#181D26]/58 hover:bg-[#181D26]/86 backdrop-blur-md border border-white/15 px-2 py-1 shadow-[0_6px_20px_rgba(0,0,0,0.22)] transition-all app-no-drag ${
+          isMacPlatform() ? 'left-2.5' : 'right-2.5'
+        }`}
+      >
+        {isMacPlatform() && (
+          <>
+            <div className="flex items-center gap-1.5 pl-0.5 pr-1 group/mac">
+              <Tooltip content="关闭字幕窗" placement="bottom">
+                <button
+                  type="button"
+                  aria-label="关闭字幕窗"
+                  onClick={() => void handleClose()}
+                  className="w-3 h-3 rounded-full bg-[#FF5F57] border border-[#E0443E] flex items-center justify-center active:scale-90 transition-transform cursor-pointer"
+                >
+                  <svg viewBox="0 0 10 10" className="w-1.5 h-1.5 opacity-0 group-hover/mac:opacity-100 transition-opacity" aria-hidden="true">
+                    <path d="M2.4 2.4L7.6 7.6M7.6 2.4L2.4 7.6" stroke="#4D0000" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </Tooltip>
+              <Tooltip content="最小化" placement="bottom">
+                <button
+                  type="button"
+                  aria-label="最小化字幕窗"
+                  onClick={() => void handleMinimize()}
+                  className="w-3 h-3 rounded-full bg-[#FEBC2E] border border-[#DEA123] flex items-center justify-center active:scale-90 transition-transform cursor-pointer"
+                >
+                  <svg viewBox="0 0 10 10" className="w-1.5 h-1.5 opacity-0 group-hover/mac:opacity-100 transition-opacity" aria-hidden="true">
+                    <path d="M2 5H8" stroke="#6E4400" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </Tooltip>
+            </div>
+            <span className="w-px h-4 bg-white/20 mx-0.5" />
+          </>
+        )}
         <Tooltip content={snap.isRecording ? '暂停录音' : '继续录音'} placement="bottom">
           <button
             type="button"
@@ -267,29 +303,33 @@ export const MiniOverlayView: React.FC = () => {
           </button>
         </Tooltip>
 
-        <span className="w-px h-4 bg-white/20 mx-0.5" />
+        {!isMacPlatform() && (
+          <>
+            <span className="w-px h-4 bg-white/20 mx-0.5" />
 
-        <Tooltip content="最小化" placement="bottom">
-          <button
-            type="button"
-            aria-label="最小化字幕窗"
-            onClick={() => void handleMinimize()}
-            className="w-8 h-8 rounded-lg hover:bg-white/15 active:scale-90 flex items-center justify-center text-white/90 hover:text-white transition-all cursor-pointer"
-          >
-            <Minus className="w-4 h-4" strokeWidth={2} />
-          </button>
-        </Tooltip>
+            <Tooltip content="最小化" placement="bottom">
+              <button
+                type="button"
+                aria-label="最小化字幕窗"
+                onClick={() => void handleMinimize()}
+                className="w-8 h-8 rounded-lg hover:bg-white/15 active:scale-90 flex items-center justify-center text-white/90 hover:text-white transition-all cursor-pointer"
+              >
+                <Minus className="w-4 h-4" strokeWidth={2} />
+              </button>
+            </Tooltip>
 
-        <Tooltip content="关闭字幕窗" placement="bottom">
-          <button
-            type="button"
-            aria-label="关闭字幕窗"
-            onClick={() => void handleClose()}
-            className="w-8 h-8 rounded-lg hover:bg-[#F53F3F] active:scale-90 flex items-center justify-center text-white/90 hover:text-white transition-all cursor-pointer"
-          >
-            <X className="w-4 h-4" strokeWidth={2} />
-          </button>
-        </Tooltip>
+            <Tooltip content="关闭字幕窗" placement="bottom">
+              <button
+                type="button"
+                aria-label="关闭字幕窗"
+                onClick={() => void handleClose()}
+                className="w-8 h-8 rounded-lg hover:bg-[#F53F3F] active:scale-90 flex items-center justify-center text-white/90 hover:text-white transition-all cursor-pointer"
+              >
+                <X className="w-4 h-4" strokeWidth={2} />
+              </button>
+            </Tooltip>
+          </>
+        )}
       </div>
 
       {/* 下半部分全透明桌面歌词视口：置底对齐、尽量多显示历史行、滚轮无滚动条顺滑回看，按住任意处亦可拖拽小窗 */}
