@@ -29,8 +29,13 @@ fi
 
 tar -xzf "$ARCHIVE" -C "$WORK"
 cd "$WORK/opus-${VERSION}"
+SDK_PATH="$(xcrun --show-sdk-path)"
+export SDKROOT="$SDK_PATH"
 export MACOSX_DEPLOYMENT_TARGET=13.0
-CC="$(xcrun --find clang)" CFLAGS="-O2 -arch $ARCH" LDFLAGS="-arch $ARCH" ./configure \
+CC="$(xcrun --find clang)" \
+  CFLAGS="-O2 -arch $ARCH -isysroot $SDK_PATH" \
+  LDFLAGS="-arch $ARCH -isysroot $SDK_PATH" \
+  ./configure \
   --prefix="$WORK/install" --disable-doc --disable-extra-programs --disable-static --enable-shared
 make -j"$(sysctl -n hw.logicalcpu)"
 make install

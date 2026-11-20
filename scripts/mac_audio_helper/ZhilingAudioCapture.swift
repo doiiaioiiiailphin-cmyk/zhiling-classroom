@@ -52,15 +52,15 @@ private func coreAudioStringProperty(
     deviceID: AudioDeviceID,
     selector: AudioObjectPropertySelector
 ) -> String? {
-    var cfStr: CFString?
-    var propSize = UInt32(MemoryLayout<CFString?>.size)
+    var unmanaged: Unmanaged<CFString>?
+    var propSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
     var address = AudioObjectPropertyAddress(
         mSelector: selector,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
-    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &propSize, &cfStr)
-    if status == noErr, let value = cfStr {
+    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &propSize, &unmanaged)
+    if status == noErr, let value = unmanaged?.takeRetainedValue() {
         return value as String
     }
     return nil
@@ -184,14 +184,12 @@ private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegat
         }
         inBuffer.frameLength = frameCount
 
-        var blockBuffer: CMBlockBuffer?
         let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
             sampleBuffer,
             at: 0,
             frameCount: Int32(frameCount),
             into: inBuffer.mutableAudioBufferList
         )
-        _ = blockBuffer
         guard status == noErr else { return }
 
         if converter == nil || lastInputFormat != inFormat {
