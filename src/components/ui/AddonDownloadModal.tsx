@@ -18,7 +18,7 @@ function describeStage(
   if (addon === 'asr') {
     switch (stage) {
       case 'connecting':
-        return '正在连接模型镜像源...';
+        return '正在连接魔搭（ModelScope）模型源...';
       case 'downloading':
         return '正在下载 SenseVoice 本地语音模型...';
       case 'verifying':

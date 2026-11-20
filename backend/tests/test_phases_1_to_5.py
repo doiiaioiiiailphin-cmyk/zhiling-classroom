@@ -344,6 +344,7 @@ class Phases1To5BackendTests(unittest.TestCase):
 
             # 流式下载本地 SenseVoice 模型并校验真实字节进度帧
             runtime = client.app.state.builtin_asr
+            runtime.verify_sha256 = False
             with patch.object(runtime, "_warmup", return_value=None):
                 resp = client.post("/api/v1/addons/builtin-free-asr/download/stream", json={"confirmed": True})
             self.assertEqual(resp.status_code, 200)

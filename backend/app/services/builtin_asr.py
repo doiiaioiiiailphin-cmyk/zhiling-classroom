@@ -11,6 +11,7 @@ from __future__ import annotations
 from array import array
 import asyncio
 from collections.abc import AsyncIterator
+import hashlib
 import importlib.util
 import logging
 import os
@@ -31,11 +32,15 @@ MODEL_FILENAME = "model.int8.onnx"
 TOKENS_FILENAME = "tokens.txt"
 READY_MARKER = ".ready"
 MODEL_EXPECTED_BYTES = 239_233_841
+MODEL_SHA256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+TOKENS_SHA256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
 CHUNK_BYTES = 131_072
 CHUNK_TIMEOUT_SECONDS = 30.0
 PROGRESS_INTERVAL_SECONDS = 0.12
 
 MODEL_MIRRORS: tuple[str, ...] = (
+    "https://www.modelscope.cn/models/poloniumrock/SenseVoiceSmallOnnx/resolve/master",
+    "https://www.modelscope.cn/models/gomodels/sherpa-small/resolve/master/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
     "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
     "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
 )
@@ -77,11 +82,18 @@ def pcm16le_to_floats(pcm: bytes) -> list[float]:
 
 
 class BuiltinAsrRuntime:
-    def __init__(self, root: Path, *, mirrors: tuple[str, ...] | None = None):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        mirrors: tuple[str, ...] | None = None,
+        verify_sha256: bool = True,
+    ):
         global _ACTIVE_RUNTIME
         self.root = root
         self.model_dir = root / MODEL_DIRNAME
         self.mirrors = mirrors or MODEL_MIRRORS
+        self.verify_sha256 = verify_sha256
         self._install_lock = asyncio.Lock()
         self._recognizer_lock = threading.Lock()
         self._recognizers: dict[str, object] = {}
@@ -215,14 +227,18 @@ class BuiltinAsrRuntime:
                 model_part.unlink(missing_ok=True)
                 try:
                     # 1. 下载词表 tokens.txt（体积极小，同时可快速探活镜像）
-                    tokens_bytes = await self._download_small_file(client, f"{base}/{TOKENS_FILENAME}", tokens_part)
-                    # 验证词表为合法非空 UTF-8 文本
+                    tokens_bytes, tokens_digest = await self._download_small_file(
+                        client, f"{base}/{TOKENS_FILENAME}", tokens_part
+                    )
                     decoded_tokens = tokens_part.read_text(encoding="utf-8")
                     if not decoded_tokens.strip():
                         raise ValueError("tokens.txt is empty")
+                    if self.verify_sha256 and tokens_digest != TOKENS_SHA256:
+                        raise ValueError(f"tokens.txt checksum mismatch: {tokens_digest}")
 
                     # 2. 流式下载主模型 model.int8.onnx 并实时推送真实字节进度
                     model_bytes = 0
+                    model_hasher = hashlib.sha256()
                     expected_model_bytes = MODEL_EXPECTED_BYTES
                     last_emit = 0.0
                     last_percent = -1
@@ -245,6 +261,7 @@ class BuiltinAsrRuntime:
                                 if not chunk:
                                     continue
                                 fh.write(chunk)
+                                model_hasher.update(chunk)
                                 model_bytes += len(chunk)
                                 combined = tokens_bytes + model_bytes
                                 percent = min(99, int(combined * 100 / max(1, final_total)))
@@ -266,6 +283,9 @@ class BuiltinAsrRuntime:
                         raise ValueError(
                             f"incomplete model download: got {model_bytes}, expected {content_length}"
                         )
+                    model_digest = model_hasher.hexdigest()
+                    if self.verify_sha256 and model_digest != MODEL_SHA256:
+                        raise ValueError(f"model.int8.onnx checksum mismatch: {model_digest}")
 
                     final_total = tokens_bytes + model_bytes
                     downloaded_ok = True
@@ -330,8 +350,9 @@ class BuiltinAsrRuntime:
 
     async def _download_small_file(
         self, client: httpx.AsyncClient, url: str, target: Path
-    ) -> int:
+    ) -> tuple[int, str]:
         total = 0
+        hasher = hashlib.sha256()
         timeout = httpx.Timeout(connect=20.0, read=CHUNK_TIMEOUT_SECONDS, write=20.0, pool=20.0)
         async with client.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
             response.raise_for_status()
@@ -339,8 +360,9 @@ class BuiltinAsrRuntime:
                 async for chunk in response.aiter_bytes(65_536):
                     if chunk:
                         fh.write(chunk)
+                        hasher.update(chunk)
                         total += len(chunk)
-        return total
+        return total, hasher.hexdigest()
 
     async def install(self, client: httpx.AsyncClient) -> None:
         async for _event in self.download_stream(client):
