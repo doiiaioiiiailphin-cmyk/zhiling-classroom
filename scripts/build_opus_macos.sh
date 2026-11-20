@@ -42,7 +42,7 @@ make install
 
 cp -L "$WORK/install/lib/libopus.dylib" "$WORK/libopus.dylib"
 install_name_tool -id @rpath/libopus.dylib "$WORK/libopus.dylib"
-lipo -verify_arch "$ARCH" "$WORK/libopus.dylib"
+lipo "$WORK/libopus.dylib" -verify_arch "$ARCH"
 codesign --force --sign - "$WORK/libopus.dylib"
 mkdir -p "$OUTPUT"
 mv -f "$WORK/libopus.dylib" "$OUTPUT/libopus.dylib"

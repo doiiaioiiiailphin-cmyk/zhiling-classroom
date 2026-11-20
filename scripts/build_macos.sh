@@ -63,7 +63,7 @@ if [[ ! -s "$OPUS_DIR/COPYING" ]]; then
   echo "Opus 缺少原始 COPYING。请补齐许可证或使用脚本生成的库。" >&2
   exit 1
 fi
-lipo -verify_arch "$MAC_ARCH" "$OPUS_DIR/libopus.dylib"
+lipo "$OPUS_DIR/libopus.dylib" -verify_arch "$MAC_ARCH"
 
 EXTRA_ARGS=(
   --add-binary "$OPUS_DIR/libopus.dylib:asr"
