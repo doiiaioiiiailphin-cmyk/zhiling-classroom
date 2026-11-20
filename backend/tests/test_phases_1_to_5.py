@@ -298,34 +298,97 @@ class Phases1To5BackendTests(unittest.TestCase):
 
     def test_phase6_builtin_free_asr_provider_contract(self):
         import asyncio
+        import struct
+        from unittest.mock import patch
         from backend.app.providers.asr import build_adapter
         from backend.app.providers.asr.base import Recognition
         from backend.app.providers.asr.builtin_shell import BuiltinFreeAsrAdapter
         from backend.app.schemas import ASRProvider
 
-        with self.make_client() as client:
+        fake_tokens = b"<blk> 0\n\xe4\xbd\xa0 1\n\xe5\xa5\xbd 2\n"
+        fake_model = b"ONNX" * 4096
+
+        def model_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/tokens.txt"):
+                return httpx.Response(200, content=fake_tokens)
+            if request.url.path.endswith("/model.int8.onnx"):
+                return httpx.Response(
+                    200,
+                    content=fake_model,
+                    headers={"content-length": str(len(fake_model))},
+                )
+            return httpx.Response(404)
+
+        with self.make_client(httpx.MockTransport(model_handler)) as client:
             settings = client.get("/api/v1/settings").json()["data"]
             self.assertEqual(settings["selectedAsrProviderId"], "builtin-free-asr")
+            self.assertEqual(settings["asrProviders"]["builtin-free-asr"]["name"], "本地离线语音（SenseVoice）")
             provider = ASRProvider.model_validate(settings["asrProviders"]["builtin-free-asr"])
             models = client.post(
                 "/api/v1/asr-providers/models",
                 json={
                     "providerId": "builtin-free-asr",
                     "protocol": "builtin-free-asr",
-                    "baseUrl": "builtin://default",
+                    "baseUrl": "local://sensevoice",
                     "apiKey": "",
                 },
             ).json()["data"]
-            self.assertEqual(models, ["default"])
+            self.assertEqual(models, ["sensevoice-small-int8"])
 
-        async def check_provider():
-            async with httpx.AsyncClient() as http:
-                adapter = build_adapter(http, provider, Recognition("zh-en", False, "auto", True))
+            # 未下载前返回 False，拒绝未确认的下载请求
+            self.assertFalse(client.get("/api/v1/addons/builtin-free-asr").json()["data"])
+            self.assertEqual(
+                client.post("/api/v1/addons/builtin-free-asr/download/stream", json={"confirmed": False}).status_code,
+                400,
+            )
+
+            # 流式下载本地 SenseVoice 模型并校验真实字节进度帧
+            runtime = client.app.state.builtin_asr
+            with patch.object(runtime, "_warmup", return_value=None):
+                resp = client.post("/api/v1/addons/builtin-free-asr/download/stream", json={"confirmed": True})
+            self.assertEqual(resp.status_code, 200)
+            frames = [
+                json.loads(line[5:].strip())
+                for line in resp.text.splitlines()
+                if line.startswith("data:")
+            ]
+            stages = [f["stage"] for f in frames if f.get("type") == "progress"]
+            self.assertIn("connecting", stages)
+            self.assertIn("downloading", stages)
+            self.assertIn("verifying", stages)
+            self.assertIn("starting", stages)
+            self.assertEqual(stages[-1], "ready")
+            self.assertEqual(frames[-1], {"type": "done", "data": True})
+            self.assertTrue(client.get("/api/v1/addons/builtin-free-asr").json()["data"])
+
+            # 验证本地 SenseVoice 流式适配器在语音 + 静音停顿后正常产出 final 转写
+            async def check_adapter():
+                adapter = build_adapter(
+                    client.app.state.http,
+                    provider,
+                    Recognition("zh-en", False, "auto", True),
+                    builtin_asr=runtime,
+                )
                 self.assertIsInstance(adapter, BuiltinFreeAsrAdapter)
+                with (
+                    patch.object(runtime, "get_recognizer", return_value=object()),
+                    patch.object(runtime, "decode_pcm", return_value="大家好，今天学习线性代数。"),
+                ):
+                    await adapter.start()
+                    voiced = struct.pack("<320h", *([2500] * 320))   # 20ms 有声
+                    silent = b"\x00" * 640                           # 20ms 静音
+                    for _ in range(25):  # 500ms 语音
+                        await adapter.send_audio(voiced)
+                    for _ in range(40):  # 800ms 静音触发句末切分
+                        await adapter.send_audio(silent)
+                    await adapter.finish()
+                    items = [item async for item in adapter.results()]
                 await adapter.close()
-                self.assertEqual([result async for result in adapter.results()], [])
+                finals = [item for item in items if item.final]
+                self.assertEqual(len(finals), 1)
+                self.assertEqual(finals[0].text, "大家好，今天学习线性代数。")
 
-        asyncio.run(check_provider())
+            asyncio.run(check_adapter())
 
     def test_phase6_opencode_download_stream_and_diarization_suppression(self):
         import asyncio

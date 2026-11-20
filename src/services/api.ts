@@ -634,6 +634,25 @@ export const api = {
     });
   },
 
+  streamDownloadBuiltinAsr(
+    onProgress?: (progress: OpenCodeDownloadProgress) => void
+  ): Promise<boolean> {
+    return requestSse<boolean>(
+      '/addons/builtin-free-asr/download/stream',
+      { confirmed: true },
+      (frame) => {
+        if (frame.type === 'progress') {
+          onProgress?.({
+            stage: frame.stage as OpenCodeDownloadProgress['stage'],
+            downloadedBytes: frame.downloadedBytes,
+            totalBytes: frame.totalBytes,
+            percent: frame.percent,
+          });
+        }
+      }
+    );
+  },
+
   decideOpenCodeDownload(confirmed: boolean): Promise<void> {
     return requestJson<void>('/addons/opencode/download', {
       method: 'POST',

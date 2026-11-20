@@ -1,229 +1,347 @@
+"""本地离线语音识别模型管理与 SenseVoice-Small (sherpa-onnx) 推理运行时。
+
+特性：
+- 推理引擎 `sherpa-onnx` 随桌面端一起打包（Windows x64 / macOS arm64 & x86_64 均免动态签名风险）；
+- 模型文件（SenseVoice-Small int8，约 239 MB，支持中/英/日/韩/粤语 + 自动标点与 ITN）在首次使用时按需下载，
+  通过 SSE 实时上报真实字节进度，并自动在国内外镜像间容灾切换；
+- 下载完成后永久缓存在用户应用目录，后续完全离线运行、零网络延迟、零 API Key / 额度限制。
+"""
+from __future__ import annotations
+
+from array import array
 import asyncio
-import ctypes
-import ctypes.util
-import importlib
+from collections.abc import AsyncIterator
+import importlib.util
 import logging
-import shutil
-import sys
-import sysconfig
-import tarfile
-from hashlib import sha256
-from io import BytesIO
+import os
 from pathlib import Path
-from tempfile import mkdtemp
-from zipfile import BadZipFile, ZipFile
+import re
+import sys
+import threading
+import time
 
 import httpx
 
 from ..errors import AppError
-from ..providers.asr.builtin_shell import _use_bundled_opus
-from ..providers.platform_hooks import platform_arch_tag
-from .builtin_asr_macos import MACOS_MINIAUDIO, MACOS_PROTOBUF
 
 logger = logging.getLogger(__name__)
 
-_COMMIT = "267972f815f519fd7c6149f85a8b7cc99daf61a5"
-_SOURCE_URL = f"https://codeload.github.com/yangmoling/doubaoime-asr/zip/{_COMMIT}"
-# Hash the installed files by name and contents so archive compression can change.
-_SOURCE_SHA256 = "dcdb1c2dde80d152dc7dcfd21a022f8ca6b61eb4bab82a6f4b4334b22cd8818d"
-_PYPI_ORIGINS = (
-    "https://pypi.tuna.tsinghua.edu.cn",
-    "https://mirrors.huaweicloud.com/repository/pypi",
-    "https://files.pythonhosted.org",
-)
-_MINIAUDIO = {
-    "cpython-311": (
-        "89/97/db38e86d733772b5bc07fd2cd2547d571f1568fa5947eb49f7a30866cba7/miniaudio-1.73-cp311-cp311-win_amd64.whl",
-        "d5d0caf89aa7088d0af47fa9ce0a0368f9b635beee918f6422421cea42a33687",
-    ),
-    "cpython-312": (
-        "cb/1c/29309e07c90c9dd048f8a1a87f2d7be1ab36a0ebd3123cddb919a1af4155/miniaudio-1.73-cp312-cp312-win_amd64.whl",
-        "08d06c1e799e481b1527bbd1f7270135261c18dce48a349068a1bb9c87d79f15",
-    ),
-    "cpython-313": (
-        "ee/b7/7102a3c3da92bab3570222b32f024ccd614dbd674f475aa80c03ff5a4c6b/miniaudio-1.73-cp313-cp313-win_amd64.whl",
-        "a83353a80d7e329bc744758674af48ac8082c8aca2d9fe5832e6e9b809dbe74f",
-    ),
-    "cpython-314": (
-        "dc/98/80964b2d7f8b7b1e7733eb344c55df6b4dbd2561de40e9da4a6c2793fc07/miniaudio-1.73-cp314-cp314-win_amd64.whl",
-        "0ffd4812e3d80a53ff0b0f336ce455bfe0144dfa72161ce535e867b827cc2bcc",
-    ),
-}
-_OPUSLIB = (
-    "46/55/826befabb29fd3902bad6d6d7308790894c7ad4d73f051728a0c53d37cd7/opuslib-3.0.1.tar.gz",
-    "2cb045e5b03e7fc50dfefe431e3404dddddbd8f5961c10c51e32dfb69a044c97",
-)
-# Pydantic, websockets, CFFI, certifi and idna are supplied by the application.
-_WHEELS = (
-    (
-        "55/75/bb9bc917d10e9ee13dee8607eb9ab963b7cf8be607c46e7862c748aa2af7/protobuf-6.33.5-cp310-abi3-win_amd64.whl",
-        "3093804752167bcab3998bec9f1048baae6e29505adaf1afd14a37bddede533c",
-    ),
-    (
-        "1e/db/4254e3eabe8020b458f1a747140d32277ec7a271daf1d235b70dc0b4e6e3/requests-2.32.5-py3-none-any.whl",
-        "2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6",
-    ),
-    (
-        "0a/4c/925909008ed5a988ccbb72dcc897407e5d6d3bd72410d69e051fc0c14647/charset_normalizer-3.4.4-py3-none-any.whl",
-        "7a32c560861a02ff789ad905a2fe94e3f840803362c84fecf1851cb4cf3dc37f",
-    ),
-    (
-        "39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl",
-        "bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4",
-    ),
+MODEL_DIRNAME = "sense-voice-small-int8"
+MODEL_FILENAME = "model.int8.onnx"
+TOKENS_FILENAME = "tokens.txt"
+READY_MARKER = ".ready"
+MODEL_EXPECTED_BYTES = 239_233_841
+CHUNK_BYTES = 131_072
+CHUNK_TIMEOUT_SECONDS = 30.0
+PROGRESS_INTERVAL_SECONDS = 0.12
+
+MODEL_MIRRORS: tuple[str, ...] = (
+    "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
+    "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
 )
 
-
-async def _fetch(client: httpx.AsyncClient, url: str) -> bytes:
-    payload = bytearray()
-    async with asyncio.timeout(18), client.stream("GET", url, follow_redirects=True) as response:
-        response.raise_for_status()
-        async for chunk in response.aiter_bytes():
-            payload.extend(chunk)
-            if len(payload) > 2 * 1024 * 1024:
-                raise ValueError("unexpected archive size")
-    return bytes(payload)
+_SENSEVOICE_TAG_RE = re.compile(r"<\|[^|>]+\|>")
+_ACTIVE_RUNTIME: BuiltinAsrRuntime | None = None
 
 
-async def _pypi_file(client: httpx.AsyncClient, path: str, digest: str) -> bytes:
-    for origin in _PYPI_ORIGINS:
-        try:
-            data = await _fetch(client, f"{origin}/packages/{path}")
-            if sha256(data).hexdigest() != digest:
-                raise ValueError("archive checksum mismatch")
-        except (httpx.HTTPError, TimeoutError, ValueError) as error:
-            logger.warning("ASR dependency %s from %s: %s", Path(path).name, origin, error)
-        else:
-            logger.info("Downloaded %s from %s", Path(path).name, origin)
-            return data
-    raise AppError(502, "ASR_ADDON_DOWNLOAD_FAILED", "语音依赖下载失败，请检查网络后重试")
+def active_builtin_asr_runtime() -> BuiltinAsrRuntime | None:
+    return _ACTIVE_RUNTIME
 
 
-def _install_source(data: bytes, target: Path) -> None:
-    prefix = f"doubaoime-asr-{_COMMIT}/"
-    with ZipFile(BytesIO(data)) as archive:
-        files = {
-            entry.filename.removeprefix(prefix): archive.read(entry)
-            for entry in archive.infolist()
-            if not entry.is_dir()
-            and (entry.filename == prefix + "README.md" or entry.filename.startswith(prefix + "doubaoime_asr/"))
-        }
-    digest = sha256()
-    for name, content in sorted(files.items()):
-        digest.update(name.encode() + b"\0" + sha256(content).digest())
-    if digest.hexdigest() != _SOURCE_SHA256:
-        raise ValueError("source checksum mismatch")
-    for name, content in files.items():
-        destination = target / ("doubaoime-asr-README.md" if name == "README.md" else name)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
+def _sherpa_available() -> bool:
+    return importlib.util.find_spec("sherpa_onnx") is not None
 
 
-def _install_opuslib(data: bytes, target: Path) -> None:
-    with tarfile.open(fileobj=BytesIO(data), mode="r:gz") as archive:
-        for entry in archive:
-            name = entry.name.removeprefix("opuslib-3.0.1/")
-            if entry.isfile() and name in {"LICENSE", "LICENSE.txt", "COPYING", "PKG-INFO"}:
-                with archive.extractfile(entry) as source:
-                    (target / f"opuslib-{name}").write_bytes(source.read())
-            elif entry.isfile() and name.startswith("opuslib/"):
-                destination = target / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with archive.extractfile(entry) as source:
-                    destination.write_bytes(source.read())
+def _normalize_sensevoice_language(language: str) -> str:
+    value = (language or "auto").strip().lower()
+    if value in {"zh", "en", "ja", "ko", "yue"}:
+        return value
+    return "auto"
+
+
+def clean_sensevoice_text(text: str) -> str:
+    cleaned = _SENSEVOICE_TAG_RE.sub("", text or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def pcm16le_to_floats(pcm: bytes) -> list[float]:
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return []
+    samples = array("h")
+    samples.frombytes(pcm[:usable])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    inv = 1.0 / 32768.0
+    return [sample * inv for sample in samples]
 
 
 class BuiltinAsrRuntime:
-    def __init__(self, root: Path):
-        tag = sys.implementation.cache_tag
-        platform_tag = platform_arch_tag()
-        miniaudio = _MINIAUDIO if platform_tag == "win-amd64" else MACOS_MINIAUDIO.get(platform_tag, {})
-        self.audio_wheel = miniaudio.get(tag) if not sysconfig.get_config_var("Py_GIL_DISABLED") else None
-        self.wheels = (MACOS_PROTOBUF, *_WHEELS[1:]) if platform_tag in MACOS_MINIAUDIO else _WHEELS
-        fingerprint = sha256(repr((_SOURCE_SHA256, self.audio_wheel, self.wheels, _OPUSLIB)).encode()).hexdigest()[:16]
-        self.cache_dir = root / f"{tag}-{fingerprint}"
-        self._lock = asyncio.Lock()
-        self._active = False
+    def __init__(self, root: Path, *, mirrors: tuple[str, ...] | None = None):
+        global _ACTIVE_RUNTIME
+        self.root = root
+        self.model_dir = root / MODEL_DIRNAME
+        self.mirrors = mirrors or MODEL_MIRRORS
+        self._install_lock = asyncio.Lock()
+        self._recognizer_lock = threading.Lock()
+        self._recognizers: dict[str, object] = {}
+        _ACTIVE_RUNTIME = self
+
+    @property
+    def model_path(self) -> Path:
+        return self.model_dir / MODEL_FILENAME
+
+    @property
+    def tokens_path(self) -> Path:
+        return self.model_dir / TOKENS_FILENAME
+
+    @property
+    def ready_marker(self) -> Path:
+        return self.model_dir / READY_MARKER
 
     def ready(self) -> bool:
-        if self._active:
-            return True
-        mark = next(
-            (path for path in self.cache_dir.glob("site-*/.ready")
-             if (path.parent / "doubaoime_asr" / "__init__.py").is_file()),
-            None,
-        )
-        if mark is None and getattr(sys, "frozen", False):
+        if not _sherpa_available():
             return False
-        self._active = self._load(mark.parent if mark else None)
-        return self._active
-
-    def _load(self, site: Path | None) -> bool:
-        path = str(site) if site is not None else None
-        added = path is not None and path not in sys.path
-        if added:
-            sys.path.insert(0, path)
-            importlib.invalidate_caches()
         try:
-            _use_bundled_opus()
-            importlib.import_module("doubaoime_asr")
-        except Exception as error:
-            if added:
-                sys.path.remove(path)
-            if site is not None:
-                logger.exception("Could not load the installed ASR component")
-                raise AppError(503, "ASR_ADDON_LOAD_FAILED", "语音组件加载失败，请重新打开知聆课堂后重试") from error
+            return (
+                self.ready_marker.is_file()
+                and self.model_path.is_file()
+                and self.tokens_path.is_file()
+                and self.model_path.stat().st_size > 0
+                and self.tokens_path.stat().st_size > 0
+            )
+        except OSError:
             return False
-        return True
 
     def require(self) -> None:
+        if not _sherpa_available():
+            raise AppError(
+                503,
+                "ASR_DEPENDENCY_UNAVAILABLE",
+                "当前运行环境缺少本地语音推理引擎 sherpa-onnx，请重新安装桌面应用",
+            )
         if not self.ready():
-            raise AppError(409, "ASR_ADDON_REQUIRED", "请先下载默认语音组件")
+            raise AppError(409, "ASR_ADDON_REQUIRED", "请先下载本地语音识别模型（SenseVoice）")
+
+    def get_recognizer(self, language: str = "auto"):
+        self.require()
+        lang_key = _normalize_sensevoice_language(language)
+        with self._recognizer_lock:
+            cached = self._recognizers.get(lang_key)
+            if cached is not None:
+                return cached
+            import sherpa_onnx  # type: ignore
+
+            num_threads = min(4, max(1, (os.cpu_count() or 2) // 2 or 1))
+            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=str(self.model_path),
+                tokens=str(self.tokens_path),
+                num_threads=num_threads,
+                sample_rate=16000,
+                use_itn=True,
+                language=lang_key,
+                provider="cpu",
+                debug=False,
+            )
+            self._recognizers[lang_key] = recognizer
+            return recognizer
+
+    def decode_pcm(self, pcm: bytes, language: str = "auto") -> str:
+        floats = pcm16le_to_floats(pcm)
+        if not floats:
+            return ""
+        recognizer = self.get_recognizer(language)
+        with self._recognizer_lock:
+            stream = recognizer.create_stream()
+            stream.accept_waveform(16000, floats)
+            recognizer.decode_stream(stream)
+            raw_text = getattr(stream.result, "text", "") or ""
+        return clean_sensevoice_text(raw_text)
+
+    def _warmup(self) -> None:
+        self.get_recognizer("auto")
+
+    async def download_stream(self, client: httpx.AsyncClient) -> AsyncIterator[dict]:
+        if not _sherpa_available():
+            raise AppError(
+                503,
+                "ASR_DEPENDENCY_UNAVAILABLE",
+                "当前运行环境缺少本地语音推理引擎 sherpa-onnx，请重新安装桌面应用",
+            )
+        if self.ready():
+            size = self.model_path.stat().st_size + self.tokens_path.stat().st_size
+            yield {
+                "type": "progress",
+                "stage": "ready",
+                "downloadedBytes": size,
+                "totalBytes": size,
+                "percent": 100,
+            }
+            yield {"type": "done", "data": True}
+            return
+
+        async with self._install_lock:
+            if self.ready():
+                size = self.model_path.stat().st_size + self.tokens_path.stat().st_size
+                yield {
+                    "type": "progress",
+                    "stage": "ready",
+                    "downloadedBytes": size,
+                    "totalBytes": size,
+                    "percent": 100,
+                }
+                yield {"type": "done", "data": True}
+                return
+
+            self.model_dir.mkdir(parents=True, exist_ok=True)
+            tokens_part = self.model_dir / f"{TOKENS_FILENAME}.part"
+            model_part = self.model_dir / f"{MODEL_FILENAME}.part"
+
+            yield {
+                "type": "progress",
+                "stage": "connecting",
+                "downloadedBytes": 0,
+                "totalBytes": MODEL_EXPECTED_BYTES,
+                "percent": 0,
+            }
+
+            last_error: Exception | None = None
+            downloaded_ok = False
+            final_total = MODEL_EXPECTED_BYTES
+
+            for mirror in self.mirrors:
+                base = mirror.rstrip("/")
+                tokens_part.unlink(missing_ok=True)
+                model_part.unlink(missing_ok=True)
+                try:
+                    # 1. 下载词表 tokens.txt（体积极小，同时可快速探活镜像）
+                    tokens_bytes = await self._download_small_file(client, f"{base}/{TOKENS_FILENAME}", tokens_part)
+                    # 验证词表为合法非空 UTF-8 文本
+                    decoded_tokens = tokens_part.read_text(encoding="utf-8")
+                    if not decoded_tokens.strip():
+                        raise ValueError("tokens.txt is empty")
+
+                    # 2. 流式下载主模型 model.int8.onnx 并实时推送真实字节进度
+                    model_bytes = 0
+                    expected_model_bytes = MODEL_EXPECTED_BYTES
+                    last_emit = 0.0
+                    last_percent = -1
+
+                    timeout = httpx.Timeout(connect=20.0, read=CHUNK_TIMEOUT_SECONDS, write=20.0, pool=20.0)
+                    async with client.stream(
+                        "GET",
+                        f"{base}/{MODEL_FILENAME}",
+                        follow_redirects=True,
+                        timeout=timeout,
+                    ) as response:
+                        response.raise_for_status()
+                        content_length = response.headers.get("content-length")
+                        if content_length and content_length.isdigit() and int(content_length) > 0:
+                            expected_model_bytes = int(content_length)
+                        final_total = tokens_bytes + expected_model_bytes
+
+                        with model_part.open("wb") as fh:
+                            async for chunk in response.aiter_bytes(CHUNK_BYTES):
+                                if not chunk:
+                                    continue
+                                fh.write(chunk)
+                                model_bytes += len(chunk)
+                                combined = tokens_bytes + model_bytes
+                                percent = min(99, int(combined * 100 / max(1, final_total)))
+                                now = time.monotonic()
+                                if (now - last_emit) >= PROGRESS_INTERVAL_SECONDS or percent > last_percent:
+                                    last_emit = now
+                                    last_percent = percent
+                                    yield {
+                                        "type": "progress",
+                                        "stage": "downloading",
+                                        "downloadedBytes": combined,
+                                        "totalBytes": final_total,
+                                        "percent": percent,
+                                    }
+
+                    if model_bytes <= 0:
+                        raise ValueError("downloaded model file is empty")
+                    if content_length and content_length.isdigit() and model_bytes != int(content_length):
+                        raise ValueError(
+                            f"incomplete model download: got {model_bytes}, expected {content_length}"
+                        )
+
+                    final_total = tokens_bytes + model_bytes
+                    downloaded_ok = True
+                    logger.info("Downloaded SenseVoice model (%d bytes) from %s", model_bytes, base)
+                    break
+                except (httpx.HTTPError, TimeoutError, OSError, ValueError) as exc:
+                    last_error = exc
+                    logger.warning("SenseVoice download failed from %s: %s", base, exc)
+                    tokens_part.unlink(missing_ok=True)
+                    model_part.unlink(missing_ok=True)
+
+            if not downloaded_ok:
+                raise AppError(
+                    502,
+                    "ASR_ADDON_DOWNLOAD_FAILED",
+                    "本地语音模型下载失败，请检查网络连接后重试",
+                ) from last_error
+
+            yield {
+                "type": "progress",
+                "stage": "verifying",
+                "downloadedBytes": final_total,
+                "totalBytes": final_total,
+                "percent": 99,
+            }
+
+            tokens_part.replace(self.tokens_path)
+            model_part.replace(self.model_path)
+            self.ready_marker.write_text("sense-voice-small-int8\n", encoding="utf-8")
+            with self._recognizer_lock:
+                self._recognizers.clear()
+
+            yield {
+                "type": "progress",
+                "stage": "starting",
+                "downloadedBytes": final_total,
+                "totalBytes": final_total,
+                "percent": 100,
+            }
+
+            try:
+                await asyncio.to_thread(self._warmup)
+            except Exception as exc:
+                self.ready_marker.unlink(missing_ok=True)
+                self.model_path.unlink(missing_ok=True)
+                self.tokens_path.unlink(missing_ok=True)
+                logger.warning("SenseVoice warmup failed: %s", exc)
+                raise AppError(
+                    500,
+                    "ASR_MODEL_LOAD_FAILED",
+                    "本地语音模型加载失败，文件可能已损坏，请重新下载",
+                ) from exc
+
+            yield {
+                "type": "progress",
+                "stage": "ready",
+                "downloadedBytes": final_total,
+                "totalBytes": final_total,
+                "percent": 100,
+            }
+            yield {"type": "done", "data": True}
+
+    async def _download_small_file(
+        self, client: httpx.AsyncClient, url: str, target: Path
+    ) -> int:
+        total = 0
+        timeout = httpx.Timeout(connect=20.0, read=CHUNK_TIMEOUT_SECONDS, write=20.0, pool=20.0)
+        async with client.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
+            response.raise_for_status()
+            with target.open("wb") as fh:
+                async for chunk in response.aiter_bytes(65_536):
+                    if chunk:
+                        fh.write(chunk)
+                        total += len(chunk)
+        return total
 
     async def install(self, client: httpx.AsyncClient) -> None:
-        async with self._lock:
-            if self.ready():
-                return
-            if self.audio_wheel is None:
-                raise AppError(400, "ASR_ADDON_UNSUPPORTED", "当前系统需要在 Python 环境中安装语音依赖")
-            if sys.platform == "darwin":
-                _use_bundled_opus()
-                library = ctypes.util.find_library("opus")
-                try:
-                    if not library:
-                        raise OSError("libopus.dylib not found")
-                    ctypes.CDLL(library)
-                except OSError as error:
-                    raise AppError(503, "ASR_OPUS_UNAVAILABLE", "无法加载 Opus，请检查 Mac 应用包是否完整") from error
-
-            # Mark a cache as ready only after extraction and a successful import.
-            source, opuslib, *wheels = await asyncio.gather(
-                _fetch(client, _SOURCE_URL),
-                _pypi_file(client, *_OPUSLIB),
-                *(_pypi_file(client, *entry) for entry in (*self.wheels, self.audio_wheel)),
-                return_exceptions=True,
-            )
-            if isinstance(source, BaseException):
-                logger.warning("Could not download the ASR source: %s", source)
-                raise AppError(502, "ASR_ADDON_DOWNLOAD_FAILED", "语音组件下载失败，请检查 GitHub 连接后重试") from source
-            for artifact in (opuslib, *wheels):
-                if isinstance(artifact, BaseException):
-                    raise artifact
-            site = None
-            try:
-                self.cache_dir.mkdir(parents=True, exist_ok=True)
-                site = Path(mkdtemp(prefix="site-", dir=self.cache_dir))
-                _install_source(source, site)
-                _install_opuslib(opuslib, site)
-                for wheel in wheels:
-                    with ZipFile(BytesIO(wheel)) as archive:
-                        archive.extractall(site)
-                self._load(site)
-                (site / ".ready").touch()
-            except (OSError, ValueError, BadZipFile, tarfile.TarError) as error:
-                logger.exception("Could not install the ASR component")
-                raise AppError(503, "ASR_ADDON_INSTALL_FAILED", "语音组件安装失败，请重试") from error
-            finally:
-                if site is not None and not (site / ".ready").is_file():
-                    shutil.rmtree(site, ignore_errors=True)
-            self._active = True
+        async for _event in self.download_stream(client):
+            pass

@@ -18,7 +18,7 @@ import {
   OPENCODE_FREE_PROVIDER_ID,
 } from '../../constants/providers';
 import { useAudioDevices } from '../../hooks/useAudioDevices';
-import { IS_MOCK_MODE } from '../../services/api';
+import { IS_MOCK_MODE, api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type { AIModuleKey, ApiProtocol } from '../../types/domain';
 import { ProviderIcon } from '../icons/ProviderIcons';
@@ -48,6 +48,8 @@ export const SettingsModal: React.FC = () => {
     setSettingsOpen,
     settings,
     aec3Addon,
+    addonDownload,
+    ensureBuiltinAsrReady,
     updateSettings,
     requestToggleWebrtcAec3,
     setMicChannel,
@@ -58,12 +60,29 @@ export const SettingsModal: React.FC = () => {
   } = useAppStore();
 
   const [activeTab, setActiveTab] = useState<SettingsTabKey>('llm');
+  const [localAsrReady, setLocalAsrReady] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (settingsOpen && settingsDefaultTab) {
       setActiveTab(settingsDefaultTab);
     }
   }, [settingsOpen, settingsDefaultTab]);
+
+  useEffect(() => {
+    if (!settingsOpen || IS_MOCK_MODE) return;
+    let active = true;
+    void api
+      .getBuiltinAsrReady()
+      .then((ready) => {
+        if (active) setLocalAsrReady(ready);
+      })
+      .catch(() => {
+        if (active) setLocalAsrReady(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [settingsOpen, addonDownload.stage]);
   const [llmPickerOpen, setLlmPickerOpen] = useState(false);
   const [asrPickerOpen, setAsrPickerOpen] = useState(false);
   const [showLlmKey, setShowLlmKey] = useState(false);
@@ -534,7 +553,7 @@ export const SettingsModal: React.FC = () => {
                         </div>
                         <div className="text-[14px] text-[#4E5969]">
                           {selectedAsr.providerId === 'builtin-free-asr'
-                            ? '免登录默认流式语音识别 · 无需填写 API Key'
+                            ? '纯本地离线语音识别 · 首次使用下载模型 · 无需 API Key'
                             : '实时流式语音识别与角色分离'}
                         </div>
                       </div>
@@ -547,17 +566,28 @@ export const SettingsModal: React.FC = () => {
                 </div>
 
                 {selectedAsr.providerId === 'builtin-free-asr' ? (
-                  <div className="rounded-xl border border-[#BEDAFF] bg-[#F0F4FF]/70 p-4 space-y-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[15px] font-semibold text-[#1F2329]">
-                        默认免登录流式识别通道
-                      </span>
-                      <span className="px-2 py-0.5 rounded-md bg-[#EBF2FF] border border-[#BEDAFF] text-[14px] font-medium text-[#1456F0]">
-                        无需 API Key
-                      </span>
+                  <div className="rounded-xl border border-[#BEDAFF] bg-[#F0F4FF]/70 p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[15px] font-semibold text-[#1F2329]">
+                          SenseVoice-Small 本地离线引擎
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-[#EBF2FF] border border-[#BEDAFF] text-[14px] font-medium text-[#1456F0]">
+                          {localAsrReady ? '模型已就绪' : '首次使用自动下载'}
+                        </span>
+                      </div>
+                      {localAsrReady === false && (
+                        <button
+                          type="button"
+                          onClick={() => void ensureBuiltinAsrReady()}
+                          className="h-9 px-3.5 rounded-lg bg-[#1456F0] text-white text-[14px] font-medium hover:bg-[#3370FF] transition-colors cursor-pointer"
+                        >
+                          立即下载模型
+                        </button>
+                      )}
                     </div>
                     <p className="text-[14px] leading-relaxed text-[#4E5969]">
-                      当前已选中免登录默认语音通道，无需填写密钥或服务地址；你也可以随时点击上方供应商卡片切换为任意云端语音服务。
+                      完全在本机运行的离线语音转写模型（支持中文、英文、中英混合与自动标点，首次下载约 239 MB）。不依赖云端网络、无额度限制，也无需填写任何 API Key。
                     </p>
                   </div>
                 ) : (

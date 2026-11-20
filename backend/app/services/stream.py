@@ -108,7 +108,7 @@ class ClassroomStreams:
     ) -> list[str]:
         config = self.active_asr(settings)
         options = recognition_options(settings, hotwords)
-        adapter = build_adapter(self.client, config, options)
+        adapter = build_adapter(self.client, config, options, builtin_asr=self.builtin_asr)
         run_id = uuid4().hex
         saved_utterance_ids: list[str] = []
         last_final_ms = offset_ms
@@ -401,6 +401,7 @@ class RecognitionRun:
                 self.connection.owner.client,
                 config,
                 self.options,
+                builtin_asr=self.connection.owner.builtin_asr,
             )
             await adapter.start()
             has_physical_dual_split = (

@@ -143,11 +143,11 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
 export const ASR_PROVIDER_PRESETS: AsrProviderPreset[] = [
   {
     id: 'builtin-free-asr',
-    name: '默认免登录语音',
+    name: '本地离线语音（SenseVoice）',
     protocol: 'builtin-free-asr',
-    defaultBaseUrl: 'builtin://default',
+    defaultBaseUrl: 'local://sensevoice',
     isLocalFree: true,
-    defaultModels: ['default'],
+    defaultModels: ['sensevoice-small-int8'],
   },
   {
     id: 'openai-audio',

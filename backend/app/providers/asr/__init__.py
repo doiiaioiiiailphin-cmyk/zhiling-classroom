@@ -57,10 +57,11 @@ def build_adapter(
     client: httpx.AsyncClient,
     config: ASRProvider,
     options: Recognition,
+    builtin_asr=None,
 ) -> ASRStreamAdapter:
     protocol = config.protocol
     if protocol == "builtin-free-asr":
-        return BuiltinFreeAsrAdapter(options)
+        return BuiltinFreeAsrAdapter(options, runtime=builtin_asr)
 
     key = require_key(config.api_key, optional=protocol == "custom-asr")
     model = config.selected_model_id.strip()
@@ -147,7 +148,7 @@ async def list_asr_models(
 ) -> list[str]:
     protocol = config.protocol
     if protocol == "builtin-free-asr":
-        return ["default"]
+        return ["sensevoice-small-int8"]
     key = require_key(config.api_key, optional=protocol == "custom-asr")
     base = endpoint(config.base_url, {"http", "https", "wss", "ws"})
     http_base = change_scheme(base, websocket=False)

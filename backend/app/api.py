@@ -335,6 +335,16 @@ async def download_builtin_asr(
     return Response(status_code=204)
 
 
+@router.post("/addons/builtin-free-asr/download/stream")
+async def download_builtin_asr_stream(
+    request: Request, confirmed: Annotated[StrictBool, Body(embed=True)],
+) -> StreamingResponse:
+    if not confirmed:
+        raise AppError(400, "ASR_DOWNLOAD_NOT_CONFIRMED", "请先确认下载本地语音识别模型")
+    events = request.app.state.builtin_asr.download_stream(request.app.state.http)
+    return StreamingResponse(sse_encode(events), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 @router.get("/addons/webrtc-aec3")
 async def get_aec3_addon(request: Request, response: Response) -> Data[Aec3AddonStatus]:
     response.headers["Cache-Control"] = "no-store"

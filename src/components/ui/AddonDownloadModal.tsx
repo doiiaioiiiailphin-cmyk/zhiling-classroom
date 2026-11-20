@@ -12,8 +12,25 @@ function formatBytes(bytes: number): string {
 }
 
 function describeStage(
+  addon: 'asr' | 'opencode',
   stage: OpenCodeDownloadProgress['stage'] | undefined
 ): string {
+  if (addon === 'asr') {
+    switch (stage) {
+      case 'connecting':
+        return '正在连接模型镜像源...';
+      case 'downloading':
+        return '正在下载 SenseVoice 本地语音模型...';
+      case 'verifying':
+        return '正在校验模型文件完整性...';
+      case 'starting':
+        return '正在初始化本地语音识别引擎...';
+      case 'ready':
+        return '本地语音模型已就绪，正在继续...';
+      default:
+        return '正在准备下载本地语音模型...';
+    }
+  }
   switch (stage) {
     case 'connecting':
       return '正在连接组件源...';
@@ -45,7 +62,7 @@ export function AddonDownloadModal() {
       open={stage !== 'closed'}
       onClose={close}
       closable={!downloading}
-      title={opencode ? '下载 OpenCode 组件' : '下载默认语音组件'}
+      title={opencode ? '下载 OpenCode 组件' : '下载本地语音识别模型'}
       widthClass="max-w-md"
       layerClass="z-[80]"
     >
@@ -53,15 +70,15 @@ export function AddonDownloadModal() {
         <p className="text-[15px] leading-relaxed text-[#1F2329]">
           {opencode
             ? '首次使用 OpenCode 免费模型需要下载组件。'
-            : '首次使用默认免登录语音需要下载语音组件。'}
+            : '首次使用本地离线语音（SenseVoice）需要下载约 239 MB 模型文件，下载完成后即可完全离线识别，无需联网或 API Key。'}
         </p>
 
-        {downloading && opencode && (
+        {downloading && (
           <div className="space-y-2 rounded-xl border border-[#BEDAFF] bg-[#F5F8FF] p-4">
             <div className="flex items-center justify-between gap-2 text-[14px]">
               <span className="font-medium text-[#1456F0] flex items-center gap-2 min-w-0">
                 <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span className="truncate">{describeStage(progress?.stage)}</span>
+                <span className="truncate">{describeStage(addon, progress?.stage)}</span>
               </span>
               {transfer && (
                 <span className="font-semibold text-[#1F2329] tabular-nums shrink-0">

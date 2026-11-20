@@ -8,10 +8,6 @@ on:
         type: choice
         options: [arm64, x86_64]
         default: arm64
-      verify_addons:
-        description: Verify the pinned add-ons with real downloads
-        type: boolean
-        default: false
   push:
     tags:
       - 'v*'
@@ -47,10 +43,6 @@ jobs:
 
       - name: Build ZhilingClassroom.app and .dmg
         run: bash scripts/build_macos.sh
-
-      - name: Verify desktop add-ons
-        if: ${{ inputs.verify_addons }}
-        run: python3 -X utf8 scripts/verify_desktop_addons.py
 
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4

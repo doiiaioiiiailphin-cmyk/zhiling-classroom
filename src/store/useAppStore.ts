@@ -682,7 +682,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             set({ addonDownloadProgress: progress });
           });
         } else {
-          await api.downloadBuiltinAsr();
+          await api.streamDownloadBuiltinAsr((progress) => {
+            set({ addonDownloadProgress: progress });
+          });
         }
         finishDownloadPrompt(true);
       } catch (err) {
@@ -690,7 +692,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           addonDownload: { addon, stage: 'confirm' },
           addonDownloadProgress: null,
         });
-        showNotice('error', err instanceof Error ? err.message : '组件下载失败，请重试');
+        showNotice(
+          'error',
+          err instanceof Error
+            ? err.message
+            : addon === 'opencode'
+              ? '组件下载失败，请重试'
+              : '本地语音模型下载失败，请重试'
+        );
       }
     },
 

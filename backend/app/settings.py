@@ -43,7 +43,7 @@ LEGACY_DEFAULT_LLM_ROUTING = {
 }
 
 ASR_PRESETS = (
-    ("builtin-free-asr", "默认免登录语音", "builtin-free-asr", "builtin://default"),
+    ("builtin-free-asr", "本地离线语音（SenseVoice）", "builtin-free-asr", "local://sensevoice"),
     ("openai-audio", "OpenAI 语音", "openai-audio", "https://api.openai.com/v1"),
     ("aliyun-asr", "阿里云通义听悟", "aliyun-tingwu", "wss://dashscope.aliyuncs.com/api-ws/v1/inference"),
     ("volcengine-asr", "豆包流式语音", "volcengine-asr", "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"),
@@ -230,13 +230,19 @@ class SettingsStore:
                 if "builtin-free-asr" not in asr_map:
                     asr_map["builtin-free-asr"] = {
                         "providerId": "builtin-free-asr",
-                        "name": "默认免登录语音",
+                        "name": "本地离线语音（SenseVoice）",
                         "protocol": "builtin-free-asr",
-                        "baseUrl": "builtin://default",
+                        "baseUrl": "local://sensevoice",
                         "apiKey": "",
                         "availableModels": [],
                         "selectedModelId": "",
                     }
+                elif isinstance(asr_map["builtin-free-asr"], dict):
+                    entry = asr_map["builtin-free-asr"]
+                    if entry.get("name") in ("", None, "默认免登录语音"):
+                        entry["name"] = "本地离线语音（SenseVoice）"
+                    if entry.get("baseUrl") in ("", None, "builtin://default"):
+                        entry["baseUrl"] = "local://sensevoice"
                 cur_sel = payload.get("selectedAsrProviderId")
                 cur_cfg = asr_map.get(cur_sel) if isinstance(cur_sel, str) else None
                 if cur_sel == "local-sensevoice" or (

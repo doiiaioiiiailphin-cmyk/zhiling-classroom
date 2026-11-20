@@ -5,22 +5,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-$TargetPlatform = python -B -c "import sysconfig; print(sysconfig.get_platform())"
-if ($LASTEXITCODE -ne 0) {
-    throw "无法检测打包使用的 Python 架构"
-}
 python -B -c "import sys, sysconfig; raise SystemExit(not (sys.implementation.name == 'cpython' and (3, 11) <= sys.version_info[:2] <= (3, 14) and not sysconfig.get_config_var('Py_GIL_DISABLED')))"
 if ($LASTEXITCODE -ne 0) {
-    throw "打包需要常规 CPython 3.11 至 3.14，以匹配首次下载的语音依赖"
-}
-$OpusDirectory = Join-Path $Root "assets\opus\$TargetPlatform"
-$OpusDll = Join-Path $OpusDirectory "opus.dll"
-$OpusLicense = Join-Path $OpusDirectory "COPYING"
-$OpusOrigin = Join-Path $OpusDirectory "ORIGIN.txt"
-foreach ($OpusFile in @($OpusDll, $OpusLicense, $OpusOrigin)) {
-    if (!(Test-Path -LiteralPath $OpusFile -PathType Leaf)) {
-        throw "缺少 Opus 打包文件 $OpusFile"
-    }
+    throw "打包需要常规 CPython 3.11 至 3.14"
 }
 
 Write-Host "[1/4] 生成多尺寸高清透明应用图标 (assets/zhiling.ico)..." -ForegroundColor Cyan
@@ -37,7 +24,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "前端构建失败"
 }
 
-Write-Host "[3/4] 准备 Windows 桌面包依赖" -ForegroundColor Cyan
+Write-Host "[3/4] 准备 Windows 桌面包依赖（含本地 SenseVoice / sherpa-onnx 引擎）..." -ForegroundColor Cyan
 python -m pip install -r "$Root\backend\requirements-runtime.txt" pywebview pyinstaller
 if ($LASTEXITCODE -ne 0) {
     throw "依赖安装失败"
@@ -60,13 +47,6 @@ python -m PyInstaller `
     --paths "$Root\backend" `
     --add-data "$Root\dist;dist" `
     --add-data "$Root\assets\zhiling.ico;assets" `
-    --add-binary "$OpusDll;asr" `
-    --upx-exclude "opus.dll" `
-    --add-data "$OpusLicense;licenses/opus" `
-    --add-data "$OpusOrigin;licenses/opus" `
-    --exclude-module "doubaoime_asr" `
-    --hidden-import "cffi" `
-    --hidden-import "_cffi_backend" `
     --hidden-import "greenlet" `
     --hidden-import "aiosqlite" `
     --hidden-import "sqlalchemy.dialects.sqlite.aiosqlite" `
@@ -81,6 +61,8 @@ python -m PyInstaller `
     --hidden-import "websockets.legacy" `
     --hidden-import "websockets.legacy.server" `
     --hidden-import "websockets.legacy.client" `
+    --collect-all "sherpa_onnx" `
+    --collect-data "certifi" `
     --collect-data "tzdata" `
     --collect-data "webview" `
     --collect-binaries "webview" `

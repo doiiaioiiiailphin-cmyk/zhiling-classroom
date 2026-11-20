@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 知聆课堂 macOS 桌面应用构建脚本（Cocoa WKWebView 无边框圆角 + ScreenCaptureKit 免驱内录）
+# 知聆课堂 macOS 桌面应用构建脚本（Cocoa WKWebView 无边框圆角 + ScreenCaptureKit 免驱内录 + 本地 SenseVoice）
 # 用法：bash scripts/build_macos.sh
 set -euo pipefail
 
@@ -27,7 +27,6 @@ if [[ "$(uname -m)" != "$MAC_ARCH" ]]; then
   echo "请在与 Python 架构相同的终端中打包。" >&2
   exit 1
 fi
-OPUS_TAG="macosx-$MAC_ARCH"
 
 echo "[1/6] 生成 Windows + macOS 多尺寸高清图标 (assets/zhiling.icns)..."
 "$PYTHON_BIN" -X utf8 "$ROOT/scripts/generate_icon.py"
@@ -50,28 +49,10 @@ export VITE_USE_MOCK="false"
 export VITE_API_BASE_URL="/api/v1"
 npm run build
 
-echo "[4/6] 安装 macOS 桌面宿主与打包依赖..."
+echo "[4/6] 安装 macOS 桌面宿主与本地语音引擎 (sherpa-onnx) 依赖..."
 "$PYTHON_BIN" -m pip install -r "$ROOT/backend/requirements-macos.txt"
 
 echo "[5/6] 使用 PyInstaller 构建 macOS .app 应用包 (release/ZhilingClassroom.app)..."
-OPUS_DIR="$ROOT/assets/opus/$OPUS_TAG"
-if [[ ! -f "$OPUS_DIR/libopus.dylib" ]]; then
-  bash "$ROOT/scripts/build_opus_macos.sh" "$MAC_ARCH"
-  OPUS_DIR="$ROOT/build/opus-macos/$MAC_ARCH"
-fi
-if [[ ! -s "$OPUS_DIR/COPYING" ]]; then
-  echo "Opus 缺少原始 COPYING。请补齐许可证或使用脚本生成的库。" >&2
-  exit 1
-fi
-lipo "$OPUS_DIR/libopus.dylib" -verify_arch "$MAC_ARCH"
-
-EXTRA_ARGS=(
-  --add-binary "$OPUS_DIR/libopus.dylib:asr"
-  --add-data "$OPUS_DIR/COPYING:licenses/opus"
-)
-if [[ -f "$OPUS_DIR/ORIGIN.txt" ]]; then
-  EXTRA_ARGS+=(--add-data "$OPUS_DIR/ORIGIN.txt:licenses/opus")
-fi
 MAC_DIST="$ROOT/build/pyinstaller-macos/dist"
 
 "$PYTHON_BIN" -m PyInstaller \
@@ -89,10 +70,7 @@ MAC_DIST="$ROOT/build/pyinstaller-macos/dist"
   --paths "$ROOT/backend" \
   --add-data "$ROOT/dist:dist" \
   --add-binary "$HELPER_BIN:bin" \
-  --exclude-module "doubaoime_asr" \
   --hidden-import "desktop_macos" \
-  --hidden-import "cffi" \
-  --hidden-import "_cffi_backend" \
   --hidden-import "greenlet" \
   --hidden-import "aiosqlite" \
   --hidden-import "sqlalchemy.dialects.sqlite.aiosqlite" \
@@ -107,6 +85,7 @@ MAC_DIST="$ROOT/build/pyinstaller-macos/dist"
   --hidden-import "websockets.legacy" \
   --hidden-import "websockets.legacy.server" \
   --hidden-import "websockets.legacy.client" \
+  --collect-all "sherpa_onnx" \
   --collect-data "certifi" \
   --collect-data "tzdata" \
   --collect-data "webview" \
@@ -124,7 +103,6 @@ MAC_DIST="$ROOT/build/pyinstaller-macos/dist"
   --exclude-module "wx" \
   --exclude-module "IPython" \
   --exclude-module "pytest" \
-  "${EXTRA_ARGS[@]}" \
   "$ROOT/backend/desktop_shell.py"
 
 APP_BUNDLE="$MAC_DIST/ZhilingClassroom.app"
@@ -154,8 +132,7 @@ PYEOF
 
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
-"$PYTHON_BIN" - "$APP_BUNDLE" "$OPUS_DIR/COPYING" <<'PYEOF'
-import ctypes
+"$PYTHON_BIN" - "$APP_BUNDLE" <<'PYEOF'
 import sys
 from pathlib import Path
 
@@ -163,20 +140,20 @@ contents = Path(sys.argv[1]) / "Contents"
 roots = [contents / name for name in ("Frameworks", "Resources", "MacOS")]
 dist_index = next((root / "dist/index.html" for root in roots if (root / "dist/index.html").is_file()), None)
 audio_helper = next((root / "bin/ZhilingAudioCapture" for root in roots if (root / "bin/ZhilingAudioCapture").is_file()), None)
+cacert = next((root / "certifi/cacert.pem" for root in roots if (root / "certifi/cacert.pem").is_file()), None)
+sherpa_lib = next(
+    (p for root in roots if (root / "sherpa_onnx").is_dir() for p in (root / "sherpa_onnx").rglob("*.dylib")),
+    None,
+)
 if dist_index is None:
     sys.exit("应用包缺少前端静态产物 dist/index.html")
 if audio_helper is None:
     sys.exit("应用包缺少 macOS 系统内录助手 bin/ZhilingAudioCapture")
-cacert = next((root / "certifi/cacert.pem" for root in roots if (root / "certifi/cacert.pem").is_file()), None)
 if cacert is None:
     sys.exit("应用包缺少 TLS 根证书 certifi/cacert.pem")
-dylib = next((root / "asr/libopus.dylib" for root in roots if (root / "asr/libopus.dylib").is_file()), None)
-notice = next((root / "licenses/opus/COPYING" for root in roots if (root / "licenses/opus/COPYING").is_file()), None)
-if dylib is None or notice is None or notice.read_bytes() != Path(sys.argv[2]).read_bytes():
-    sys.exit("应用包缺少 Opus 动态库或其原始许可证")
-lib = ctypes.CDLL(str(dylib))
-lib.opus_get_version_string.restype = ctypes.c_char_p
-print("应用包已加载", lib.opus_get_version_string().decode())
+if sherpa_lib is None:
+    sys.exit("应用包缺少本地语音识别推理库 sherpa_onnx")
+print("应用包自检通过，已包含本地语音推理库：", sherpa_lib.name)
 PYEOF
 
 DMG_STAGING="$ROOT/build/dmg-staging"

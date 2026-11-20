@@ -8,3 +8,4 @@ websockets>=14,<16
 pydantic==2.12.5
 cryptography==46.0.5
 tzdata>=2025.2
+sherpa-onnx==2.0.2
