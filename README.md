@@ -1,39 +1,68 @@
-# 知聆课堂
+# 知聆课堂 (Zhiling Classroom)
 
 **把正在讲的课，变成课后能搜、能问、能复习的笔记。**
 
-知聆课堂是一个面向 Windows 的 AI 听课工作台。从双路录音、流式字幕到知识点整理，整堂课的录音、转写和复习材料都能在一个课堂里找到。
+知聆课堂是一款面向 **Windows 与 macOS** 的本地优先 AI 听课工作台。集双路免驱动拾音、本地离线语音转写、实时上下文 AI 助教、知识点分段高亮、闪卡/笔记导出与自动更新于一体，整堂课的录音、转写与复习资料完全保存在本地设备中。
 
-- **上课跟得住**。采集麦克风和系统声音，实时显示字幕，随时标记重点或疑问。
-- **复习找得快**。按关键词搜转写，跳到录音原处回听，围绕课堂内容提问或展开段落详解。
-- **课后整理得清楚**。导入现成音视频，按知识点组织转写，生成笔记和闪卡。
+## 核心特性
 
-## 下载 Windows 版
+- **双平台免驱动双路拾音**：
+  - **Windows**：原生 WASAPI 系统内录 + 麦克风双通道采集，支持一键按需下载 WebRTC AEC3 双讲回声消除。
+  - **macOS**：macOS 14.2+ 原生 CoreAudio Process Tap 纯系统音频内录（免虚拟声卡、免录屏反复弹窗，macOS 13.x 自动回退 ScreenCaptureKit），原生左置红黄绿交通灯与全局快捷键。
+- **开箱即用本地离线语音识别**：内置 `sherpa-onnx` SenseVoice-Small（int8）推理引擎，首次使用从魔搭（ModelScope）高速下载模型并做 SHA-256 校验，断网也能实时转写；同时也支持接入 OpenAI、阿里云听悟、火山引擎、讯飞、腾讯云、Deepgram、AssemblyAI、ElevenLabs 等云端语音供应商。
+- **多协议 AI 课堂助教与知识整理**：原生支持 OpenAI / Anthropic / Google Gemini / OpenAI-Compatible 协议与主流大模型供应商预设，以及开箱即用的 OpenCode 免费模型；支持课堂实时上下文问答（支持粘贴板书截图 / 全局快捷键抓屏）、黄色荧光笔重点术语解析、AI 自动重分段、结构化复习笔记、闪卡生成与 Markdown / Word / TXT / Anki 导出。
+- **置顶迷你字幕窗与外力暂停系统置顶告警**：看网课或全屏写代码时可开启透明置顶迷你字幕窗；录音因外部设备断开或异常意外暂停时，在 Windows / macOS 屏幕顶部弹出 OS 级不抢焦点告警卡片，一键恢复录音。
+- **国内高速全自动热更新**：每次启动静默通过 CNB 公开仓库检测新版，右下角弹窗一键下载（流式 SHA-256 校验）并自动替换重启，零数据丢失。
+- **本地优先与隐私加密**：课堂记录保存在本机 SQLite，所有 API Key 均采用本机密钥 AES-GCM 加密存储，不上传任何个人课堂数据。
 
-从 [Releases](../../releases) 下载 Windows x64 压缩包，完整解压后运行 `ZhilingClassroom.exe`。
+## 下载安装包
 
-首次使用默认免登录语音或「OpenCode 免费模型」时，按弹窗确认下载相应组件。下载后保存在用户目录，下次直接复用。语音和文字供应商均可在设置中切换。 [供应商配置](backend/README.md#供应商接入) · [Windows 打包](docs/WINDOWS_PACKAGING_LICENSES.md)
+可从 [GitHub Releases](../../releases) 或国内高速镜像 [CNB Releases](https://cnb.cool/dolphin114/zhiling-classroom/-/releases) 下载最新正式版：
 
-## 前端开发预览
+| 平台与架构 | 安装包 | 说明 |
+| --- | --- | --- |
+| **Windows (x64) 安装向导** | `ZhilingClassroom-Setup-<version>-x86_64.exe` | 推荐，图形化向导，默认免管理员安装，自动创建桌面/开始菜单快捷方式并支持自动热更新 |
+| **Windows (x64) 便携版** | `ZhilingClassroom-Windows-x86_64.zip` | 解压即用（同时为客户端自动热更新下载包） |
+| **macOS Apple Silicon (M 系列)** | `ZhilingClassroom-macOS-arm64.dmg` | 适用于 M1 / M2 / M3 / M4 芯片 Mac，打开拖入「应用程序」即可 |
+| **macOS Intel** | `ZhilingClassroom-macOS-x86_64.dmg` | 适用于 Intel 芯片 Mac |
+
+## 本地开发与自行打包
+
+### 1. 前端开发与构建
 
 ```bash
-# 安装依赖
 npm install
-
-# 启动本地开发预览服务器
-npm run dev
-
-# 类型检查与生产构建
-npm run typecheck
-npm run build
+npm run dev        # 启动前端开发服务器 (http://localhost:5173)
+npm run typecheck  # TypeScript 类型检查
+npm run build      # 构建生产静态资源 (dist/)
 ```
 
-联调和真实转写需要启动后端。 [本地联调说明](backend/README.md#一键联调)
+### 2. 后端服务与单元测试
+
+```bash
+python -m pip install -r backend/requirements-runtime.txt
+python backend/run.py                                      # 启动本地 FastAPI 服务 (http://127.0.0.1:8000)
+python -X utf8 -m unittest discover -s backend/tests -v    # 运行全部单元测试
+```
+
+### 3. 桌面端打包
+
+- **Windows（产出独立目录 + 热更新 ZIP + NSIS 安装程序）**：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+  ```
+- **macOS（需在对应架构 macOS 上执行，产出 `.app` 与 `.dmg`）**：
+  ```bash
+  bash scripts/build_macos.sh
+  ```
 
 ## 目录结构
 
-- `src/components/home/`：主菜单工作台（首格 `+` 开启新课堂、已保存课堂卡片继续录音、右键菜单与文件夹管理）
-- `src/components/classroom/`：可拖拽双栏课堂界面（左侧实时上下文 AI 问答、右侧讲话人识别转写、黄色荧光笔重点词悬浮 Tooltip、自动重分段与左侧气泡点击详情弹出框）
-- `src/components/settings/`：系统设置中心与带矢量图标的方格供应商选择弹窗（覆盖 OpenAI / Anthropic / Google Gemini 原生协议及主流 LLM 与语音转写预设）
-- `src/services/`：前后端零耦合通信层（`api.ts`、`classroomSocket.ts`、`mockData.ts`）
-- `docs/BACKEND_DEVELOPMENT_GUIDE.md`：**完整后端开发与接口规范手册**
+- `src/`：React 19 + TypeScript + Tailwind CSS v4 前端工作台（`home/`、`classroom/`、`overlay/`、`settings/`、`services/`）
+- `backend/`：FastAPI + SQLite + AES-GCM + `sherpa-onnx` 本地服务，以及 Windows / macOS `pywebview` 原生桌面宿主（`desktop_shell.py`、`desktop_macos.py`）
+- `scripts/`：图标生成、macOS Swift 系统内录助手（`mac_audio_helper/`）、Windows NSIS 安装脚本（`installer_windows.nsi`）、打包与 CNB Release 发布脚本
+- `docs/`：后端接口规范与开源许可证说明
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源。
