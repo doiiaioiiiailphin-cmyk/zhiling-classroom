@@ -17,6 +17,9 @@ import type {
   SessionExportRequest,
   SessionStudyNote,
   SessionWorkspacePayload,
+  UpdateApplyResult,
+  UpdateCheckResult,
+  UpdateDownloadProgress,
   UtteranceItem,
   UtterancePatch,
 } from '../types/domain';
@@ -77,6 +80,7 @@ type SseServerFrame<T> =
       downloadedBytes: number;
       totalBytes: number;
       percent: number;
+      speedBytesPerSec?: number;
     }
   | { type: 'done'; data: T }
   | { type: 'opencode-required' }
@@ -708,5 +712,53 @@ export const api = {
   getNativeAudioDevices(): Promise<NativeAudioDevices> {
     if (IS_MOCK_MODE) return mockAdapter.getNativeAudioDevices();
     return requestJson<NativeAudioDevices>('/audio/devices');
+  },
+
+  // ---------------- CNB 自动检查更新与热更新 ----------------
+  checkAppUpdates(force = false): Promise<UpdateCheckResult> {
+    if (IS_MOCK_MODE) {
+      return Promise.resolve({
+        currentVersion: '0.1.2',
+        latestVersion: '0.1.2',
+        hasUpdate: false,
+        releaseTitle: '',
+        releaseNotes: '',
+        releaseUrl: '',
+        publishedAt: '',
+        platform: 'web',
+        arch: 'x86_64',
+        repo: '',
+        canAutoApply: false,
+        stagedReady: false,
+        asset: null,
+        checkedAt: new Date().toISOString(),
+      });
+    }
+    const qs = force ? '?force=true' : '';
+    return requestJson<UpdateCheckResult>(`/updates/check${qs}`, { cache: 'no-store' });
+  },
+
+  streamDownloadAppUpdate(
+    onProgress?: (progress: UpdateDownloadProgress) => void
+  ): Promise<{ version: string; filePath: string; sha256: string }> {
+    return requestSse<{ version: string; filePath: string; sha256: string }>(
+      '/updates/download/stream',
+      undefined,
+      (frame) => {
+        if (frame.type === 'progress') {
+          onProgress?.({
+            stage: frame.stage as UpdateDownloadProgress['stage'],
+            downloadedBytes: frame.downloadedBytes,
+            totalBytes: frame.totalBytes,
+            percent: frame.percent,
+            speedBytesPerSec: frame.speedBytesPerSec ?? 0,
+          });
+        }
+      }
+    );
+  },
+
+  applyAppUpdate(): Promise<UpdateApplyResult> {
+    return requestJson<UpdateApplyResult>('/updates/apply', { method: 'POST' });
   },
 };

@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowUpCircle,
   AudioLines,
   Cpu,
+  Download,
   Eye,
   EyeOff,
   LayoutGrid,
   Link2,
+  Loader2,
   RefreshCw,
   SlidersHorizontal,
   Workflow,
@@ -63,6 +66,9 @@ export const SettingsModal: React.FC = () => {
     setAudioInputMode,
     fetchModelsForLlmProvider,
     fetchModelsForAsrProvider,
+    appUpdate,
+    checkForAppUpdates,
+    startOneClickAppUpdate,
   } = useAppStore();
 
   const [activeTab, setActiveTab] = useState<SettingsTabKey>('llm');
@@ -1115,6 +1121,70 @@ export const SettingsModal: React.FC = () => {
                       }
                     />
                   </div>
+                </div>
+
+                {/* 关于知聆课堂与 CNB 自动更新 */}
+                <div className="rounded-[12px] border border-[#E5E6EB] bg-[#F7F8FA] p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <ArrowUpCircle className="w-4 h-4 text-[#1456F0] shrink-0" />
+                        <span className="text-[15px] font-semibold text-[#1F2329]">
+                          关于知聆课堂与软件更新
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-white border border-[#DCE4F7] text-[14px] font-medium text-[#1456F0] tabular-nums">
+                          v{appUpdate.info?.currentVersion || '0.1.2'}
+                        </span>
+                      </div>
+                      <p className="text-[14px] text-[#646A73]">
+                        每次启动自动通过 CNB 公开仓库检查更新，发现新版本时在右下角提示一键热更新
+                        {appUpdate.info?.repo ? `（源：cnb.cool/${appUpdate.info.repo}）` : ''}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {appUpdate.info?.hasUpdate && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSettingsOpen(false);
+                            void startOneClickAppUpdate();
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[10px] bg-[#1456F0] hover:bg-[#3370FF] text-white text-[14px] font-medium transition-colors"
+                        >
+                          <Download className="w-4 h-4" />
+                          <span>升级至 v{appUpdate.info.latestVersion}</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={
+                          appUpdate.status === 'checking' ||
+                          appUpdate.status === 'downloading' ||
+                          appUpdate.status === 'verifying' ||
+                          appUpdate.status === 'applying'
+                        }
+                        onClick={() => void checkForAppUpdates({ silent: false, force: true })}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[10px] bg-white hover:bg-[#F2F3F5] border border-[#DEE0E3] text-[#1F2329] text-[14px] font-medium disabled:opacity-60 transition-colors"
+                      >
+                        {appUpdate.status === 'checking' ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-[#1456F0]" />
+                        ) : (
+                          <RefreshCw className="w-4 h-4 text-[#4E5969]" />
+                        )}
+                        <span>{appUpdate.status === 'checking' ? '检查中...' : '检查更新'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {appUpdate.status === 'up-to-date' && appUpdate.info && (
+                    <p className="text-[14px] text-[#00A854]">
+                      当前已是最新版本（v{appUpdate.info.currentVersion}）
+                    </p>
+                  )}
+                  {appUpdate.status === 'error' && appUpdate.errorMessage && (
+                    <p className="text-[14px] text-[#D83931]">{appUpdate.errorMessage}</p>
+                  )}
                 </div>
               </div>
             )}

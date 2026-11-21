@@ -401,6 +401,38 @@ class Aec3AddonStatus(WireModel):
     size_bytes: int
 
 
+class UpdateAssetInfo(WireModel):
+    name: str
+    size_bytes: int = 0
+    sha256: str = ""
+    download_url: str
+
+
+class UpdateCheckResult(WireModel):
+    current_version: str
+    latest_version: str
+    has_update: bool
+    release_title: str = ""
+    release_notes: str = ""
+    release_url: str = ""
+    published_at: str = ""
+    platform: str
+    arch: str
+    repo: str = ""
+    can_auto_apply: bool = False
+    staged_ready: bool = False
+    asset: UpdateAssetInfo | None = None
+    checked_at: str = ""
+
+
+class UpdateApplyResult(WireModel):
+    scheduled: bool
+    mode: Literal["auto-replace", "dev-manual"]
+    version: str
+    download_path: str
+    message: str
+
+
 class NativeAudioEndpoint(WireModel):
     id: str
     raw_id: str

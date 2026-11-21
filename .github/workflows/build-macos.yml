@@ -50,3 +50,24 @@ jobs:
           name: ZhilingClassroom-macOS-${{ runner.arch == 'X64' && 'x86_64' || 'arm64' }}
           path: release/ZhilingClassroom-macOS-*.dmg
           retention-days: 14
+
+      - name: Sync macOS DMG to CNB Release (when CNB_TOKEN is configured)
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: ${{ vars.CNB_REPO }}
+        run: |
+          if [[ -z "${CNB_TOKEN:-}" || -z "${CNB_REPO:-}" ]]; then
+            echo "CNB_TOKEN 或 CNB_REPO 未在 GitHub Secrets/Variables 中配置，跳过自动同步 CNB。"
+            exit 0
+          fi
+          APP_VER="$(node -p "require('./package.json').version")"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && -n "${GITHUB_REF_NAME:-}" ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          else
+            TAG_NAME="v${APP_VER}"
+          fi
+          python3 scripts/publish_cnb_release.py \
+            --repo "${CNB_REPO}" \
+            --tag "${TAG_NAME}" \
+            --title "知聆课堂 ${TAG_NAME}" \
+            release/ZhilingClassroom-macOS-*.dmg

@@ -36,6 +36,8 @@ export interface DesktopBridgeApi {
     canResume?: boolean
   ) => Promise<boolean>;
   save_exported_file?: (filename: string, contentBase64: string) => Promise<string | null>;
+  quit_for_update?: () => Promise<boolean>;
+  open_path_in_explorer?: (path: string) => Promise<boolean>;
 }
 
 export const IS_DESKTOP_SHELL_PARAM =

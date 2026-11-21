@@ -14,6 +14,7 @@ import {
 import { SettingsModal } from './components/settings/SettingsModal';
 import { AddonDownloadModal } from './components/ui/AddonDownloadModal';
 import { NoticeToast } from './components/ui/NoticeToast';
+import { UpdateCornerPopup } from './components/ui/UpdateCornerPopup';
 import { WindowResizeHandles } from './components/ui/WindowResizeHandles';
 import { classroomSocket } from './services/classroomSocket';
 import { useAppStore } from './store/useAppStore';
@@ -72,13 +73,19 @@ export const App: React.FC = () => {
   const setWindowMaximized = useAppStore((s) => s.setWindowMaximized);
   const setWindowMotion = useAppStore((s) => s.setWindowMotion);
   const initialize = useAppStore((s) => s.initialize);
+  const checkForAppUpdates = useAppStore((s) => s.checkForAppUpdates);
 
   const [inDesktopShell, setInDesktopShell] = useState<boolean>(() => isDesktopShell());
 
   useEffect(() => {
     if (IS_MINI_OVERLAY_MODE) return;
     void initialize();
-  }, [initialize]);
+    // 启动后延迟 2.5 秒后台静默检查 CNB 最新版本，发现新版本时自动在右下角弹出更新卡片
+    const updateTimer = window.setTimeout(() => {
+      void checkForAppUpdates({ silent: true });
+    }, 2500);
+    return () => window.clearTimeout(updateTimer);
+  }, [initialize, checkForAppUpdates]);
 
   // 窗口首次打开轻盈浮入动画
   useEffect(() => {
@@ -339,6 +346,7 @@ export const App: React.FC = () => {
       <SessionNotesExportModal />
       <ImportAudioModal />
       <AddonDownloadModal />
+      <UpdateCornerPopup />
       <NoticeToast />
     </div>
   );

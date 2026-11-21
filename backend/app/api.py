@@ -15,7 +15,8 @@ from .schemas import (
     ASRModelsRequest, Aec3AddonStatus, AppSettings, BookmarkNowRequest, CaptureScreenRequest, ChatMessage, ChatRequest,
     Data, FlashcardItem, FolderCreate, FolderItem, FolderRename, LLMModelsRequest,
     NativeAudioDevices, SearchHitItem, SegmentExplanation, SessionAttachmentItem, SessionCard, SessionCreate,
-    SessionExportRequest, SessionPatch, SpeakerRename, UtteranceItem, UtterancePatch, Workspace,
+    SessionExportRequest, SessionPatch, SpeakerRename, UpdateApplyResult, UpdateCheckResult,
+    UtteranceItem, UtterancePatch, Workspace,
 )
 from .services.exporter import export_session_document
 from .settings import same_asr_connection
@@ -381,6 +382,27 @@ async def get_aec3_wasm(request: Request) -> Response:
 async def get_audio_devices(request: Request, response: Response) -> Data[NativeAudioDevices]:
     response.headers["Cache-Control"] = "no-store"
     return Data(data=await request.app.state.win_audio.list_devices())
+
+
+@router.get("/updates/check")
+async def check_app_updates(
+    request: Request,
+    response: Response,
+    force: bool = False,
+) -> Data[UpdateCheckResult]:
+    response.headers["Cache-Control"] = "no-store"
+    return Data(data=await request.app.state.updater.check_update(force=force))
+
+
+@router.post("/updates/download/stream")
+async def download_app_update_stream(request: Request) -> StreamingResponse:
+    events = request.app.state.updater.download_update_stream()
+    return StreamingResponse(sse_encode(events), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@router.post("/updates/apply")
+async def apply_app_update(request: Request) -> Data[UpdateApplyResult]:
+    return Data(data=await request.app.state.updater.apply_staged_update())
 
 
 @ws_router.websocket("/audio/loopback")

@@ -21,8 +21,54 @@ import type {
   SessionExportRequest,
   SessionStudyNote,
   SpeakerProfile,
+  UpdateCheckResult,
+  UpdateDownloadProgress,
   UtterancePatch,
 } from '../types/domain';
+
+export interface AppUpdateState {
+  status:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'verifying'
+    | 'ready'
+    | 'applying'
+    | 'up-to-date'
+    | 'error';
+  popupVisible: boolean;
+  dismissedVersion: string | null;
+  info: UpdateCheckResult | null;
+  progress: UpdateDownloadProgress | null;
+  errorMessage: string | null;
+  manualDownloadPath: string | null;
+}
+
+const IGNORED_UPDATE_VER_KEY = 'zhiling:ignored-update-version';
+
+function readIgnoredUpdateVersion(): string | null {
+  try {
+    return typeof localStorage !== 'undefined'
+      ? localStorage.getItem(IGNORED_UPDATE_VER_KEY)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeIgnoredUpdateVersion(ver: string | null): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (ver) {
+      localStorage.setItem(IGNORED_UPDATE_VER_KEY, ver);
+    } else {
+      localStorage.removeItem(IGNORED_UPDATE_VER_KEY);
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 export interface AppNotice {
   id: number;
@@ -220,6 +266,7 @@ interface AppStoreState {
   };
   aec3Downloading: boolean;
   aec3DownloadProgress: Aec3DownloadProgress | null;
+  appUpdate: AppUpdateState;
 
   // Actions
   initialize: () => Promise<void>;
@@ -334,6 +381,12 @@ interface AppStoreState {
   updateSettings: (updater: (prev: AppSettings) => AppSettings) => Promise<void>;
   fetchModelsForLlmProvider: (providerId: string) => Promise<string[]>;
   fetchModelsForAsrProvider: (providerId: string) => Promise<string[]>;
+
+  checkForAppUpdates: (options?: { silent?: boolean; force?: boolean }) => Promise<void>;
+  startOneClickAppUpdate: () => Promise<void>;
+  applyReadyAppUpdate: () => Promise<void>;
+  dismissUpdatePopup: () => void;
+  ignoreAvailableUpdateVersion: () => void;
 }
 
 export const useAppStore = create<AppStoreState>((set, get) => {
@@ -642,6 +695,15 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     aec3Modal: { open: false, mode: 'enable-setting' },
     aec3Downloading: false,
     aec3DownloadProgress: null,
+    appUpdate: {
+      status: 'idle',
+      popupVisible: false,
+      dismissedVersion: readIgnoredUpdateVersion(),
+      info: null,
+      progress: null,
+      errorMessage: null,
+      manualDownloadPath: null,
+    },
 
     initialize: async () => {
       set({ isLoadingHome: true });
@@ -1821,6 +1883,211 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       if (!popup) {
         showNotice('error', '浏览器拦截了悬浮小窗，请允许当前站点弹出窗口');
       }
+    },
+
+    checkForAppUpdates: async (options) => {
+      const silent = options?.silent ?? false;
+      const force = options?.force ?? false;
+      const cur = get().appUpdate;
+      if (
+        cur.status === 'checking' ||
+        cur.status === 'downloading' ||
+        cur.status === 'verifying' ||
+        cur.status === 'applying'
+      ) {
+        return;
+      }
+
+      set((state) => ({
+        appUpdate: {
+          ...state.appUpdate,
+          status: 'checking',
+          errorMessage: null,
+        },
+      }));
+
+      try {
+        const info = await api.checkAppUpdates(force);
+        const ignored = get().appUpdate.dismissedVersion;
+        if (info.hasUpdate) {
+          const shouldShowPopup = !silent || ignored !== info.latestVersion;
+          set((state) => ({
+            appUpdate: {
+              ...state.appUpdate,
+              status: info.stagedReady ? 'ready' : 'available',
+              info,
+              popupVisible: shouldShowPopup,
+              errorMessage: null,
+              manualDownloadPath: null,
+            },
+          }));
+        } else {
+          set((state) => ({
+            appUpdate: {
+              ...state.appUpdate,
+              status: 'up-to-date',
+              info,
+              popupVisible: false,
+              errorMessage: null,
+            },
+          }));
+          if (!silent) {
+            showNotice('info', `当前已是最新版本 v${info.currentVersion}`);
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '检查软件更新失败';
+        set((state) => ({
+          appUpdate: {
+            ...state.appUpdate,
+            status: silent ? 'idle' : 'error',
+            errorMessage: silent ? null : msg,
+          },
+        }));
+        if (!silent) {
+          showNotice('error', msg);
+        }
+      }
+    },
+
+    startOneClickAppUpdate: async () => {
+      const cur = get().appUpdate;
+      if (cur.status === 'downloading' || cur.status === 'verifying' || cur.status === 'applying') {
+        return;
+      }
+
+      set((state) => ({
+        appUpdate: {
+          ...state.appUpdate,
+          status: 'downloading',
+          popupVisible: true,
+          errorMessage: null,
+          manualDownloadPath: null,
+          progress: {
+            stage: 'connecting',
+            downloadedBytes: 0,
+            totalBytes: state.appUpdate.info?.asset?.sizeBytes ?? 0,
+            percent: 0,
+            speedBytesPerSec: 0,
+          },
+        },
+      }));
+
+      try {
+        await api.streamDownloadAppUpdate((progress) => {
+          set((state) => ({
+            appUpdate: {
+              ...state.appUpdate,
+              status: progress.stage === 'verifying' ? 'verifying' : 'downloading',
+              popupVisible: true,
+              progress,
+            },
+          }));
+        });
+
+        set((state) => ({
+          appUpdate: {
+            ...state.appUpdate,
+            status: 'ready',
+            popupVisible: true,
+            progress: {
+              stage: 'ready',
+              downloadedBytes: state.appUpdate.progress?.totalBytes ?? 0,
+              totalBytes: state.appUpdate.progress?.totalBytes ?? 0,
+              percent: 100,
+              speedBytesPerSec: 0,
+            },
+          },
+        }));
+
+        // 若当前没有正在进行的课堂录音，校验完成后直接自动执行替换并重启
+        if (get().activeSession?.status !== 'recording') {
+          await get().applyReadyAppUpdate();
+        } else {
+          showNotice('info', '新版本已下载校验完成，请暂停当前录音后在右下角点击「立即重启安装」');
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '下载更新包失败，请重试';
+        set((state) => ({
+          appUpdate: {
+            ...state.appUpdate,
+            status: 'error',
+            popupVisible: true,
+            errorMessage: msg,
+          },
+        }));
+      }
+    },
+
+    applyReadyAppUpdate: async () => {
+      if (get().activeSession?.status === 'recording') {
+        showNotice('error', '请先暂停当前课堂录音，再执行重启安装');
+        return;
+      }
+      set((state) => ({
+        appUpdate: {
+          ...state.appUpdate,
+          status: 'applying',
+          popupVisible: true,
+          errorMessage: null,
+        },
+      }));
+
+      try {
+        const res = await api.applyAppUpdate();
+        if (res.scheduled) {
+          const bridge = getDesktopBridge();
+          if (bridge?.quit_for_update) {
+            void bridge.quit_for_update();
+          } else if (bridge?.close_window) {
+            void bridge.close_window();
+          }
+          return;
+        }
+        // 源码开发运行态：不覆盖源码目录，保留就绪状态并允许打开安装包目录
+        set((state) => ({
+          appUpdate: {
+            ...state.appUpdate,
+            status: 'ready',
+            popupVisible: true,
+            manualDownloadPath: res.downloadPath,
+          },
+        }));
+        showNotice('info', res.message);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '启动自动更新程序失败';
+        set((state) => ({
+          appUpdate: {
+            ...state.appUpdate,
+            status: 'error',
+            popupVisible: true,
+            errorMessage: msg,
+          },
+        }));
+      }
+    },
+
+    dismissUpdatePopup: () => {
+      set((state) => ({
+        appUpdate: {
+          ...state.appUpdate,
+          popupVisible: false,
+        },
+      }));
+    },
+
+    ignoreAvailableUpdateVersion: () => {
+      const ver = get().appUpdate.info?.latestVersion ?? null;
+      if (ver) {
+        writeIgnoredUpdateVersion(ver);
+      }
+      set((state) => ({
+        appUpdate: {
+          ...state.appUpdate,
+          dismissedVersion: ver,
+          popupVisible: false,
+        },
+      }));
     },
   };
 });

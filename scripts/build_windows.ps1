@@ -88,4 +88,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller 打包失败"
 }
 
+Write-Host "[5/5] 封装 Windows 便携热更新压缩包 (release/ZhilingClassroom-Windows-x86_64.zip)..." -ForegroundColor Cyan
+$WinZip = "$Root\release\ZhilingClassroom-Windows-x86_64.zip"
+if (Test-Path $WinZip) {
+    Remove-Item -Force $WinZip
+}
+Compress-Archive -Path "$Root\release\ZhilingClassroom\*" -DestinationPath $WinZip -CompressionLevel Optimal
+
 Write-Host "打包完成！可执行文件：$Root\release\ZhilingClassroom\ZhilingClassroom.exe" -ForegroundColor Green
+Write-Host "热更新压缩包：$WinZip" -ForegroundColor Green

@@ -1105,6 +1105,49 @@ def main() -> None:
             except Exception:
                 return None
 
+        def quit_for_update(self) -> bool:
+            """热更新脚本拉起后立即优雅退出桌面宿主与后端服务，确保释放所有文件句柄。"""
+            def _shutdown() -> None:
+                time.sleep(0.12)
+                try:
+                    server.should_exit = True
+                except Exception:
+                    pass
+                mini_win = windows.pop("mini", None)
+                if mini_win is not None:
+                    try:
+                        mini_win.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                main_win = windows.get("main")
+                if main_win is not None:
+                    try:
+                        main_win.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_shutdown, daemon=True).start()
+            return True
+
+        def open_path_in_explorer(self, path: str) -> bool:
+            """在系统资源管理器或访达中打开文件所在目录（源码开发模式降级使用）。"""
+            target = Path(path).expanduser()
+            if not target.exists():
+                return False
+            try:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", "-R", str(target)] if target.is_file() else ["open", str(target)])
+                elif sys.platform == "win32":
+                    if target.is_file():
+                        subprocess.Popen(["explorer", "/select,", str(target)])
+                    else:
+                        subprocess.Popen(["explorer", str(target)])
+                else:
+                    webbrowser.open(target.as_uri())
+                return True
+            except Exception:
+                return False
+
     bridge = DesktopBridge()
     main_win = webview.create_window(
         "知聆课堂",

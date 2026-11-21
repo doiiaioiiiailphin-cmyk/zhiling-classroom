@@ -27,6 +27,7 @@ from .services.audio import AudioStorage
 from .services.builtin_asr import BuiltinAsrRuntime
 from .services.classroom_ai import ClassroomAI
 from .services.stream import ClassroomStreams
+from .services.updater import AppUpdaterService
 from .services.win_audio import WindowsAudioBackend
 from .services.win_desktop import DesktopEventBus
 from .settings import SettingsStore
@@ -141,6 +142,7 @@ def create_app(
                 builtin_asr = BuiltinAsrRuntime(builtin_asr_dir or data_dir / "addons" / "builtin-free-asr")
                 streams = ClassroomStreams(repo, settings, client, locks, audio, ai, builtin_asr)
                 addons = WebRtcAec3AddonManager(data_dir / "addons")
+                updater = AppUpdaterService(data_dir, client)
                 win_audio = WindowsAudioBackend()
                 app.state.repo = repo
                 app.state.settings = settings
@@ -151,6 +153,7 @@ def create_app(
                 app.state.ai = ai
                 app.state.streams = streams
                 app.state.addons = addons
+                app.state.updater = updater
                 app.state.builtin_asr = builtin_asr
                 app.state.win_audio = win_audio
                 app.state.desktop = desktop

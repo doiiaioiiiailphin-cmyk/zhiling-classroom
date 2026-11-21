@@ -109,17 +109,20 @@ APP_BUNDLE="$MAC_DIST/ZhilingClassroom.app"
 PLIST="$APP_BUNDLE/Contents/Info.plist"
 
 echo "[6/6] 写入 macOS 隐私权限声明 (Info.plist) 并封装 .dmg 安装镜像..."
-"$PYTHON_BIN" - "$PLIST" <<'PYEOF'
-import plistlib, sys
+"$PYTHON_BIN" - "$PLIST" "$ROOT/package.json" <<'PYEOF'
+import json, plistlib, sys
 from pathlib import Path
 
 plist_path = Path(sys.argv[1])
+pkg_path = Path(sys.argv[2])
+app_version = json.loads(pkg_path.read_text(encoding="utf-8")).get("version", "0.1.2")
+
 with plist_path.open("rb") as fh:
     data = plistlib.load(fh)
 
 data["CFBundleDisplayName"] = "知聆课堂"
-data["CFBundleShortVersionString"] = "0.1.1"
-data["CFBundleVersion"] = "0.1.1"
+data["CFBundleShortVersionString"] = app_version
+data["CFBundleVersion"] = app_version
 data["LSMinimumSystemVersion"] = "13.0"
 data["NSHighResolutionCapable"] = True
 data["NSAppTransportSecurity"] = {"NSAllowsLocalNetworking": True}

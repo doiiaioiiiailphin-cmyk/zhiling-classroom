@@ -238,6 +238,46 @@ export type OpenCodeDownloadProgress = Omit<Aec3DownloadProgress, 'stage'> & {
   stage: Aec3DownloadProgress['stage'] | 'starting';
 };
 
+export interface UpdateAssetInfo {
+  name: string;
+  sizeBytes: number;
+  sha256: string;
+  downloadUrl: string;
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseTitle: string;
+  releaseNotes: string;
+  releaseUrl: string;
+  publishedAt: string;
+  platform: string;
+  arch: string;
+  repo: string;
+  canAutoApply: boolean;
+  stagedReady: boolean;
+  asset: UpdateAssetInfo | null;
+  checkedAt: string;
+}
+
+export interface UpdateDownloadProgress {
+  stage: 'connecting' | 'downloading' | 'verifying' | 'ready';
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  speedBytesPerSec: number;
+}
+
+export interface UpdateApplyResult {
+  scheduled: boolean;
+  mode: 'auto-replace' | 'dev-manual';
+  version: string;
+  downloadPath: string;
+  message: string;
+}
+
 export interface NativeAudioEndpoint {
   id: string;
   rawId: string;
