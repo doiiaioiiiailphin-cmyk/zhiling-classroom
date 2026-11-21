@@ -147,45 +147,21 @@ export const App: React.FC = () => {
     };
   }, [setWindowMaximized, setWindowMotion]);
 
-  // 主窗口与置顶迷你字幕窗实时状态同步总线 + Windows 全局快捷键响应
+  // 主窗口与置顶迷你字幕窗实时状态同步总线 + 跨平台全局快捷键 & 外力暂停恢复指令响应
   useEffect(() => {
     if (IS_MINI_OVERLAY_MODE) return;
 
-    const disconnectDesktop = classroomSocket.connectDesktopEvents((action) => {
-      const st = useAppStore.getState();
-      switch (action) {
-        case 'toggleRecording':
-          void st.toggleRecording();
-          break;
-        case 'toggleMicMute':
-          if (st.settings) {
-            void st.setMicChannel({ enabled: !st.settings.micEnabled });
-          }
-          break;
-        case 'captureScreenshot':
-          void st.captureClassroomScreen();
-          break;
-        case 'bookmarkConfused':
-          void st.markConfusedNow();
-          break;
-        case 'toggleMiniOverlay':
-          void st.toggleMiniOverlayWindow();
-          break;
-      }
-    });
-
-    if (typeof BroadcastChannel === 'undefined') {
-      return disconnectDesktop;
-    }
-
-    const bc = new BroadcastChannel(OVERLAY_CHANNEL_NAME);
-    const publishSnapshot = () => {
-      bc.postMessage({ type: 'snapshot', snapshot: buildOverlaySnapshot() });
-    };
-
-    bc.onmessage = (evt: MessageEvent<OverlayRemoteCommand>) => {
-      const cmd = evt.data;
+    const seenCmdIds = new Set<string>();
+    const handleRemoteOverlayCommand = (cmd: OverlayRemoteCommand) => {
       if (!cmd?.type) return;
+      if (cmd.cmdId) {
+        if (seenCmdIds.has(cmd.cmdId)) return;
+        seenCmdIds.add(cmd.cmdId);
+        if (seenCmdIds.size > 120) {
+          const oldest = seenCmdIds.values().next().value;
+          if (oldest) seenCmdIds.delete(oldest);
+        }
+      }
       const st = useAppStore.getState();
       switch (cmd.type) {
         case 'request-snapshot':
@@ -208,14 +184,66 @@ export const App: React.FC = () => {
       }
     };
 
+    const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(OVERLAY_CHANNEL_NAME) : null;
+    const publishSnapshot = () => {
+      const snap = buildOverlaySnapshot();
+      bc?.postMessage({ type: 'snapshot', snapshot: snap });
+      classroomSocket.sendOverlaySnapshot(snap);
+    };
+
+    if (bc) {
+      bc.onmessage = (evt: MessageEvent<OverlayRemoteCommand>) => {
+        handleRemoteOverlayCommand(evt.data);
+      };
+    }
+
+    const disconnectDesktop = classroomSocket.connectDesktopEvents(
+      (action) => {
+        const st = useAppStore.getState();
+        switch (action) {
+          case 'toggleRecording':
+            void st.toggleRecording();
+            break;
+          case 'toggleMicMute':
+            if (st.settings) {
+              void st.setMicChannel({ enabled: !st.settings.micEnabled });
+            }
+            break;
+          case 'captureScreenshot':
+            void st.captureClassroomScreen();
+            break;
+          case 'bookmarkConfused':
+            void st.markConfusedNow();
+            break;
+          case 'toggleMiniOverlay':
+            void st.toggleMiniOverlayWindow();
+            break;
+        }
+      },
+      {
+        onOverlayCommand: (rawCmd) => {
+          handleRemoteOverlayCommand(rawCmd as OverlayRemoteCommand);
+        },
+      }
+    );
+
+    const handleAlertResume = () => {
+      const st = useAppStore.getState();
+      if (st.activeSession && st.activeSession.status !== 'recording') {
+        void st.toggleRecording();
+      }
+    };
+    window.addEventListener('zhiling:alert-resume-recording', handleAlertResume);
+
     const unsubStore = useAppStore.subscribe(() => {
       publishSnapshot();
     });
     publishSnapshot();
 
     return () => {
+      window.removeEventListener('zhiling:alert-resume-recording', handleAlertResume);
       unsubStore();
-      bc.close();
+      bc?.close();
       disconnectDesktop();
     };
   }, []);

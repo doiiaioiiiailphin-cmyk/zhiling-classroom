@@ -1,5 +1,6 @@
 import asyncio
 import ctypes
+import json
 import logging
 import sys
 import threading
@@ -58,10 +59,20 @@ MAC_KEYCODES: dict[str, int] = {
 }
 
 
-def parse_hotkey_combo(combo: str) -> tuple[int, int] | None:
+def _normalize_hotkey_tokens(combo: str) -> list[str]:
     if not combo or not combo.strip():
-        return None
-    parts = [p.strip().upper() for p in combo.split("+") if p.strip()]
+        return []
+    text = (
+        combo.replace("⌘", "Cmd+")
+        .replace("⌥", "Option+")
+        .replace("⇧", "Shift+")
+        .replace("⌃", "Ctrl+")
+    )
+    return [p.strip().upper() for p in text.split("+") if p.strip()]
+
+
+def parse_hotkey_combo(combo: str) -> tuple[int, int] | None:
+    parts = _normalize_hotkey_tokens(combo)
     if not parts:
         return None
     mods = MOD_NOREPEAT
@@ -87,10 +98,8 @@ def parse_hotkey_combo(combo: str) -> tuple[int, int] | None:
 
 
 def parse_macos_hotkey_combo(combo: str) -> tuple[int, int] | None:
-    """将快捷键字符串解析为 macOS Carbon (modifiers, virtual_keycode)。"""
-    if not combo or not combo.strip():
-        return None
-    parts = [p.strip().upper() for p in combo.split("+") if p.strip()]
+    """将快捷键字符串（支持 Option+Shift+R / ⌥⇧R / Alt+Shift+R / Cmd+Shift+S）解析为 macOS Carbon (modifiers, virtual_keycode)。"""
+    parts = _normalize_hotkey_tokens(combo)
     if not parts:
         return None
     mods = 0
@@ -114,7 +123,7 @@ def parse_macos_hotkey_combo(combo: str) -> tuple[int, int] | None:
 
 
 class DesktopEventBus:
-    """跨平台桌面全局热键管理器（Windows 走 Win32 RegisterHotKey，macOS 走 Carbon RegisterEventHotKey）。"""
+    """跨平台桌面全局热键管理器与多窗口实时同步中继（Windows Win32 / macOS Cocoa 主线程 Carbon 热键）。"""
 
     def __init__(self, *, enable_os_hook: bool = False):
         self.enable_os_hook = enable_os_hook and sys.platform in ("win32", "darwin")
@@ -123,10 +132,19 @@ class DesktopEventBus:
         self._hotkeys = DesktopHotkeys()
         self._thread: threading.Thread | None = None
         self._thread_id: int = 0
-        self._mac_reload_event = threading.Event()
-        self._mac_stop_event = threading.Event()
         self._ready = threading.Event()
         self._lock = threading.Lock()
+        self._last_overlay_snapshot: dict | None = None
+
+        # macOS Carbon 主线程句柄强引用（避免回调被 GC）
+        self._mac_carbon = None
+        self._mac_callback = None
+        self._mac_handler_ref: ctypes.c_void_p | None = None
+        self._mac_hotkey_refs: list[ctypes.c_void_p] = []
+        self._mac_id_to_action: dict[int, str] = {}
+        self._mac_target = None
+        self._mac_signature = int.from_bytes(b"ZHLG", "big")
+        self._mac_use_main_thread = False
 
     def start(self, loop: asyncio.AbstractEventLoop, initial_hotkeys: DesktopHotkeys):
         self._loop = loop
@@ -141,13 +159,7 @@ class DesktopEventBus:
             self._thread.start()
             self._ready.wait(timeout=2.0)
         elif sys.platform == "darwin":
-            self._mac_stop_event.clear()
-            self._mac_reload_event.clear()
-            self._thread = threading.Thread(
-                target=self._macos_hotkey_loop, name="zhiling-macos-hotkeys", daemon=True,
-            )
-            self._thread.start()
-            self._ready.wait(timeout=2.0)
+            self._start_macos_hotkeys()
 
     def update_hotkeys(self, next_hotkeys: DesktopHotkeys):
         with self._lock:
@@ -161,7 +173,7 @@ class DesktopEventBus:
             except Exception:
                 pass
         elif sys.platform == "darwin":
-            self._mac_reload_event.set()
+            self._dispatch_macos_main(self._macos_apply_registrations)
 
     def stop(self):
         with self._lock:
@@ -174,16 +186,38 @@ class DesktopEventBus:
                 except Exception:
                     pass
             elif sys.platform == "darwin":
-                self._mac_stop_event.set()
+                self._dispatch_macos_main(self._macos_teardown)
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
 
-    def _macos_hotkey_loop(self):
-        """使用 macOS Carbon RegisterEventHotKey（免辅助功能权限）监听全局快捷键。"""
+    def _dispatch_macos_main(self, fn):
+        if self._mac_use_main_thread:
+            try:
+                from PyObjCTools import AppHelper  # type: ignore
+
+                AppHelper.callAfter(fn)
+                return
+            except Exception:
+                pass
+        try:
+            fn()
+        except Exception as exc:
+            logger.warning("macOS hotkey action failed: %s", exc)
+
+    def _start_macos_hotkeys(self):
+        """在 macOS Cocoa 主线程安装 Carbon RegisterEventHotKey，确保后台应用也能稳定收到全局热键事件。"""
+        try:
+            from PyObjCTools import AppHelper  # type: ignore  # noqa: F401
+            self._mac_use_main_thread = True
+        except ImportError:
+            self._mac_use_main_thread = False
+
+        self._dispatch_macos_main(self._macos_install_and_apply)
+
+    def _macos_install_and_apply(self):
         try:
             carbon = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Carbon.framework/Carbon")
-            cf = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
         except OSError as exc:
             logger.warning("Unable to load Carbon framework for macOS hotkeys: %s", exc)
             self._ready.set()
@@ -195,16 +229,17 @@ class DesktopEventBus:
         class EventHotKeyID(ctypes.Structure):
             _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
 
+        self._mac_event_hotkey_id_cls = EventHotKeyID
         kEventClassKeyboard = int.from_bytes(b"keyb", "big")
         kEventHotKeyPressed = 5
         kEventParamDirectObject = int.from_bytes(b"----", "big")
         typeEventHotKeyID = int.from_bytes(b"hkid", "big")
-        signature = int.from_bytes(b"ZHLG", "big")
 
         EVENT_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
         carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
         carbon.RegisterEventHotKey.argtypes = [
-            ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID, ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p),
         ]
         carbon.RegisterEventHotKey.restype = ctypes.c_int32
         carbon.UnregisterEventHotKey.argtypes = [ctypes.c_void_p]
@@ -220,12 +255,6 @@ class DesktopEventBus:
             ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
         ]
         carbon.GetEventParameter.restype = ctypes.c_int32
-        cf.CFRunLoopRunInMode.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_bool]
-        cf.CFRunLoopRunInMode.restype = ctypes.c_int32
-        default_mode = ctypes.c_void_p.in_dll(cf, "kCFRunLoopDefaultMode")
-
-        id_to_action: dict[int, str] = {}
-        hotkey_refs: list[ctypes.c_void_p] = []
 
         def on_hotkey(_next_handler, event_ref, _user_data):
             hk_id = EventHotKeyID()
@@ -239,50 +268,69 @@ class DesktopEventBus:
                 ctypes.byref(hk_id),
             )
             if status == 0:
-                action = id_to_action.get(int(hk_id.id))
+                action = self._mac_id_to_action.get(int(hk_id.id))
                 if action and self._loop is not None and not self._loop.is_closed():
                     asyncio.run_coroutine_threadsafe(self.broadcast_action(action), self._loop)
             return 0
 
-        callback = EVENT_HANDLER(on_hotkey)
+        self._mac_carbon = carbon
+        self._mac_callback = EVENT_HANDLER(on_hotkey)
         spec = EventTypeSpec(kEventClassKeyboard, kEventHotKeyPressed)
         handler_ref = ctypes.c_void_p()
         target = carbon.GetApplicationEventTarget()
-        carbon.InstallEventHandler(target, callback, 1, ctypes.byref(spec), None, ctypes.byref(handler_ref))
-
-        def apply_registrations():
-            for ref in hotkey_refs:
-                carbon.UnregisterEventHotKey(ref)
-            hotkey_refs.clear()
-            id_to_action.clear()
-            with self._lock:
-                cfg = self._hotkeys
-            if not cfg.enabled:
-                return
-            for hk_id, attr_name, wire_action in HOTKEY_ACTIONS:
-                parsed = parse_macos_hotkey_combo(getattr(cfg, attr_name, ""))
-                if parsed is None:
-                    continue
-                mods, keycode = parsed
-                ref = ctypes.c_void_p()
-                hk = EventHotKeyID(signature, hk_id)
-                if carbon.RegisterEventHotKey(keycode, mods, hk, target, 0, ctypes.byref(ref)) == 0 and ref.value:
-                    hotkey_refs.append(ref)
-                    id_to_action[hk_id] = wire_action
-
-        apply_registrations()
+        self._mac_target = target
+        carbon.InstallEventHandler(
+            target, self._mac_callback, 1, ctypes.byref(spec), None, ctypes.byref(handler_ref)
+        )
+        self._mac_handler_ref = handler_ref
+        self._macos_apply_registrations()
         self._ready.set()
-        try:
-            while not self._mac_stop_event.is_set():
-                if self._mac_reload_event.is_set():
-                    self._mac_reload_event.clear()
-                    apply_registrations()
-                cf.CFRunLoopRunInMode(default_mode, 0.15, False)
-        finally:
-            for ref in hotkey_refs:
+
+    def _macos_apply_registrations(self):
+        carbon = self._mac_carbon
+        target = self._mac_target
+        if carbon is None or target is None:
+            return
+        for ref in self._mac_hotkey_refs:
+            try:
                 carbon.UnregisterEventHotKey(ref)
-            if handler_ref.value:
-                carbon.RemoveEventHandler(handler_ref)
+            except Exception:
+                pass
+        self._mac_hotkey_refs.clear()
+        self._mac_id_to_action.clear()
+        with self._lock:
+            cfg = self._hotkeys
+        if not cfg.enabled:
+            return
+        hk_cls = self._mac_event_hotkey_id_cls
+        for hk_id, attr_name, wire_action in HOTKEY_ACTIONS:
+            parsed = parse_macos_hotkey_combo(getattr(cfg, attr_name, ""))
+            if parsed is None:
+                continue
+            mods, keycode = parsed
+            ref = ctypes.c_void_p()
+            hk = hk_cls(self._mac_signature, hk_id)
+            if carbon.RegisterEventHotKey(keycode, mods, hk, target, 0, ctypes.byref(ref)) == 0 and ref.value:
+                self._mac_hotkey_refs.append(ref)
+                self._mac_id_to_action[hk_id] = wire_action
+
+    def _macos_teardown(self):
+        carbon = self._mac_carbon
+        if carbon is None:
+            return
+        for ref in self._mac_hotkey_refs:
+            try:
+                carbon.UnregisterEventHotKey(ref)
+            except Exception:
+                pass
+        self._mac_hotkey_refs.clear()
+        self._mac_id_to_action.clear()
+        if self._mac_handler_ref is not None and self._mac_handler_ref.value:
+            try:
+                carbon.RemoveEventHandler(self._mac_handler_ref)
+            except Exception:
+                pass
+            self._mac_handler_ref = None
 
     def _win32_hotkey_loop(self):
         from ctypes import wintypes
@@ -332,12 +380,13 @@ class DesktopEventBus:
             for hk_id in list(registered_ids):
                 user32.UnregisterHotKey(None, hk_id)
 
-    async def broadcast_action(self, action: str):
+    async def broadcast_frame(self, frame: dict, *, exclude: WebSocket | None = None):
         if not self.clients:
             return
-        frame = {"type": "hotkey.triggered", "payload": {"action": action}}
         stale: list[WebSocket] = []
         for ws in tuple(self.clients):
+            if ws is exclude:
+                continue
             try:
                 async with asyncio.timeout(2):
                     await ws.send_json(frame)
@@ -345,6 +394,9 @@ class DesktopEventBus:
                 stale.append(ws)
         for ws in stale:
             self.clients.discard(ws)
+
+    async def broadcast_action(self, action: str):
+        await self.broadcast_frame({"type": "hotkey.triggered", "payload": {"action": action}})
 
     async def serve(self, socket: WebSocket):
         await socket.accept()
@@ -357,10 +409,37 @@ class DesktopEventBus:
                     "hotkeys": self._hotkeys.wire(),
                 },
             })
+            if self._last_overlay_snapshot is not None:
+                await socket.send_json({
+                    "type": "overlay.snapshot",
+                    "payload": self._last_overlay_snapshot,
+                })
             while True:
                 msg = await socket.receive()
                 if msg["type"] == "websocket.disconnect":
                     break
+                text = msg.get("text")
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except ValueError:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                evt_type = parsed.get("type")
+                payload = parsed.get("payload")
+                if evt_type == "overlay.snapshot" and isinstance(payload, dict):
+                    self._last_overlay_snapshot = payload
+                    await self.broadcast_frame(
+                        {"type": "overlay.snapshot", "payload": payload},
+                        exclude=socket,
+                    )
+                elif evt_type == "overlay.command" and isinstance(payload, dict):
+                    await self.broadcast_frame(
+                        {"type": "overlay.command", "payload": payload},
+                        exclude=socket,
+                    )
         except WebSocketDisconnect:
             pass
         finally:

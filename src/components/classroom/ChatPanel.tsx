@@ -15,6 +15,7 @@ import { useSmoothStream } from '../../hooks/useSmoothStream';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import type { ChatMessage, SessionAttachmentItem } from '../../types/domain';
+import { getPasteShortcutLabel } from '../../utils/desktopBridge';
 import { IconButton } from '../ui/IconButton';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { Modal } from '../ui/Modal';
@@ -316,7 +317,7 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
         <IconButton
           icon={Paperclip}
           variant="ghost"
-          tooltip="上传截图或参考讲义（支持直接 Ctrl+V 粘贴截图）"
+          tooltip={`上传截图或参考讲义（支持直接 ${getPasteShortcutLabel()} 粘贴截图）`}
           onClick={() => fileInputRef.current?.click()}
         />
 
@@ -349,7 +350,7 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
               void handleSubmit();
             }
           }}
-          placeholder="询问本堂课要点、直接 Ctrl+V 粘贴板书截图提问..."
+          placeholder={`询问本堂课要点、直接 ${getPasteShortcutLabel()} 粘贴板书截图提问...`}
           className="flex-1 min-h-[36px] max-h-36 py-[6px] resize-none bg-transparent text-[15px] leading-[24px] text-[#1F2329] placeholder-[#646A73] focus:outline-none"
         />
 

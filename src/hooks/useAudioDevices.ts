@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import type { NativeAudioDevices } from '../types/domain';
+import { isDesktopShell, isMacPlatform } from '../utils/desktopBridge';
 
 export interface AudioSourceOption {
   value: string;
@@ -140,10 +141,17 @@ export function useAudioDevices(active = true) {
         }
       }
 
-      nextSys.push({
-        value: 'display-share',
-        label: '窗口或标签页共享音频',
-      });
+      const supportsDisplayShare =
+        typeof navigator !== 'undefined' &&
+        typeof navigator.mediaDevices?.getDisplayMedia === 'function' &&
+        !(isMacPlatform() && isDesktopShell() && nativeInfo.wasapiSupported);
+
+      if (supportsDisplayShare) {
+        nextSys.push({
+          value: 'display-share',
+          label: '窗口或标签页共享音频',
+        });
+      }
 
       setSystemOptions(nextSys);
     } finally {

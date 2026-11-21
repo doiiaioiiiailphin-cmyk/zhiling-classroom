@@ -124,7 +124,8 @@ data["LSMinimumSystemVersion"] = "13.0"
 data["NSHighResolutionCapable"] = True
 data["NSAppTransportSecurity"] = {"NSAllowsLocalNetworking": True}
 data["NSMicrophoneUsageDescription"] = "知聆课堂需要访问麦克风以进行课堂实时语音转写与双讲拾音。"
-data["NSScreenCaptureUsageDescription"] = "知聆课堂需要屏幕与系统音频录制权限，以实现免虚拟声卡的网课内录与一键抓拍黑板画面。"
+data["NSAudioCaptureUsageDescription"] = "知聆课堂需要系统音频录制权限，以实现免虚拟声卡的网课原声内录。"
+data["NSScreenCaptureUsageDescription"] = "知聆课堂需要屏幕与系统音频录制权限，以实现网课内录与一键抓拍黑板画面。"
 
 with plist_path.open("wb") as fh:
     plistlib.dump(data, fh)

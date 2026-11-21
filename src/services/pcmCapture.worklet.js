@@ -184,21 +184,37 @@ class ClassroomPcmProcessor extends AudioWorkletProcessor {
       micSq += m * m;
       sysSq += s * s;
     }
-    const micRms = Math.min(1, Math.sqrt(micSq / FRAME_SAMPLES_10MS) * 3.2);
-    const sysRms = Math.min(1, Math.sqrt(sysSq / FRAME_SAMPLES_10MS) * 3.2);
-    this.micLevel = micRms > this.micLevel ? micRms : this.micLevel * 0.78 + micRms * 0.22;
-    this.sysLevel = sysRms > this.sysLevel ? sysRms : this.sysLevel * 0.78 + sysRms * 0.22;
+    const micRawRms = Math.sqrt(micSq / FRAME_SAMPLES_10MS);
+    const sysRawRms = Math.sqrt(sysSq / FRAME_SAMPLES_10MS);
+    // 对数响度映射（-52 dBFS ~ -6 dBFS -> 0 ~ 1），使轻声与正常课堂说话在电平条上灵敏可见
+    const rmsToMeter = (rms) => {
+      if (rms <= 1e-5) return 0;
+      const db = 20 * Math.log10(rms);
+      return Math.max(0, Math.min(1, (db + 52) / 46));
+    };
+    const micMeter = rmsToMeter(micRawRms);
+    const sysMeter = rmsToMeter(sysRawRms);
+    this.micLevel =
+      micMeter > this.micLevel
+        ? this.micLevel * 0.35 + micMeter * 0.65
+        : this.micLevel * 0.82 + micMeter * 0.18;
+    this.sysLevel =
+      sysMeter > this.sysLevel
+        ? this.sysLevel * 0.35 + sysMeter * 0.65
+        : this.sysLevel * 0.82 + sysMeter * 0.18;
 
     const runAec3 = Boolean(
       this.aec3 && this.aec3Enabled && !this.micMuted && !this.sysMuted && this.sysMode !== 'none'
     );
 
-    if (++this.levelTick >= 8) {
+    if (++this.levelTick >= 6) {
       this.levelTick = 0;
       this.port.postMessage({
         type: 'levels',
         micLevel: this.micMuted ? 0 : this.micLevel,
         sysLevel: this.sysMuted ? 0 : this.sysLevel,
+        micRawRms: this.micMuted ? 0 : Math.min(1, micRawRms * 3.2),
+        sysRawRms: this.sysMuted ? 0 : Math.min(1, sysRawRms * 3.2),
         aec3Active: runAec3,
       });
     }

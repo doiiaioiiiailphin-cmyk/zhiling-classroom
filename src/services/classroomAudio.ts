@@ -1,4 +1,5 @@
 import type { AppSettings } from '../types/domain';
+import { isMacPlatform } from '../utils/desktopBridge';
 import { API_BASE_URL, IS_MOCK_MODE, api } from './api';
 
 export type AudioRuntimeSettings = Pick<
@@ -14,6 +15,8 @@ export type AudioRuntimeSettings = Pick<
 export interface AudioRuntimeTelemetry {
   micLevel: number;
   sysLevel: number;
+  micRawRms?: number;
+  sysRawRms?: number;
   aec3Active: boolean;
   aec3Ready: boolean;
   activeSysMode: 'wasapi' | 'display-share' | 'input' | 'none';
@@ -61,6 +64,16 @@ function stopStream(stream: MediaStream | null): void {
 }
 
 function createContext(): AudioContext {
+  // macOS WebKit (WKWebView / Safari) 强设非硬件采样率 16000Hz 会导致 MediaStreamAudioSourceNode 输出全零静音；
+  // 让 WebKit 沿用硬件原生采样率（48k/44.1k），由 pcmCapture.worklet.js 内置重采样器无损降采样至 16kHz。
+  const isWebKitLike =
+    isMacPlatform() ||
+    (typeof navigator !== 'undefined' &&
+      /applewebkit/i.test(navigator.userAgent) &&
+      !/chrome|crios|edg/i.test(navigator.userAgent));
+  if (isWebKitLike) {
+    return new AudioContext({ latencyHint: 'interactive' });
+  }
   try {
     return new AudioContext({ sampleRate: 16000, latencyHint: 'interactive' });
   } catch {
@@ -99,10 +112,14 @@ export class ClassroomAudio {
   private aec3ModuleLoaded = false;
   private aec3Ready = false;
   private opChain: Promise<void> = Promise.resolve();
+  private loopbackReconnectAttempts = 0;
+  private loopbackReconnectTimer: number | null = null;
 
   private telemetry: AudioRuntimeTelemetry = {
     micLevel: 0,
     sysLevel: 0,
+    micRawRms: 0,
+    sysRawRms: 0,
     aec3Active: false,
     aec3Ready: false,
     activeSysMode: 'none',
@@ -120,11 +137,25 @@ export class ClassroomAudio {
   ) {
     this.currentSettings = { ...initialSettings };
 
+    // 守护 macOS / WebKit 下因系统弹窗、AirPods 切换导致的 AudioContext interrupted / suspended 静默停转
+    this.context.onstatechange = () => {
+      if (!this.closed && this.running && this.context.state !== 'running') {
+        void this.context.resume().catch(() => {});
+      }
+    };
+
     processor.port.onmessage = ({
       data,
     }: MessageEvent<
       | { type?: 'pcm'; generation: number; pcm: ArrayBuffer }
-      | { type: 'levels'; micLevel: number; sysLevel: number; aec3Active: boolean }
+      | {
+          type: 'levels';
+          micLevel: number;
+          sysLevel: number;
+          micRawRms?: number;
+          sysRawRms?: number;
+          aec3Active: boolean;
+        }
       | { type: 'aec3-status'; ready: boolean; message?: string }
     >) => {
       if (!data) return;
@@ -133,6 +164,8 @@ export class ClassroomAudio {
           ...this.telemetry,
           micLevel: this.running ? data.micLevel : 0,
           sysLevel: this.running ? data.sysLevel : 0,
+          micRawRms: this.running ? (data.micRawRms ?? data.micLevel) : 0,
+          sysRawRms: this.running ? (data.sysRawRms ?? data.sysLevel) : 0,
           aec3Active: this.running && data.aec3Active,
         };
         this.onTelemetry?.(this.telemetry);
@@ -172,7 +205,10 @@ export class ClassroomAudio {
     signal.addEventListener('abort', abortCleanup, { once: true });
 
     try {
-      void context.resume().catch(() => {});
+      await Promise.race([
+        context.resume().catch(() => {}),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 400)),
+      ]);
       if (!context.audioWorklet) {
         throw new Error('当前浏览器不支持 AudioWorklet 录音。');
       }
@@ -401,22 +437,30 @@ export class ClassroomAudio {
     });
 
     let stream: MediaStream;
-    if (deviceId.startsWith('{0.0.')) {
-      // Resolve Windows WASAPI endpoint GUID to matching browser MediaDeviceInfo via FriendlyName
+    const isNativeEndpointId =
+      deviceId.startsWith('{0.0.') || deviceId.startsWith('macos-in:');
+    if (isNativeEndpointId) {
+      // Resolve Windows WASAPI GUID / macOS CoreAudio UID to matching browser MediaDeviceInfo via device name
       stream = await media.getUserMedia(buildConstraints(undefined));
       try {
         const [nativeInfo, browserDevs] = await Promise.all([
           api.getNativeAudioDevices(),
           media.enumerateDevices(),
         ]);
-        const targetEp = nativeInfo.inputs.find((ep) => ep.id === deviceId || ep.rawId === deviceId);
+        const bareId = deviceId.replace(/^macos-in:/, '');
+        const targetEp = nativeInfo.inputs.find(
+          (ep) => ep.id === deviceId || ep.rawId === deviceId || ep.rawId === bareId
+        );
         if (targetEp) {
+          const targetName = targetEp.name.trim().toLowerCase();
           const matched = browserDevs.find(
             (d) =>
               d.kind === 'audioinput' &&
               d.deviceId !== 'default' &&
               d.deviceId !== 'communications' &&
-              d.label.trim().toLowerCase().includes(targetEp.name.trim().toLowerCase())
+              (d.label.trim().toLowerCase() === targetName ||
+                d.label.trim().toLowerCase().includes(targetName) ||
+                targetName.includes(d.label.trim().toLowerCase()))
           );
           if (matched) {
             stopStream(stream);
@@ -489,16 +533,19 @@ export class ClassroomAudio {
       };
     }
 
-    // 2) Windows WASAPI Loopback (default, communications, or specific speaker endpoint)
+    // 2) Native System Loopback (Windows WASAPI / macOS CoreAudio Process Tap & ScreenCaptureKit)
     const wantsWasapi =
       wasapiOk &&
+      deviceId !== 'display-share' &&
       (deviceId === 'default' ||
         deviceId === 'communications' ||
-        deviceId.startsWith('wasapi:'));
+        deviceId.startsWith('wasapi:') ||
+        deviceId.startsWith('macos-loop:'));
 
     if (wantsWasapi) {
       try {
         const socket = await this.openWasapiLoopbackSocket(deviceId, signal);
+        this.loopbackReconnectAttempts = 0;
         return {
           mode: 'wasapi',
           deviceId,
@@ -508,10 +555,10 @@ export class ClassroomAudio {
           socket,
         };
       } catch (err) {
-        if (deviceId !== 'default') {
+        if (deviceId !== 'default' || typeof navigator.mediaDevices?.getDisplayMedia !== 'function') {
           throw err;
         }
-        // If WASAPI default failed unexpectedly, fall through to browser display-share
+        // If native loopback default failed unexpectedly in browser mode, fall through to display-share
       }
     }
 
@@ -667,9 +714,56 @@ export class ClassroomAudio {
       };
       slot.socket.onclose = () => {
         if (this.closed || this.sysSlot !== slot) return;
+        const closedDeviceId = slot.deviceId;
         this.releaseSysSlot();
         this.syncWorkletChannels();
-        if (this.running) {
+        if (!this.running || !this.currentSettings.systemAudioEnabled) return;
+
+        // 录音期间系统内录通道偶发断开时，自动执行最多 2 次退避重连，避免直接中断或假死
+        if (this.loopbackReconnectAttempts < 2) {
+          const attempt = ++this.loopbackReconnectAttempts;
+          const delayMs = attempt === 1 ? 600 : 1500;
+          if (this.loopbackReconnectTimer !== null) {
+            window.clearTimeout(this.loopbackReconnectTimer);
+          }
+          this.loopbackReconnectTimer = window.setTimeout(() => {
+            this.loopbackReconnectTimer = null;
+            if (this.closed || !this.running || !this.currentSettings.systemAudioEnabled) return;
+            void this.openWasapiLoopbackSocket(closedDeviceId)
+              .then((newSocket) => {
+                if (this.closed || !this.running || !this.currentSettings.systemAudioEnabled) {
+                  newSocket.close();
+                  return;
+                }
+                this.loopbackReconnectAttempts = 0;
+                this.attachSysSlot({
+                  mode: 'wasapi',
+                  deviceId: closedDeviceId,
+                  stream: null,
+                  track: null,
+                  source: null,
+                  socket: newSocket,
+                });
+                this.syncWorkletChannels();
+              })
+              .catch(() => {
+                if (this.closed || !this.running) return;
+                if (!this.micSlot || !this.currentSettings.micEnabled) {
+                  this.onEnded();
+                } else {
+                  this.onIssue(
+                    'WASAPI_SOCKET_CLOSED',
+                    '系统内录通道断开且自动重连失败，当前仅麦克风继续录制。'
+                  );
+                }
+              });
+          }, delayMs);
+          return;
+        }
+
+        if (!this.micSlot || !this.currentSettings.micEnabled) {
+          this.onEnded();
+        } else {
           this.onIssue('WASAPI_SOCKET_CLOSED', '系统播放设备内录连接已断开，可重新选择音频源。');
         }
       };
@@ -798,6 +892,10 @@ export class ClassroomAudio {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.loopbackReconnectTimer !== null) {
+      window.clearTimeout(this.loopbackReconnectTimer);
+      this.loopbackReconnectTimer = null;
+    }
     this.pause();
     this.releaseMicSlot();
     this.releaseSysSlot();

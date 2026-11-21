@@ -10,6 +10,7 @@
   3. 窗口最大化/窗口化平滑尺寸插值动效，配合前端最小化下沉渐隐、任务栏唤醒回弹与关闭缩放消散动画；
   4. 自动放行本地回环麦克风与剪贴板权限，开启 ALLOW_DOWNLOADS 原生「另存为」导出对话框。
 """
+import base64
 import ctypes
 import io
 import json
@@ -559,9 +560,17 @@ def main() -> None:
 
     def configure_native_webview(win_obj, *, is_main: bool) -> dict[str, object]:
         """按平台开启原生逐像素真透明合成、无边框圆角保护与权限放行。"""
+        target_name = "main" if is_main else "mini"
         if sys.platform == "darwin":
             from desktop_macos import configure_macos_window
-            return configure_macos_window(win_obj, is_main=is_main, is_self_test=is_self_test)
+            return configure_macos_window(
+                win_obj,
+                is_main=is_main,
+                is_self_test=is_self_test,
+                on_restored=lambda t=target_name: dispatch_js_event(
+                    t, "zhiling:window-restored-from-min", "true"
+                ),
+            )
 
         diag: dict[str, object] = {"configured": False, "alphaComposited": False}
         native = getattr(win_obj, "native", None)
@@ -901,6 +910,200 @@ def main() -> None:
 
         def end_window_op(self) -> None:
             windows["drag_token"] = int(windows.get("drag_token", 0)) + 1  # type: ignore[arg-type]
+
+        def show_topmost_alert(self, title: str, message: str, can_resume: bool = True) -> bool:
+            """在系统屏幕顶部中央弹出不抢占焦点的跨平台置顶警示浮窗（用于外力导致录音中断时醒目提醒）。"""
+            if is_self_test:
+                return True
+
+            def _do_resume() -> None:
+                self.focus_main_window()
+                dispatch_js_event("main", "zhiling:alert-resume-recording", "true")
+
+            def _do_focus() -> None:
+                self.focus_main_window()
+
+            if sys.platform == "darwin":
+                from desktop_macos import show_macos_topmost_alert
+                return show_macos_topmost_alert(
+                    title,
+                    message,
+                    can_resume=bool(can_resume),
+                    on_resume=_do_resume,
+                    on_focus_main=_do_focus,
+                )
+
+            if sys.platform == "win32":
+                main_win = windows.get("main")
+                native = getattr(main_win, "native", None)
+                if native is None:
+                    return False
+                try:
+                    from System import Action  # type: ignore
+                    import System.Drawing as Drawing  # type: ignore
+                    import System.Windows.Forms as WinForms  # type: ignore
+
+                    def _show_win_panel() -> None:
+                        old_form = windows.pop("alert_form", None)
+                        if old_form is not None:
+                            try:
+                                old_form.Close()  # type: ignore[attr-defined]
+                                old_form.Dispose()  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+
+                        form = WinForms.Form()
+                        form.FormBorderStyle = getattr(WinForms.FormBorderStyle, "None")
+                        form.StartPosition = WinForms.FormStartPosition.Manual
+                        form.ShowInTaskbar = False
+                        form.TopMost = True
+                        form.BackColor = Drawing.Color.FromArgb(255, 255, 255)
+                        form.Size = Drawing.Size(476, 152)
+
+                        screen_wa = WinForms.Screen.PrimaryScreen.WorkingArea
+                        left = int(screen_wa.X + (screen_wa.Width - form.Width) / 2)
+                        top = int(screen_wa.Y + 18)
+                        form.Location = Drawing.Point(left, top)
+
+                        # 外边框微描边
+                        def _on_paint(_s, evt):
+                            pen = Drawing.Pen(Drawing.Color.FromArgb(245, 162, 158), 2)
+                            evt.Graphics.DrawRectangle(pen, 0, 0, form.Width - 1, form.Height - 1)
+                            pen.Dispose()
+
+                        form.Paint += _on_paint
+
+                        strip = WinForms.Panel()
+                        strip.BackColor = Drawing.Color.FromArgb(216, 57, 49)
+                        strip.Location = Drawing.Point(0, 0)
+                        strip.Size = Drawing.Size(5, form.Height)
+                        form.Controls.Add(strip)
+
+                        lbl_title = WinForms.Label()
+                        lbl_title.Text = title or "知聆课堂 · 录音已意外暂停"
+                        lbl_title.Font = Drawing.Font("Microsoft YaHei UI", 10.5, Drawing.FontStyle.Bold)
+                        lbl_title.ForeColor = Drawing.Color.FromArgb(216, 57, 49)
+                        lbl_title.Location = Drawing.Point(18, 14)
+                        lbl_title.Size = Drawing.Size(442, 24)
+                        form.Controls.Add(lbl_title)
+
+                        lbl_msg = WinForms.Label()
+                        lbl_msg.Text = message or "录音因外部异常中断，请检查设备与连接。"
+                        lbl_msg.Font = Drawing.Font("Microsoft YaHei UI", 9.5)
+                        lbl_msg.ForeColor = Drawing.Color.FromArgb(31, 35, 41)
+                        lbl_msg.Location = Drawing.Point(18, 42)
+                        lbl_msg.Size = Drawing.Size(442, 56)
+                        form.Controls.Add(lbl_msg)
+
+                        def _close_form() -> None:
+                            try:
+                                if windows.get("alert_form") is form:
+                                    windows.pop("alert_form", None)
+                                form.Close()
+                                form.Dispose()
+                            except Exception:
+                                pass
+
+                        def _make_btn(text: str, x: int, w: int, primary: bool, on_click) -> object:
+                            btn = WinForms.Button()
+                            btn.Text = text
+                            btn.FlatStyle = WinForms.FlatStyle.Flat
+                            btn.Font = Drawing.Font("Microsoft YaHei UI", 9.0, Drawing.FontStyle.Bold if primary else Drawing.FontStyle.Regular)
+                            btn.Size = Drawing.Size(w, 32)
+                            btn.Location = Drawing.Point(x, 106)
+                            if primary:
+                                btn.BackColor = Drawing.Color.FromArgb(20, 86, 240)
+                                btn.ForeColor = Drawing.Color.White
+                                btn.FlatAppearance.BorderSize = 0
+                            else:
+                                btn.BackColor = Drawing.Color.FromArgb(245, 246, 247)
+                                btn.ForeColor = Drawing.Color.FromArgb(31, 35, 41)
+                                btn.FlatAppearance.BorderColor = Drawing.Color.FromArgb(222, 224, 227)
+                            btn.Click += lambda _s, _e: on_click()
+                            form.Controls.Add(btn)
+                            return btn
+
+                        cur_x = form.Width - 16
+                        _make_btn("忽略", cur_x - 72, 72, False, _close_form)
+                        cur_x -= 80
+                        _make_btn(
+                            "打开主窗口",
+                            cur_x - 102,
+                            102,
+                            not can_resume,
+                            lambda: (_close_form(), threading.Thread(target=_do_focus, daemon=True).start()),
+                        )
+                        cur_x -= 110
+                        if can_resume:
+                            _make_btn(
+                                "恢复录音",
+                                cur_x - 94,
+                                94,
+                                True,
+                                lambda: (_close_form(), threading.Thread(target=_do_resume, daemon=True).start()),
+                            )
+
+                        # 创建句柄并应用 Windows 11 原生圆角 + 不抢焦点置顶弹出
+                        alert_hwnd = int(form.Handle.ToInt32())
+                        try:
+                            round_pref = ctypes.c_int(2)  # DWMWCP_ROUND
+                            _dwm.DwmSetWindowAttribute(
+                                wintypes.HWND(alert_hwnd), 33, ctypes.byref(round_pref), ctypes.sizeof(round_pref)
+                            )
+                        except Exception:
+                            pass
+                        # SW_SHOWNOACTIVATE = 4; HWND_TOPMOST = -1; SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW
+                        _u32.ShowWindow(ctypes.c_void_p(alert_hwnd), 4)
+                        _u32.SetWindowPos(
+                            ctypes.c_void_p(alert_hwnd),
+                            ctypes.c_void_p(-1),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0x0010 | 0x0002 | 0x0001 | 0x0040,
+                        )
+                        windows["alert_form"] = form
+
+                    if native.InvokeRequired:
+                        native.Invoke(Action(_show_win_panel))
+                    else:
+                        _show_win_panel()
+                    return True
+                except Exception:
+                    return False
+            return False
+
+        def save_exported_file(self, filename: str, content_base64: str) -> str | None:
+            """调用系统原生「存储为」面板保存导出文档，解决 macOS WKWebView 忽略 blob: 下载的问题。"""
+            main_win = windows.get("main")
+            if main_win is None:
+                return None
+            safe_name = Path(filename or "课堂笔记.md").name
+            try:
+                raw = base64.b64decode(content_base64)
+            except Exception:
+                return None
+            try:
+                save_dialog = getattr(webview, "FileDialog", None)
+                dialog_type = save_dialog.SAVE if save_dialog is not None else getattr(webview, "SAVE_DIALOG", 30)
+                result = main_win.create_file_dialog(  # type: ignore[attr-defined]
+                    dialog_type,
+                    save_filename=safe_name,
+                )
+                target: str | None = None
+                if isinstance(result, str) and result.strip():
+                    target = result
+                elif isinstance(result, (list, tuple)) and result:
+                    target = str(result[0])
+                if not target:
+                    return ""
+                out_path = Path(target)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(raw)
+                return str(out_path)
+            except Exception:
+                return None
 
     bridge = DesktopBridge()
     main_win = webview.create_window(

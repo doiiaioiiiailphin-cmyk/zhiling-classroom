@@ -1,3 +1,5 @@
+import type { DesktopHotkeys } from '../types/domain';
+
 export type DesktopWindowTarget = 'main' | 'mini';
 export type DesktopPlatform = 'macos' | 'windows' | 'web';
 export type DesktopWindowOpMode =
@@ -28,6 +30,12 @@ export interface DesktopBridgeApi {
   begin_window_op?: (target: DesktopWindowTarget, mode: DesktopWindowOpMode) => Promise<boolean>;
   step_window_op?: () => Promise<void>;
   end_window_op?: () => Promise<void>;
+  show_topmost_alert?: (
+    title: string,
+    message: string,
+    canResume?: boolean
+  ) => Promise<boolean>;
+  save_exported_file?: (filename: string, contentBase64: string) => Promise<string | null>;
 }
 
 export const IS_DESKTOP_SHELL_PARAM =
@@ -53,15 +61,79 @@ export function isMacPlatform(): boolean {
   return getDesktopPlatform() === 'macos';
 }
 
+export function getPasteShortcutLabel(): string {
+  return isMacPlatform() ? '⌘V' : 'Ctrl+V';
+}
+
+export function getDefaultDesktopHotkeys(): DesktopHotkeys {
+  const prefix = isMacPlatform() ? 'Option+Shift' : 'Alt+Shift';
+  return {
+    enabled: true,
+    toggleRecording: `${prefix}+R`,
+    toggleMicMute: `${prefix}+M`,
+    captureScreenshot: `${prefix}+S`,
+    bookmarkConfused: `${prefix}+B`,
+    toggleMiniOverlay: `${prefix}+O`,
+  };
+}
+
 export function formatShortcutLabel(combo: string): string {
-  if (!isMacPlatform()) return combo;
+  if (!combo) return '';
+  if (!isMacPlatform()) {
+    return combo
+      .replace(/⌘/g, 'Win+')
+      .replace(/⌥/g, 'Alt+')
+      .replace(/⇧/g, 'Shift+')
+      .replace(/⌃/g, 'Ctrl+')
+      .replace(/\b(Option|Opt)\+/gi, 'Alt+')
+      .replace(/\b(Cmd|Command)\+/gi, 'Win+');
+  }
   return combo
     .replace(/\bAlt\+/gi, '⌥')
+    .replace(/\bOpt\+/gi, '⌥')
     .replace(/\bOption\+/gi, '⌥')
     .replace(/\bShift\+/gi, '⇧')
     .replace(/\bCtrl\+/gi, '⌃')
     .replace(/\bControl\+/gi, '⌃')
-    .replace(/\b(Cmd|Command|Meta|Win)\+/gi, '⌘');
+    .replace(/\b(Cmd|Command|Meta|Win)\+/gi, '⌘')
+    .replace(/\+/g, '');
+}
+
+/**
+ * 将浏览器 KeyboardEvent 转换为后端与双端通用的标准快捷键字符串（需包含至少一个修饰键 + 非修饰主键）。
+ */
+export function keyboardEventToHotkeyCombo(e: KeyboardEvent): string | null {
+  const modifierKeys = new Set(['Control', 'Shift', 'Alt', 'Meta', 'OS', 'Dead', 'Process']);
+  if (modifierKeys.has(e.key)) return null;
+
+  const mac = isMacPlatform();
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push(mac ? 'Option' : 'Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push(mac ? 'Cmd' : 'Win');
+  if (mods.length === 0) return null;
+
+  // 优先用 e.code 还原物理字母/数字键，避免 macOS Option+R 产生 '®' 特殊字符
+  let mainKey = '';
+  if (/^Key([A-Z])$/.test(e.code)) {
+    mainKey = e.code.slice(3);
+  } else if (/^Digit([0-9])$/.test(e.code)) {
+    mainKey = e.code.slice(5);
+  } else if (/^F([1-9]|1[0-2])$/.test(e.code)) {
+    mainKey = e.code;
+  } else if (e.code === 'Space') {
+    mainKey = 'Space';
+  } else if (e.code === 'Tab') {
+    mainKey = 'Tab';
+  } else if (e.code === 'Enter') {
+    mainKey = 'Enter';
+  } else if (e.key.length === 1 && /^[a-zA-Z0-9]$/.test(e.key)) {
+    mainKey = e.key.toUpperCase();
+  }
+  if (!mainKey) return null;
+
+  return [...mods, mainKey].join('+');
 }
 
 export function isDesktopShell(): boolean {

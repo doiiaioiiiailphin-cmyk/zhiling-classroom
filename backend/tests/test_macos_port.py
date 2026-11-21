@@ -19,7 +19,9 @@ from backend.app.services.mac_audio import (
     parse_helper_devices_json,
 )
 from backend.app.services.win_desktop import (
+    DesktopEventBus,
     MAC_CMD_KEY,
+    MAC_CONTROL_KEY,
     MAC_OPTION_KEY,
     MAC_SHIFT_KEY,
     parse_macos_hotkey_combo,
@@ -57,6 +59,22 @@ class MacOSPortTests(unittest.TestCase):
             (MAC_OPTION_KEY | MAC_SHIFT_KEY, 0x0F),
         )
         self.assertEqual(
+            parse_macos_hotkey_combo("Option+Shift+M"),
+            (MAC_OPTION_KEY | MAC_SHIFT_KEY, 0x2E),
+        )
+        self.assertEqual(
+            parse_macos_hotkey_combo("⌥⇧R"),
+            (MAC_OPTION_KEY | MAC_SHIFT_KEY, 0x0F),
+        )
+        self.assertEqual(
+            parse_macos_hotkey_combo("⌘⇧S"),
+            (MAC_CMD_KEY | MAC_SHIFT_KEY, 0x01),
+        )
+        self.assertEqual(
+            parse_macos_hotkey_combo("⌃⌥O"),
+            (MAC_CONTROL_KEY | MAC_OPTION_KEY, 0x1F),
+        )
+        self.assertEqual(
             parse_macos_hotkey_combo("Cmd+Shift+S"),
             (MAC_CMD_KEY | MAC_SHIFT_KEY, 0x01),
         )
@@ -67,13 +85,15 @@ class MacOSPortTests(unittest.TestCase):
         sample = json.dumps({
             "platform": "darwin",
             "wasapiSupported": True,
-            "inputs": [{"id": "mic-1", "rawId": "mic-1", "name": "MacBook Pro 麦克风", "isDefault": True, "isCommunicationsDefault": True}],
-            "loopbacks": [{"id": "out-1", "rawId": "out-1", "name": "MacBook Pro 扬声器", "isDefault": True, "isCommunicationsDefault": True}],
+            "inputs": [{"id": "macos-in:BuiltInMic", "rawId": "BuiltInMic", "name": "MacBook Pro 麦克风", "isDefault": True, "isCommunicationsDefault": True}],
+            "loopbacks": [{"id": "macos-loop:BuiltInSpk", "rawId": "BuiltInSpk", "name": "MacBook Pro 扬声器", "isDefault": True, "isCommunicationsDefault": True}],
         }).encode("utf-8")
         parsed = parse_helper_devices_json(sample)
         self.assertEqual(parsed.platform, "darwin")
         self.assertTrue(parsed.wasapi_supported)
+        self.assertEqual(parsed.inputs[0].id, "macos-in:BuiltInMic")
         self.assertEqual(parsed.inputs[0].name, "MacBook Pro 麦克风")
+        self.assertEqual(parsed.loopbacks[0].id, "macos-loop:BuiltInSpk")
         self.assertEqual(parsed.loopbacks[0].name, "MacBook Pro 扬声器")
 
         # Missing helper gracefully falls back to wasapi_supported=False
@@ -157,6 +177,107 @@ class MacOSPortTests(unittest.TestCase):
         self.assertEqual(total_len, len(icns))
         self.assertIn(b"ic07", icns)
         self.assertIn(b"ic10", icns)
+
+    def test_desktop_event_bus_overlay_relay(self):
+        from fastapi import WebSocketDisconnect
+
+        class FakeWebSocket:
+            def __init__(self, incoming: list[str]):
+                self._incoming = list(incoming)
+                self.sent: list[dict] = []
+                self.accepted = False
+                self._done = asyncio.Event()
+
+            async def accept(self):
+                self.accepted = True
+
+            async def send_json(self, payload: dict):
+                self.sent.append(payload)
+
+            async def receive(self) -> dict:
+                if self._incoming:
+                    return {"type": "websocket.receive", "text": self._incoming.pop(0)}
+                await self._done.wait()
+                return {"type": "websocket.disconnect"}
+
+            def close_rx(self):
+                self._done.set()
+
+        async def scenario():
+            bus = DesktopEventBus()
+            ws_main = FakeWebSocket([
+                json.dumps({"type": "overlay.snapshot", "payload": {"sessionTitle": "高等数学", "isRecording": True}}),
+            ])
+            ws_mini = FakeWebSocket([])
+
+            t_mini = asyncio.create_task(bus.serve(ws_mini))
+            await asyncio.sleep(0.01)
+            t_main = asyncio.create_task(bus.serve(ws_main))
+            await asyncio.sleep(0.05)
+
+            # Mini should receive main's snapshot
+            self.assertTrue(any(m.get("type") == "overlay.snapshot" and m["payload"]["sessionTitle"] == "高等数学" for m in ws_mini.sent))
+            # Main should NOT receive echo of its own snapshot
+            self.assertFalse(any(m.get("type") == "overlay.snapshot" for m in ws_main.sent))
+
+            # Newly connected client receives cached latest snapshot immediately
+            ws_late = FakeWebSocket([
+                json.dumps({"type": "overlay.command", "payload": {"type": "toggle-recording", "cmdId": "c1"}}),
+            ])
+            t_late = asyncio.create_task(bus.serve(ws_late))
+            await asyncio.sleep(0.05)
+
+            self.assertTrue(any(m.get("type") == "overlay.snapshot" and m["payload"]["sessionTitle"] == "高等数学" for m in ws_late.sent))
+            self.assertTrue(any(m.get("type") == "overlay.command" and m["payload"]["cmdId"] == "c1" for m in ws_main.sent))
+            self.assertFalse(any(m.get("type") == "overlay.command" for m in ws_late.sent))
+
+            ws_main.close_rx()
+            ws_mini.close_rx()
+            ws_late.close_rx()
+            await asyncio.gather(t_main, t_mini, t_late)
+
+        asyncio.run(scenario())
+
+    def test_local_sensevoice_adapter_non_blocking_under_slow_cpu(self):
+        import time
+        from backend.app.providers.asr.base import Recognition
+        from backend.app.providers.asr.builtin_shell import BuiltinFreeAsrAdapter
+
+        class SlowFakeRuntime:
+            def require(self):
+                pass
+
+            def get_recognizer(self, language: str):
+                return object()
+
+            def decode_pcm(self, pcm: bytes, language: str) -> str:
+                time.sleep(0.18)
+                return f"decoded-{len(pcm)}"
+
+        async def scenario():
+            adapter = BuiltinFreeAsrAdapter(
+                Recognition(language="zh", diarization=False, speaker_mode="auto", vad=True),
+                runtime=SlowFakeRuntime(),
+            )
+            await adapter.start()
+            voiced_chunk = struct.pack("<h", 4500) * 320  # 20ms @ 16kHz loud tone
+            silent_chunk = b"\x00\x00" * 320
+
+            t0 = time.monotonic()
+            for _ in range(45):  # 900ms speech
+                await adapter.send_audio(voiced_chunk)
+            for _ in range(40):  # 800ms silence -> triggers endpoint final enqueue
+                await adapter.send_audio(silent_chunk)
+            send_elapsed = time.monotonic() - t0
+            # send_audio must NEVER block on the 180ms decode_pcm call
+            self.assertLess(send_elapsed, 0.12)
+
+            await adapter.finish()
+            items = [item async for item in adapter.results()]
+            self.assertTrue(any(item.final and item.text.startswith("decoded-") for item in items))
+            await adapter.close()
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

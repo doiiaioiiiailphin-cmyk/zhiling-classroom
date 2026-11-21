@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import text
 
 from .db import Database, SettingsRow
-from .schemas import ASRModelsRequest, AppSettings, LLMProvider, iso_utc
+from .schemas import ASRModelsRequest, AppSettings, DesktopHotkeys, LLMProvider, iso_utc
 
 
 OPENCODE_FREE_PROVIDER_ID = "opencode-free-bridge"
@@ -168,14 +168,7 @@ def default_settings() -> AppSettings:
         "aec3PromptDismissed": False,
         "enableDualChannelSpeakerSplit": True,
         "globalHotwords": [],
-        "desktopHotkeys": {
-            "enabled": True,
-            "toggleRecording": "Alt+Shift+R",
-            "toggleMicMute": "Alt+Shift+M",
-            "captureScreenshot": "Alt+Shift+S",
-            "bookmarkConfused": "Alt+Shift+B",
-            "toggleMiniOverlay": "Alt+Shift+O",
-        },
+        "desktopHotkeys": DesktopHotkeys().wire(),
         "enableVadAutoPause": True,
         "autoSaveSession": True,
         "defaultExportFormat": "markdown",
@@ -259,16 +252,17 @@ class SettingsStore:
             payload.setdefault("aec3PromptDismissed", False)
             payload.setdefault("enableDualChannelSpeakerSplit", True)
             payload.setdefault("globalHotwords", [])
+            default_hk = DesktopHotkeys().model_dump(mode="json", by_alias=True)
             hotkeys = payload.get("desktopHotkeys")
             if not isinstance(hotkeys, dict):
                 hotkeys = {}
             payload["desktopHotkeys"] = {
                 "enabled": bool(hotkeys.get("enabled", True)),
-                "toggleRecording": hotkeys.get("toggleRecording", "Alt+Shift+R"),
-                "toggleMicMute": hotkeys.get("toggleMicMute", "Alt+Shift+M"),
-                "captureScreenshot": hotkeys.get("captureScreenshot", "Alt+Shift+S"),
-                "bookmarkConfused": hotkeys.get("bookmarkConfused", "Alt+Shift+B"),
-                "toggleMiniOverlay": hotkeys.get("toggleMiniOverlay", "Alt+Shift+O"),
+                "toggleRecording": hotkeys.get("toggleRecording", default_hk["toggleRecording"]),
+                "toggleMicMute": hotkeys.get("toggleMicMute", default_hk["toggleMicMute"]),
+                "captureScreenshot": hotkeys.get("captureScreenshot", default_hk["captureScreenshot"]),
+                "bookmarkConfused": hotkeys.get("bookmarkConfused", default_hk["bookmarkConfused"]),
+                "toggleMiniOverlay": hotkeys.get("toggleMiniOverlay", default_hk["toggleMiniOverlay"]),
             }
         settings = AppSettings.model_validate(payload)
         migrate_opencode_defaults(settings)

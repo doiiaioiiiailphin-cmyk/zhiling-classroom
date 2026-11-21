@@ -356,13 +356,19 @@ class FeatureRouting(WireModel):
         return getattr(self, to_snake(feature))
 
 
+def _default_mod_prefix() -> str:
+    import sys
+
+    return "Option+Shift" if sys.platform == "darwin" else "Alt+Shift"
+
+
 class DesktopHotkeys(WireModel):
     enabled: bool = True
-    toggle_recording: str = "Alt+Shift+R"
-    toggle_mic_mute: str = "Alt+Shift+M"
-    capture_screenshot: str = "Alt+Shift+S"
-    bookmark_confused: str = "Alt+Shift+B"
-    toggle_mini_overlay: str = "Alt+Shift+O"
+    toggle_recording: str = Field(default_factory=lambda: f"{_default_mod_prefix()}+R")
+    toggle_mic_mute: str = Field(default_factory=lambda: f"{_default_mod_prefix()}+M")
+    capture_screenshot: str = Field(default_factory=lambda: f"{_default_mod_prefix()}+S")
+    bookmark_confused: str = Field(default_factory=lambda: f"{_default_mod_prefix()}+B")
+    toggle_mini_overlay: str = Field(default_factory=lambda: f"{_default_mod_prefix()}+O")
 
 
 class AppSettings(WireModel):

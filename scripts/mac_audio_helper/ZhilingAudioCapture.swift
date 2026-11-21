@@ -1,12 +1,14 @@
-// 知聆课堂 macOS 原生系统内录与设备枚举助手（macOS 13.0+ ScreenCaptureKit + CoreAudio）
+// 知聆课堂 macOS 原生系统内录与设备枚举助手
+// - macOS 14.2+ 优先采用 CoreAudio Process Tap（AudioHardwareCreateProcessTap），纯系统音频采集、零录屏弹窗；
+// - macOS 13.0–14.1 自动回退 ScreenCaptureKit（SCStream + CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer）；
 // 编译命令（仅依赖苹果官方系统框架，零第三方依赖）：
 //   swiftc -O -parse-as-library scripts/mac_audio_helper/ZhilingAudioCapture.swift \
 //     -framework ScreenCaptureKit -framework CoreAudio -framework CoreMedia \
 //     -framework AVFoundation -framework Foundation -o assets/macos/ZhilingAudioCapture
 //
 // 用法：
-//   ZhilingAudioCapture --list-devices  -> 向 stdout 输出 JSON 设备列表
-//   ZhilingAudioCapture --capture       -> 向 stdout 持续输出 16000 Hz / 16-bit s16le / mono 裸 PCM
+//   ZhilingAudioCapture --list-devices                  -> 向 stdout 输出 JSON 设备列表
+//   ZhilingAudioCapture --capture [--device-id <uid>]   -> 向 stdout 持续输出 16000 Hz / 16-bit s16le / mono 裸 PCM
 
 import AVFoundation
 import CoreAudio
@@ -111,10 +113,14 @@ private func enumerateDevices() -> DeviceListPayload {
             for devID in ids {
                 let uid = coreAudioStringProperty(deviceID: devID, selector: kAudioDevicePropertyDeviceUID) ?? String(devID)
                 let name = coreAudioStringProperty(deviceID: devID, selector: kAudioObjectPropertyName) ?? uid
+                // 跳过本助手自建的临时聚合设备
+                if name.hasPrefix("ZhilingAudioTapAggregate") || uid.hasPrefix("com.zhiling.tap.") {
+                    continue
+                }
                 if coreAudioChannelCount(deviceID: devID, scope: kAudioDevicePropertyScopeInput) > 0 {
                     let isDef = devID == defaultIn
                     inputs.append(AudioDeviceItem(
-                        id: uid,
+                        id: "macos-in:\(uid)",
                         rawId: uid,
                         name: name,
                         isDefault: isDef,
@@ -124,7 +130,7 @@ private func enumerateDevices() -> DeviceListPayload {
                 if coreAudioChannelCount(deviceID: devID, scope: kAudioDevicePropertyScopeOutput) > 0 {
                     let isDef = devID == defaultOut
                     outputs.append(AudioDeviceItem(
-                        id: uid,
+                        id: "macos-loop:\(uid)",
                         rawId: uid,
                         name: name,
                         isDefault: isDef,
@@ -144,7 +150,7 @@ private func enumerateDevices() -> DeviceListPayload {
         outputs.append(AudioDeviceItem(
             id: "default",
             rawId: "default",
-            name: "macOS 系统音频 (ScreenCaptureKit)",
+            name: "macOS 系统音频内录",
             isDefault: true,
             isCommunicationsDefault: true
         ))
@@ -158,17 +164,280 @@ private func enumerateDevices() -> DeviceListPayload {
     )
 }
 
+/// 统一高精度 PCM 重采样与输出器：将任意采样率/声道的 Float32 或 Int16 AudioBufferList 转为 16kHz mono s16le 写入 stdout。
+private final class Pcm16MonoEmitter {
+    private let targetRate: Double = 16000.0
+    private var samplesPerOutput: Double = 3.0
+    private var remaining: Double = 3.0
+    private var accumulator: Double = 0.0
+    private var lastRate: Double = 0.0
+    private var outSamples: [Int16] = []
+    private let stdoutHandle = FileHandle.standardOutput
+
+    init() {
+        outSamples.reserveCapacity(1024)
+    }
+
+    func emit(bufferList: UnsafePointer<AudioBufferList>, asbd: AudioStreamBasicDescription) {
+        let inRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000.0
+        if inRate != lastRate {
+            lastRate = inRate
+            samplesPerOutput = max(1.0, inRate / targetRate)
+            remaining = samplesPerOutput
+            accumulator = 0.0
+        }
+
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let bitsPerChannel = Int(asbd.mBitsPerChannel)
+        let channels = max(1, Int(asbd.mChannelsPerFrame))
+
+        let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
+        guard !abl.isEmpty else { return }
+
+        outSamples.removeAll(keepingCapacity: true)
+
+        if isFloat && bitsPerChannel == 32 {
+            if isNonInterleaved {
+                guard let firstData = abl[0].mData else { return }
+                let frameCount = Int(abl[0].mDataByteSize) / MemoryLayout<Float>.size
+                guard frameCount > 0 else { return }
+                let chCount = min(channels, abl.count)
+                var chPtrs: [UnsafePointer<Float>] = []
+                chPtrs.reserveCapacity(chCount)
+                for c in 0..<chCount {
+                    if let p = abl[c].mData {
+                        chPtrs.append(p.assumingMemoryBound(to: Float.self))
+                    }
+                }
+                guard !chPtrs.isEmpty else { return }
+                let invCh = 1.0 / Double(chPtrs.count)
+                for i in 0..<frameCount {
+                    var sum: Double = 0.0
+                    for p in chPtrs {
+                        sum += Double(p[i])
+                    }
+                    pushMonoSample(sum * invCh)
+                }
+                _ = firstData
+            } else {
+                guard let raw = abl[0].mData else { return }
+                let totalFloats = Int(abl[0].mDataByteSize) / MemoryLayout<Float>.size
+                let frameCount = totalFloats / channels
+                guard frameCount > 0 else { return }
+                let ptr = raw.assumingMemoryBound(to: Float.self)
+                let invCh = 1.0 / Double(channels)
+                for i in 0..<frameCount {
+                    var sum: Double = 0.0
+                    let base = i * channels
+                    for c in 0..<channels {
+                        sum += Double(ptr[base + c])
+                    }
+                    pushMonoSample(sum * invCh)
+                }
+            }
+        } else if !isFloat && bitsPerChannel == 16 {
+            guard let raw = abl[0].mData else { return }
+            let totalSamples = Int(abl[0].mDataByteSize) / MemoryLayout<Int16>.size
+            let frameCount = isNonInterleaved ? totalSamples : (totalSamples / channels)
+            guard frameCount > 0 else { return }
+            let ptr = raw.assumingMemoryBound(to: Int16.self)
+            let invCh = 1.0 / (32768.0 * Double(isNonInterleaved ? 1 : channels))
+            for i in 0..<frameCount {
+                var sum: Double = 0.0
+                if isNonInterleaved {
+                    sum = Double(ptr[i])
+                } else {
+                    let base = i * channels
+                    for c in 0..<channels {
+                        sum += Double(ptr[base + c])
+                    }
+                }
+                pushMonoSample(sum * invCh)
+            }
+        }
+
+        if !outSamples.isEmpty {
+            outSamples.withUnsafeBytes { rawBuf in
+                if let baseAddr = rawBuf.baseAddress {
+                    let data = Data(bytes: baseAddr, count: rawBuf.count)
+                    try? stdoutHandle.write(contentsOf: data)
+                }
+            }
+        }
+    }
+
+    private func pushMonoSample(_ sample: Double) {
+        let clampedIn = max(-1.0, min(1.0, sample))
+        var available = 1.0
+        while available > 1e-8 {
+            let weight = min(available, remaining)
+            accumulator += clampedIn * weight
+            remaining -= weight
+            available -= weight
+            if remaining <= 1e-8 {
+                let averaged = max(-1.0, min(1.0, accumulator / samplesPerOutput))
+                let scaled = averaged < 0 ? averaged * 32768.0 : averaged * 32767.0
+                let i16 = Int16(max(-32768.0, min(32767.0, scaled.rounded())))
+                outSamples.append(i16.littleEndian)
+                remaining = samplesPerOutput
+                accumulator = 0.0
+            }
+        }
+    }
+}
+
+// MARK: - macOS 14.2+ CoreAudio Process Tap（纯音频内录，不触发录屏确认弹窗）
+
+@available(macOS 14.2, *)
+private final class CoreAudioProcessTapCapture {
+    private var tapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
+    private var aggregateDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
+    private var ioProcID: AudioDeviceIOProcID?
+    private let emitter = Pcm16MonoEmitter()
+    private let ioQueue = DispatchQueue(label: "zhiling.coreaudio.tap.io", qos: .userInteractive)
+
+    private static func currentProcessAudioObjectID() -> AudioObjectID? {
+        var pid = getpid()
+        var objID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &addr,
+            UInt32(MemoryLayout<pid_t>.size),
+            &pid,
+            &size,
+            &objID
+        )
+        if status == noErr && objID != AudioObjectID(kAudioObjectUnknown) {
+            return objID
+        }
+        return nil
+    }
+
+    func start() throws {
+        var excluded: [AudioObjectID] = []
+        if let selfObj = Self.currentProcessAudioObjectID() {
+            excluded.append(selfObj)
+        }
+
+        let tapUUID = UUID()
+        let tapDesc = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+        tapDesc.uuid = tapUUID
+        tapDesc.isPrivate = true
+        tapDesc.isExclusive = true
+        tapDesc.muteBehavior = .unmuted
+
+        var createdTap = AudioObjectID(kAudioObjectUnknown)
+        let tapStatus = AudioHardwareCreateProcessTap(tapDesc, &createdTap)
+        guard tapStatus == noErr, createdTap != AudioObjectID(kAudioObjectUnknown) else {
+            throw NSError(
+                domain: "ZhilingAudioCapture",
+                code: Int(tapStatus),
+                userInfo: [NSLocalizedDescriptionKey: "AudioHardwareCreateProcessTap failed (\(tapStatus))"]
+            )
+        }
+        self.tapID = createdTap
+
+        var asbd = AudioStreamBasicDescription()
+        var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var fmtAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let fmtStatus = AudioObjectGetPropertyData(createdTap, &fmtAddr, 0, nil, &asbdSize, &asbd)
+        guard fmtStatus == noErr else {
+            stop()
+            throw NSError(
+                domain: "ZhilingAudioCapture",
+                code: Int(fmtStatus),
+                userInfo: [NSLocalizedDescriptionKey: "Read kAudioTapPropertyFormat failed (\(fmtStatus))"]
+            )
+        }
+
+        let aggUID = "com.zhiling.tap.\(UUID().uuidString)"
+        let aggDesc: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "ZhilingAudioTapAggregate",
+            kAudioAggregateDeviceUIDKey: aggUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapListKey: [
+                [
+                    kAudioSubTapUIDKey: tapUUID.uuidString,
+                    kAudioSubTapDriftCompensationKey: true,
+                ]
+            ],
+        ]
+
+        var aggID = AudioObjectID(kAudioObjectUnknown)
+        let aggStatus = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggID)
+        guard aggStatus == noErr, aggID != AudioObjectID(kAudioObjectUnknown) else {
+            stop()
+            throw NSError(
+                domain: "ZhilingAudioCapture",
+                code: Int(aggStatus),
+                userInfo: [NSLocalizedDescriptionKey: "AudioHardwareCreateAggregateDevice failed (\(aggStatus))"]
+            )
+        }
+        self.aggregateDeviceID = aggID
+
+        let capturedAsbd = asbd
+        var procID: AudioDeviceIOProcID?
+        let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, ioQueue) {
+            [weak self] _, inInputData, _, _, _ in
+            guard let self = self else { return }
+            self.emitter.emit(bufferList: inInputData, asbd: capturedAsbd)
+        }
+        guard ioStatus == noErr, let validProcID = procID else {
+            stop()
+            throw NSError(
+                domain: "ZhilingAudioCapture",
+                code: Int(ioStatus),
+                userInfo: [NSLocalizedDescriptionKey: "AudioDeviceCreateIOProcIDWithBlock failed (\(ioStatus))"]
+            )
+        }
+        self.ioProcID = validProcID
+
+        let startStatus = AudioDeviceStart(aggID, validProcID)
+        guard startStatus == noErr else {
+            stop()
+            throw NSError(
+                domain: "ZhilingAudioCapture",
+                code: Int(startStatus),
+                userInfo: [NSLocalizedDescriptionKey: "AudioDeviceStart failed (\(startStatus))"]
+            )
+        }
+    }
+
+    func stop() {
+        if let proc = ioProcID, aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
+            AudioDeviceStop(aggregateDeviceID, proc)
+            AudioDeviceDestroyIOProcID(aggregateDeviceID, proc)
+            ioProcID = nil
+        }
+        if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+        }
+        if tapID != AudioObjectID(kAudioObjectUnknown) {
+            AudioHardwareDestroyProcessTap(tapID)
+            tapID = AudioObjectID(kAudioObjectUnknown)
+        }
+    }
+}
+
+// MARK: - macOS 13.0–14.1 ScreenCaptureKit 回退方案
+
 @available(macOS 13.0, *)
 private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: true
-    )!
-    private var converter: AVAudioConverter?
-    private var lastInputFormat: AVAudioFormat?
-    private let stdoutHandle = FileHandle.standardOutput
+    private let emitter = Pcm16MonoEmitter()
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .audio, CMSampleBufferIsValid(sampleBuffer) else { return }
@@ -176,53 +445,44 @@ private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegat
               let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) else {
             return
         }
-        var asbd = asbdPtr.pointee
-        guard let inFormat = AVAudioFormat(streamDescription: &asbd) else { return }
-        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0, let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: frameCount) else {
-            return
-        }
-        inBuffer.frameLength = frameCount
+        let asbd = asbdPtr.pointee
 
-        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+        var listSizeNeeded = 0
+        let probeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
-            at: 0,
-            frameCount: Int32(frameCount),
-            into: inBuffer.mutableAudioBufferList
+            bufferListSizeNeededOut: &listSizeNeeded,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: nil
         )
-        guard status == noErr else { return }
-
-        if converter == nil || lastInputFormat != inFormat {
-            converter = AVAudioConverter(from: inFormat, to: targetFormat)
-            lastInputFormat = inFormat
-        }
-        guard let converter = converter else { return }
-
-        let ratio = targetFormat.sampleRate / max(1.0, inFormat.sampleRate)
-        let outCapacity = AVAudioFrameCount(ceil(Double(frameCount) * ratio)) + 64
-        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCapacity) else {
+        guard probeStatus == noErr || probeStatus == kCMSampleBufferError_BufferHasNoSampleSizes || listSizeNeeded > 0 else {
             return
         }
+        let allocSize = max(listSizeNeeded, MemoryLayout<AudioBufferList>.size)
+        let rawPtr = UnsafeMutableRawPointer.allocate(
+            byteCount: allocSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { rawPtr.deallocate() }
+        let ablPtr = rawPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
 
-        var consumed = false
-        var convertError: NSError?
-        converter.convert(to: outBuffer, error: &convertError) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return inBuffer
-        }
-
-        guard convertError == nil, outBuffer.frameLength > 0,
-              let int16Ptr = outBuffer.int16ChannelData?[0] else {
-            return
-        }
-        let byteCount = Int(outBuffer.frameLength) * MemoryLayout<Int16>.size
-        let data = Data(bytes: int16Ptr, count: byteCount)
-        try? stdoutHandle.write(contentsOf: data)
+        var blockBuffer: CMBlockBuffer?
+        let copyStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablPtr,
+            bufferListSize: allocSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
+            blockBufferOut: &blockBuffer
+        )
+        guard copyStatus == noErr else { return }
+        emitter.emit(bufferList: ablPtr, asbd: asbd)
+        _ = blockBuffer
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -231,6 +491,19 @@ private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegat
             try? FileHandle.standardError.write(contentsOf: d)
         }
         Foundation.exit(2)
+    }
+}
+
+private var activeCleanup: (() -> Void)?
+
+private func installSignalHandlers() {
+    signal(SIGTERM) { _ in
+        activeCleanup?()
+        Foundation.exit(0)
+    }
+    signal(SIGINT) { _ in
+        activeCleanup?()
+        Foundation.exit(0)
     }
 }
 
@@ -253,6 +526,26 @@ struct ZhilingAudioCaptureMain {
                 try? FileHandle.standardError.write(contentsOf: Data(msg.utf8))
                 Foundation.exit(3)
             }
+
+            installSignalHandlers()
+
+            // 1. macOS 14.2+ 优先使用 CoreAudio Process Tap（纯系统音频录制，避免 macOS 15 重复录屏权限弹窗）
+            if #available(macOS 14.2, *) {
+                let tapCapture = CoreAudioProcessTapCapture()
+                do {
+                    try tapCapture.start()
+                    activeCleanup = { tapCapture.stop() }
+                    while true {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                } catch {
+                    let note = "CoreAudio Process Tap unavailable, falling back to ScreenCaptureKit: \(error.localizedDescription)\n"
+                    try? FileHandle.standardError.write(contentsOf: Data(note.utf8))
+                    tapCapture.stop()
+                }
+            }
+
+            // 2. macOS 13.x 或 Process Tap 不可用时回退 ScreenCaptureKit
             do {
                 let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
                 guard let display = shareable.displays.first else {
@@ -264,9 +557,8 @@ struct ZhilingAudioCaptureMain {
                 let config = SCStreamConfiguration()
                 config.capturesAudio = true
                 config.excludesCurrentProcessAudio = true
-                config.sampleRate = 16000
-                config.channelCount = 1
-                // 极小化视频帧开销（ScreenCaptureKit 需附带显示过滤器，设最低帧率以零 GPU/CPU 负担）
+                config.sampleRate = 48000
+                config.channelCount = 2
                 config.width = 2
                 config.height = 2
                 config.minimumFrameInterval = CMTime(value: 10, timescale: 1)
@@ -277,20 +569,17 @@ struct ZhilingAudioCaptureMain {
                 try stream.addStreamOutput(writer, type: .audio, sampleHandlerQueue: queue)
                 try await stream.startCapture()
 
-                signal(SIGTERM) { _ in Foundation.exit(0) }
-                signal(SIGINT) { _ in Foundation.exit(0) }
-
                 while true {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             } catch {
-                let msg = "MACOS_AUDIO_PERMISSION_REQUIRED: 请在「系统设置 → 隐私与安全性 → 屏幕与系统音频录制」中勾选知聆课堂后重试（\(error.localizedDescription)）\n"
+                let msg = "MACOS_AUDIO_PERMISSION_REQUIRED: 请在「系统设置 → 隐私与安全性 → 录屏与系统录音」中勾选知聆课堂后重试（\(error.localizedDescription)）\n"
                 try? FileHandle.standardError.write(contentsOf: Data(msg.utf8))
                 Foundation.exit(1)
             }
         }
 
-        let usage = "Usage: ZhilingAudioCapture [--list-devices | --capture]\n"
+        let usage = "Usage: ZhilingAudioCapture [--list-devices | --capture [--device-id <uid>]]\n"
         try? FileHandle.standardError.write(contentsOf: Data(usage.utf8))
         Foundation.exit(64)
     }

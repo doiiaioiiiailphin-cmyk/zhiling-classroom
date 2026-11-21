@@ -373,7 +373,7 @@ class RecognitionRun:
         self.last_final_ms = offset_ms
         self.total_bytes = 0
         self.closing = False
-        self.pending: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=128)
+        self.pending: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=512)
         self.task = asyncio.create_task(self.run())
 
     @property

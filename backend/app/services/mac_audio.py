@@ -145,9 +145,14 @@ class MacAudioBackend:
         stop_event = asyncio.Event()
 
         try:
+            cmd = [str(helper), "--capture"]
+            clean_device = (device_id or "").strip()
+            if clean_device.startswith("macos-loop:"):
+                clean_device = clean_device.removeprefix("macos-loop:")
+            if clean_device and clean_device not in {"default", "communications"}:
+                cmd.extend(["--device-id", clean_device])
             proc = await asyncio.create_subprocess_exec(
-                str(helper),
-                "--capture",
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

@@ -168,7 +168,13 @@ export class ClassroomSocketClient {
     return capture.captureSharedVideoFrame();
   }
 
-  connectDesktopEvents(onAction: (action: DesktopHotkeyAction) => void): () => void {
+  connectDesktopEvents(
+    onAction: (action: DesktopHotkeyAction) => void,
+    options?: {
+      onOverlaySnapshot?: (snapshot: Record<string, unknown>) => void;
+      onOverlayCommand?: (command: Record<string, unknown>) => void;
+    }
+  ): () => void {
     if (IS_MOCK_MODE) return () => {};
     let disposed = false;
 
@@ -181,10 +187,14 @@ export class ClassroomSocketClient {
         try {
           const parsed = JSON.parse(data) as {
             type?: string;
-            payload?: { action?: DesktopHotkeyAction };
+            payload?: Record<string, unknown>;
           };
-          if (parsed.type === 'hotkey.triggered' && parsed.payload?.action) {
-            onAction(parsed.payload.action);
+          if (parsed.type === 'hotkey.triggered' && typeof parsed.payload?.action === 'string') {
+            onAction(parsed.payload.action as DesktopHotkeyAction);
+          } else if (parsed.type === 'overlay.snapshot' && parsed.payload) {
+            options?.onOverlaySnapshot?.(parsed.payload);
+          } else if (parsed.type === 'overlay.command' && parsed.payload) {
+            options?.onOverlayCommand?.(parsed.payload);
           }
         } catch {
           // ignore malformed frames
@@ -209,6 +219,18 @@ export class ClassroomSocketClient {
         this.desktopSocket = null;
       }
     };
+  }
+
+  sendOverlaySnapshot(snapshot: unknown): void {
+    if (this.desktopSocket?.readyState === WebSocket.OPEN) {
+      this.desktopSocket.send(JSON.stringify({ type: 'overlay.snapshot', payload: snapshot }));
+    }
+  }
+
+  sendOverlayCommand(command: unknown): void {
+    if (this.desktopSocket?.readyState === WebSocket.OPEN) {
+      this.desktopSocket.send(JSON.stringify({ type: 'overlay.command', payload: command }));
+    }
   }
 
   applyAudioSettings(
@@ -304,8 +326,12 @@ export class ClassroomSocketClient {
               JSON.stringify({
                 type: 'channel.activity',
                 payload: {
-                  micRms: Number(Math.min(9.9, telemetry.micLevel).toFixed(4)),
-                  sysRms: Number(Math.min(9.9, telemetry.sysLevel).toFixed(4)),
+                  micRms: Number(
+                    Math.min(9.9, telemetry.micRawRms ?? telemetry.micLevel).toFixed(4)
+                  ),
+                  sysRms: Number(
+                    Math.min(9.9, telemetry.sysRawRms ?? telemetry.sysLevel).toFixed(4)
+                  ),
                   dualActive,
                 },
               } satisfies ClassroomClientCommand)

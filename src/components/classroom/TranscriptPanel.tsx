@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
+import { getPasteShortcutLabel } from '../../utils/desktopBridge';
 import type {
   HighlightedTerm,
   KnowledgeSegment,
@@ -772,7 +773,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
             <p className="max-w-sm text-[14px] leading-relaxed text-[#4E5969]">
               {onlyBookmarks
                 ? '点击上方按钮可切回全部课堂转写记录。'
-                : '点击右上角蓝色麦克风开启录音，或按 Ctrl+V 随时将板书截图锚定到时间轴中。点击任意句时间戳即可原声回听。'}
+                : `点击右上角蓝色麦克风开启录音，或按 ${getPasteShortcutLabel()} 随时将板书截图锚定到时间轴中。点击任意句时间戳即可原声回听。`}
             </p>
           </div>
         ) : (

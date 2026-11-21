@@ -20,7 +20,13 @@ import {
 import { useAudioDevices } from '../../hooks/useAudioDevices';
 import { IS_MOCK_MODE, api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
-import type { AIModuleKey, ApiProtocol } from '../../types/domain';
+import type { AIModuleKey, ApiProtocol, DesktopHotkeys } from '../../types/domain';
+import {
+  formatShortcutLabel,
+  getDefaultDesktopHotkeys,
+  isMacPlatform,
+  keyboardEventToHotkeyCombo,
+} from '../../utils/desktopBridge';
 import { ProviderIcon } from '../icons/ProviderIcons';
 import { IconButton } from '../ui/IconButton';
 import { Modal } from '../ui/Modal';
@@ -61,6 +67,10 @@ export const SettingsModal: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<SettingsTabKey>('llm');
   const [localAsrReady, setLocalAsrReady] = useState<boolean | null>(null);
+  const [recordingHotkeyKey, setRecordingHotkeyKey] = useState<
+    Exclude<keyof DesktopHotkeys, 'enabled'> | null
+  >(null);
+  const isMac = isMacPlatform();
 
   useEffect(() => {
     if (settingsOpen && settingsDefaultTab) {
@@ -945,27 +955,49 @@ export const SettingsModal: React.FC = () => {
                   />
                 </div>
 
-                {/* Windows 桌面全局快捷键配置 */}
+                {/* 跨平台桌面全局快捷键配置（Windows / macOS 原生按键录制与符号显示） */}
                 <div className="rounded-xl border border-[#DEE0E3] bg-[#F8F9FA] p-4 space-y-3.5">
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-0.5 min-w-0">
                       <span className="text-[15px] font-medium text-[#1F2329]">
-                        Windows 全局后台快捷键
+                        {isMac ? 'macOS 全局后台快捷键' : 'Windows 全局后台快捷键'}
                       </span>
                       <p className="text-[14px] text-[#646A73]">
-                        全屏看网课或写代码时无需切回窗口，直接触发截图、打书签与置顶字幕窗
+                        全屏看网课或写代码时无需切回窗口，直接触发截图、打书签与置顶字幕窗（点击快捷键框后直接按键即可录制）
                       </p>
                     </div>
-                    <Switch
-                      checked={settings.desktopHotkeys.enabled}
-                      ariaLabel="启用 Windows 全局快捷键"
-                      onChange={(checked) =>
-                        void updateSettings((prev) => ({
-                          ...prev,
-                          desktopHotkeys: { ...prev.desktopHotkeys, enabled: checked },
-                        }))
-                      }
-                    />
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      {settings.desktopHotkeys.enabled && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const defaults = getDefaultDesktopHotkeys();
+                            setRecordingHotkeyKey(null);
+                            void updateSettings((prev) => ({
+                              ...prev,
+                              desktopHotkeys: {
+                                ...defaults,
+                                enabled: prev.desktopHotkeys.enabled,
+                              },
+                            }));
+                          }}
+                          className="h-8 px-2.5 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] text-[#4E5969] transition-colors cursor-pointer"
+                        >
+                          恢复默认
+                        </button>
+                      )}
+                      <Switch
+                        checked={settings.desktopHotkeys.enabled}
+                        ariaLabel={isMac ? '启用 macOS 全局快捷键' : '启用 Windows 全局快捷键'}
+                        onChange={(checked) => {
+                          setRecordingHotkeyKey(null);
+                          void updateSettings((prev) => ({
+                            ...prev,
+                            desktopHotkeys: { ...prev.desktopHotkeys, enabled: checked },
+                          }));
+                        }}
+                      />
+                    </div>
                   </div>
 
                   {settings.desktopHotkeys.enabled && (
@@ -978,27 +1010,50 @@ export const SettingsModal: React.FC = () => {
                           { key: 'bookmarkConfused', label: '标记此处没听懂' },
                           { key: 'toggleMiniOverlay', label: '打开置顶迷你字幕窗' },
                         ] as const
-                      ).map((hk) => (
-                        <div
-                          key={hk.key}
-                          className="flex items-center justify-between gap-2 rounded-lg border border-[#DEE0E3] bg-white px-3 py-2"
-                        >
-                          <span className="text-[14px] text-[#4E5969]">{hk.label}</span>
-                          <input
-                            type="text"
-                            defaultValue={settings.desktopHotkeys[hk.key]}
-                            onBlur={(e) => {
-                              const v = e.target.value.trim();
-                              if (!v) return;
-                              void updateSettings((prev) => ({
-                                ...prev,
-                                desktopHotkeys: { ...prev.desktopHotkeys, [hk.key]: v },
-                              }));
-                            }}
-                            className="w-32 h-8 rounded border border-[#DEE0E3] bg-[#F8F9FA] px-2 text-center font-mono text-[14px] text-[#1456F0] focus:outline-none focus:border-[#1456F0]"
-                          />
-                        </div>
-                      ))}
+                      ).map((hk) => {
+                        const isCapturing = recordingHotkeyKey === hk.key;
+                        const displayCombo = formatShortcutLabel(settings.desktopHotkeys[hk.key]);
+                        return (
+                          <div
+                            key={hk.key}
+                            className="flex items-center justify-between gap-2 rounded-lg border border-[#DEE0E3] bg-white px-3 py-2"
+                          >
+                            <span className="text-[14px] text-[#4E5969]">{hk.label}</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRecordingHotkeyKey(isCapturing ? null : hk.key)
+                              }
+                              onBlur={() => {
+                                if (isCapturing) setRecordingHotkeyKey(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (!isCapturing) return;
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (e.key === 'Escape') {
+                                  setRecordingHotkeyKey(null);
+                                  return;
+                                }
+                                const recorded = keyboardEventToHotkeyCombo(e.nativeEvent);
+                                if (!recorded) return;
+                                setRecordingHotkeyKey(null);
+                                void updateSettings((prev) => ({
+                                  ...prev,
+                                  desktopHotkeys: { ...prev.desktopHotkeys, [hk.key]: recorded },
+                                }));
+                              }}
+                              className={`min-w-[116px] h-8 rounded border px-2.5 text-center font-mono text-[14px] transition-colors cursor-pointer focus:outline-none ${
+                                isCapturing
+                                  ? 'border-[#1456F0] bg-[#EBF2FF] text-[#1456F0] ring-2 ring-[#1456F0]/20'
+                                  : 'border-[#DEE0E3] bg-[#F8F9FA] text-[#1456F0] hover:border-[#3370FF]'
+                              }`}
+                            >
+                              {isCapturing ? '请按下组合键...' : displayCombo}
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -1040,13 +1095,18 @@ export const SettingsModal: React.FC = () => {
                     />
                   </div>
 
-                  <div className="flex items-center justify-between">
-                    <span className="text-[15px] font-medium text-[#1F2329]">
-                      课堂转写与笔记实时自动保存
-                    </span>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="text-[15px] font-medium text-[#1F2329]">
+                        保存课堂本地原声录音文件（支持课后原声回放）
+                      </span>
+                      <p className="text-[14px] text-[#646A73]">
+                        约占 110 MB/小时；关闭后不生成录音文件以节省磁盘空间，转写文字与笔记仍正常保存
+                      </p>
+                    </div>
                     <Switch
                       checked={settings.autoSaveSession}
-                      ariaLabel="实时自动保存"
+                      ariaLabel="保存课堂本地原声录音文件"
                       onChange={(checked) =>
                         void updateSettings((prev) => ({
                           ...prev,

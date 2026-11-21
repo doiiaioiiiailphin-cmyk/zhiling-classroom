@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
 import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
-import { getDesktopBridge } from '../utils/desktopBridge';
+import { getDefaultDesktopHotkeys, getDesktopBridge } from '../utils/desktopBridge';
 import type {
   Aec3AddonStatus,
   Aec3DownloadProgress,
@@ -64,14 +64,17 @@ function normalizeSettings(raw: AppSettings): AppSettings {
         ? raw.enableDualChannelSpeakerSplit
         : true,
     globalHotwords: Array.isArray(raw.globalHotwords) ? raw.globalHotwords : [],
-    desktopHotkeys: {
-      enabled: raw.desktopHotkeys?.enabled ?? true,
-      toggleRecording: raw.desktopHotkeys?.toggleRecording || 'Alt+Shift+R',
-      toggleMicMute: raw.desktopHotkeys?.toggleMicMute || 'Alt+Shift+M',
-      captureScreenshot: raw.desktopHotkeys?.captureScreenshot || 'Alt+Shift+S',
-      bookmarkConfused: raw.desktopHotkeys?.bookmarkConfused || 'Alt+Shift+B',
-      toggleMiniOverlay: raw.desktopHotkeys?.toggleMiniOverlay || 'Alt+Shift+O',
-    },
+    desktopHotkeys: (() => {
+      const defaults = getDefaultDesktopHotkeys();
+      return {
+        enabled: raw.desktopHotkeys?.enabled ?? defaults.enabled,
+        toggleRecording: raw.desktopHotkeys?.toggleRecording || defaults.toggleRecording,
+        toggleMicMute: raw.desktopHotkeys?.toggleMicMute || defaults.toggleMicMute,
+        captureScreenshot: raw.desktopHotkeys?.captureScreenshot || defaults.captureScreenshot,
+        bookmarkConfused: raw.desktopHotkeys?.bookmarkConfused || defaults.bookmarkConfused,
+        toggleMiniOverlay: raw.desktopHotkeys?.toggleMiniOverlay || defaults.toggleMiniOverlay,
+      };
+    })(),
   };
 }
 
@@ -96,6 +99,9 @@ const FATAL_RECORDING_CODES: ReadonlySet<string> = new Set([
   'ASR_UNSUPPORTED_MODEL',
   'ASR_STREAM_FAILED',
   'ASR_STREAM_INTERRUPTED',
+  'ASR_LOCAL_DECODE_FAILED',
+  'ASR_DEPENDENCY_UNAVAILABLE',
+  'ASR_ADDON_REQUIRED',
   'ASR_UPSTREAM_ERROR',
   'ASR_TIMEOUT',
   'ASR_UNREACHABLE',
@@ -109,6 +115,42 @@ const FATAL_RECORDING_CODES: ReadonlySet<string> = new Set([
   'STREAM_FAILED',
   'CLASSROOM_SOCKET_CLOSED',
 ]);
+
+const EXTERNAL_CHANNEL_ALERT_CODES: ReadonlySet<string> = new Set([
+  'MIC_SOURCE_ENDED',
+  'SYS_SOURCE_ENDED',
+  'WASAPI_SOCKET_CLOSED',
+  'WASAPI_CAPTURE_FAILED',
+  'MACOS_AUDIO_PERMISSION_REQUIRED',
+  'MACOS_LOOPBACK_FAILED',
+]);
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function notifyScreenTopAlert(title: string, message: string, canResume: boolean): void {
+  const bridge = getDesktopBridge();
+  if (bridge?.show_topmost_alert) {
+    void bridge.show_topmost_alert(title, message, canResume).catch(() => undefined);
+    return;
+  }
+  if (typeof window !== 'undefined' && 'Notification' in window) {
+    if (Notification.permission === 'granted') {
+      try {
+        new Notification(title, { body: message });
+      } catch {
+        // ignore browser notification failures
+      }
+    }
+  }
+}
 
 const LLM_STAGE_PREFIXES = ['句子修正：', '知识点分段：', '重点词提取：'] as const;
 
@@ -529,7 +571,23 @@ export const useAppStore = create<AppStoreState>((set, get) => {
                 durationSeconds: current.durationSeconds,
               })
               .catch(() => {});
+            // 外力导致录音意外暂停时，在 Windows 与 macOS 屏幕最顶层弹出不抢焦点警示浮窗
+            notifyScreenTopAlert(
+              '知聆课堂 · 录音已意外暂停',
+              event.payload.message,
+              true
+            );
           }
+        } else if (
+          !isLlmStageWarning &&
+          EXTERNAL_CHANNEL_ALERT_CODES.has(event.payload.code) &&
+          get().activeSession?.status === 'recording'
+        ) {
+          notifyScreenTopAlert(
+            '知聆课堂 · 音频输入源发生中断',
+            event.payload.message,
+            false
+          );
         }
         break;
       }
@@ -1454,6 +1512,19 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         '课堂笔记';
       try {
         const { blob, filename } = await api.exportSessionDocument(sessionId, req, title);
+        const bridge = getDesktopBridge();
+        if (bridge?.save_exported_file) {
+          const b64 = await blobToBase64(blob);
+          const savedPath = await bridge.save_exported_file(filename, b64);
+          if (savedPath === '') {
+            // 用户在原生保存面板点击取消
+            return;
+          }
+          if (savedPath) {
+            showNotice('info', `已成功导出 ${filename}`);
+            return;
+          }
+        }
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;

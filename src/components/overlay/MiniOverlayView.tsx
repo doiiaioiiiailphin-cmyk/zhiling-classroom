@@ -9,6 +9,7 @@ import {
   Play,
   X,
 } from 'lucide-react';
+import { classroomSocket } from '../../services/classroomSocket';
 import {
   getDesktopBridge,
   isDesktopShell,
@@ -29,11 +30,11 @@ export interface OverlaySyncSnapshot {
 }
 
 export type OverlayRemoteCommand =
-  | { type: 'request-snapshot' }
-  | { type: 'toggle-recording' }
-  | { type: 'toggle-mic' }
-  | { type: 'capture-screen' }
-  | { type: 'bookmark-confused' };
+  | { type: 'request-snapshot'; cmdId?: string }
+  | { type: 'toggle-recording'; cmdId?: string }
+  | { type: 'toggle-mic'; cmdId?: string }
+  | { type: 'capture-screen'; cmdId?: string }
+  | { type: 'bookmark-confused'; cmdId?: string };
 
 export const OVERLAY_CHANNEL_NAME = 'zhiling-classroom-sync';
 
@@ -95,24 +96,36 @@ export const MiniOverlayView: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (typeof BroadcastChannel === 'undefined') return;
-    const bc = new BroadcastChannel(OVERLAY_CHANNEL_NAME);
+    const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(OVERLAY_CHANNEL_NAME) : null;
     channelRef.current = bc;
 
-    bc.onmessage = (evt: MessageEvent<{ type: 'snapshot'; snapshot: OverlaySyncSnapshot }>) => {
-      if (evt.data?.type === 'snapshot' && evt.data.snapshot) {
-        setSnap(evt.data.snapshot);
-      }
-    };
-
-    bc.postMessage({ type: 'request-snapshot' } satisfies OverlayRemoteCommand);
-    const retryTimer = window.setTimeout(() => {
+    if (bc) {
+      bc.onmessage = (evt: MessageEvent<{ type: 'snapshot'; snapshot: OverlaySyncSnapshot }>) => {
+        if (evt.data?.type === 'snapshot' && evt.data.snapshot) {
+          setSnap(evt.data.snapshot);
+        }
+      };
       bc.postMessage({ type: 'request-snapshot' } satisfies OverlayRemoteCommand);
+    }
+
+    // 通过 /ws/v1/desktop/events 同步中继，确保 macOS 独立 WKWebView 之间也能实时收发字幕快照与控制指令
+    const disconnectWs = classroomSocket.connectDesktopEvents(() => {}, {
+      onOverlaySnapshot: (raw) => {
+        if (raw && typeof raw === 'object' && 'recentLines' in raw) {
+          setSnap(raw as unknown as OverlaySyncSnapshot);
+        }
+      },
+    });
+
+    const retryTimer = window.setTimeout(() => {
+      bc?.postMessage({ type: 'request-snapshot' } satisfies OverlayRemoteCommand);
+      classroomSocket.sendOverlayCommand({ type: 'request-snapshot' } satisfies OverlayRemoteCommand);
     }, 350);
 
     return () => {
       window.clearTimeout(retryTimer);
-      bc.close();
+      disconnectWs();
+      bc?.close();
       channelRef.current = null;
     };
   }, []);
@@ -138,7 +151,12 @@ export const MiniOverlayView: React.FC = () => {
   }, [minimizedInBrowser, snapToBottomIfPinned]);
 
   const sendRemote = (cmd: OverlayRemoteCommand) => {
-    channelRef.current?.postMessage(cmd);
+    const tagged: OverlayRemoteCommand = {
+      ...cmd,
+      cmdId: cmd.cmdId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    channelRef.current?.postMessage(tagged);
+    classroomSocket.sendOverlayCommand(tagged);
   };
 
   const handleMinimize = async () => {
