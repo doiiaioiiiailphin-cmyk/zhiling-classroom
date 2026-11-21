@@ -1133,7 +1133,7 @@ export const SettingsModal: React.FC = () => {
                           关于知聆课堂与软件更新
                         </span>
                         <span className="px-2 py-0.5 rounded-md bg-white border border-[#DCE4F7] text-[14px] font-medium text-[#1456F0] tabular-nums">
-                          v{appUpdate.info?.currentVersion || '0.1.3'}
+                          v{appUpdate.info?.currentVersion || '0.1.4'}
                         </span>
                       </div>
                       <p className="text-[14px] text-[#646A73]">

@@ -195,6 +195,17 @@ def ensure_release(
         )
         if isinstance(existing, dict) and existing.get("id"):
             print(f"[CNB] 复用已有 Release：{tag} (id={existing['id']})")
+            if body.strip():
+                try:
+                    _cnb_json_request(
+                        "PATCH",
+                        f"{CNB_API_BASE}/{repo}/-/releases/{existing['id']}",
+                        token,
+                        payload={"name": title or existing.get("name") or tag, "body": body},
+                    )
+                    print(f"[CNB] 已同步更新 Release 说明：{tag}")
+                except Exception as exc:
+                    print(f"[CNB] 同步 Release 说明失败（已忽略）：{exc}")
             return existing
     except CnbApiError as exc:
         if exc.status != 404:

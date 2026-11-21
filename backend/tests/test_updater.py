@@ -278,6 +278,67 @@ class CnbAutoUpdaterTests(unittest.TestCase):
                 self.assertEqual(put_calls[0][0], "https://cos.example.com/presigned-put")
                 self.assertTrue(any("ttl=0" in url for _, url in calls))
 
+    def test_windows_detached_powershell_launch_actually_executes_script(self):
+        import sys
+        import time
+        import zipfile
+        from backend.app.services.updater import (
+            _launch_windows_update_script,
+            build_windows_update_script,
+        )
+
+        if sys.platform != "win32":
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "install"
+            (install_dir / "_internal").mkdir(parents=True)
+            (install_dir / "_internal" / "old.txt").write_text("old-v0.1.2", encoding="utf-8")
+            # 用轻量 .cmd 假装可启动可执行体，验证替换后确实拉起新版
+            (install_dir / "FakeApp.cmd").write_text("@echo old\r\n", encoding="utf-8")
+
+            marker = root / "restarted.txt"
+            zip_path = root / "updates" / "0.1.4" / "ZhilingClassroom-Windows-x86_64.zip"
+            zip_path.parent.mkdir(parents=True)
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("ZhilingClassroom/_internal/new.txt", "new-v0.1.4")
+                zf.writestr("ZhilingClassroom/FakeApp.cmd", f"@echo NEW_OK>\"{marker}\"\r\n")
+
+            staged = root / "updates" / "staged.json"
+            staged.write_text('{"version":"0.1.4"}', encoding="utf-8")
+            log_path = root / "logs" / "updater.log"
+            script_path = zip_path.parent / "apply_update.ps1"
+            script_path.write_text(
+                build_windows_update_script(
+                    old_pid=999999,
+                    zip_path=zip_path,
+                    install_dir=install_dir,
+                    exe_name="FakeApp.cmd",
+                    log_path=log_path,
+                    version="0.1.4",
+                    staged_meta_path=staged,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            proc = _launch_windows_update_script(script_path, require_elevation=False)
+            rc = proc.wait(timeout=15)
+            self.assertEqual(rc, 0)
+
+            deadline = time.monotonic() + 5.0
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+
+            self.assertTrue(log_path.is_file(), "updater.log must be written by background PowerShell")
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("Update installed successfully", log_text)
+            self.assertEqual((install_dir / "_internal" / "new.txt").read_text(encoding="utf-8"), "new-v0.1.4")
+            self.assertFalse((install_dir / "_internal" / "old.txt").exists())
+            self.assertTrue(marker.is_file(), "Replaced executable must be relaunched")
+            self.assertFalse(staged.exists(), "staged.json must be cleaned up after success")
+            self.assertFalse(zip_path.exists(), "zip archive must be cleaned up after success")
+
 
 if __name__ == "__main__":
     unittest.main()

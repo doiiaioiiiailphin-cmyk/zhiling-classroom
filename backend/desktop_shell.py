@@ -1301,7 +1301,7 @@ def main() -> None:
                 return None
 
         def quit_for_update(self) -> bool:
-            """热更新脚本拉起后立即优雅退出桌面宿主与后端服务，确保释放所有文件句柄。"""
+            """热更新脚本拉起后立即优雅退出桌面宿主与后端服务，并设硬退出兜底确保 100% 释放文件句柄。"""
             def _shutdown() -> None:
                 time.sleep(0.12)
                 try:
@@ -1314,14 +1314,24 @@ def main() -> None:
                         mini_win.destroy()  # type: ignore[attr-defined]
                     except Exception:
                         pass
+                if sys.platform == "win32":
+                    hwnd = get_hwnd("main")
+                    if hwnd:
+                        try:
+                            _u32.ShowWindow(wintypes.HWND(hwnd), 0)  # SW_HIDE 立即反馈退出
+                        except Exception:
+                            pass
                 main_win = windows.get("main")
                 if main_win is not None:
                     try:
                         main_win.destroy()  # type: ignore[attr-defined]
                     except Exception:
                         pass
+                # 兜底：若 WebView2 / 后台线程 1.8 秒后仍滞留导致进程未完全结束，强制退出释放 _internal 句柄
+                time.sleep(1.8)
+                os._exit(0)
 
-            threading.Thread(target=_shutdown, daemon=True).start()
+            threading.Thread(target=_shutdown, name="zhiling-update-quit", daemon=True).start()
             return True
 
         def open_path_in_explorer(self, path: str) -> bool:

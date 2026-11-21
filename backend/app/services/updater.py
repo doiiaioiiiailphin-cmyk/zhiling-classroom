@@ -142,6 +142,56 @@ def _ps_single_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _resolve_windows_powershell() -> str:
+    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidate = Path(sys_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(candidate) if candidate.is_file() else "powershell.exe"
+
+
+def _launch_windows_update_script(script_path: Path, *, require_elevation: bool = False) -> subprocess.Popen:
+    """拉起独立后台 PowerShell 执行热更新。
+
+    注意：Windows 下严禁同时传 DETACHED_PROCESS 与 CREATE_NO_WINDOW，否则 powershell.exe 会以
+    退出码 0 静默秒退而不执行脚本任何一行；仅使用 CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    配合 DEVNULL 才能稳定脱离宿主进程并在后台完整执行替换与重启。
+    """
+    ps_exe = _resolve_windows_powershell()
+    creationflags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    )
+    if not require_elevation:
+        return subprocess.Popen(
+            [
+                ps_exe,
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+    elev_cmd = (
+        f"Start-Process {_ps_single_quote(ps_exe)} -Verb RunAs -WindowStyle Hidden "
+        f"-ArgumentList @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',{_ps_single_quote(str(script_path))})"
+    )
+    return subprocess.Popen(
+        [ps_exe, "-NoProfile", "-WindowStyle", "Hidden", "-Command", elev_cmd],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creationflags,
+    )
+
+
 def build_windows_update_script(
     *,
     old_pid: int,
@@ -149,14 +199,19 @@ def build_windows_update_script(
     install_dir: Path,
     exe_name: str,
     log_path: Path,
+    version: str = "",
+    staged_meta_path: Path | None = None,
 ) -> str:
-    """生成 Windows 分离进程热更新 PowerShell 脚本（含备份自动回滚与日志）。"""
+    """生成 Windows 分离进程热更新 PowerShell 脚本（同盘原子备份、失败自动回滚、注册表版本同步与日志）。"""
+    staged_str = str(staged_meta_path) if staged_meta_path is not None else ""
     return f"""$ErrorActionPreference = 'Stop'
 $OldPid = {int(old_pid)}
 $ZipPath = {_ps_single_quote(str(zip_path))}
 $InstallDir = {_ps_single_quote(str(install_dir))}
 $ExeName = {_ps_single_quote(exe_name)}
 $LogPath = {_ps_single_quote(str(log_path))}
+$NewVersion = {_ps_single_quote(version)}
+$StagedMetaPath = {_ps_single_quote(staged_str)}
 
 function Write-UpdateLog([string]$Msg) {{
     try {{
@@ -167,20 +222,29 @@ function Write-UpdateLog([string]$Msg) {{
     }} catch {{}}
 }}
 
-Write-UpdateLog "Updater started for PID=$OldPid InstallDir=$InstallDir"
+Write-UpdateLog "Updater started for PID=$OldPid InstallDir=$InstallDir Version=$NewVersion"
 
-# 1. 等待旧主进程完全退出并释放句柄
-for ($i = 0; $i -lt 125; $i++) {{
+# 1. 等待旧主进程完全退出并释放句柄；若超时仍驻留则强制结束避免锁死 _internal
+$Exited = $false
+for ($i = 0; $i -lt 100; $i++) {{
     if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) {{
+        $Exited = $true
         break
     }}
     Start-Sleep -Milliseconds 200
 }}
-Start-Sleep -Milliseconds 900
+if (-not $Exited) {{
+    Write-UpdateLog "Old PID=$OldPid still running after 20s; forcing termination"
+    Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 1000
+}}
+Start-Sleep -Milliseconds 800
 
-$WorkRoot = Join-Path (Split-Path -Parent $ZipPath) ("apply_" + [Guid]::NewGuid().ToString("N"))
+$RunId = [Guid]::NewGuid().ToString("N")
+$WorkRoot = Join-Path (Split-Path -Parent $ZipPath) ("apply_" + $RunId)
 $ExtractDir = Join-Path $WorkRoot "extracted"
-$BackupDir = Join-Path $WorkRoot "backup"
+# 备份目录放在安装目录同盘符内，避免跨盘符 Move-Item _internal 目录报错
+$BackupDir = Join-Path $InstallDir (".zhiling_update_backup_" + $RunId)
 
 try {{
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -198,14 +262,14 @@ try {{
         }}
     }}
 
-    # 2. 备份旧版可执行文件与 _internal 目录以便失败回滚
+    # 2. 同盘原子备份旧版可执行文件与 _internal 目录以便失败回滚
     New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
     foreach ($Entry in @($ExeName, "_internal")) {{
         $OldItem = Join-Path $InstallDir $Entry
         if (Test-Path $OldItem) {{
             Write-UpdateLog "Backing up $OldItem"
             $Moved = $false
-            for ($retry = 0; $retry -lt 20; $retry++) {{
+            for ($retry = 0; $retry -lt 25; $retry++) {{
                 try {{
                     Move-Item -Path $OldItem -Destination (Join-Path $BackupDir $Entry) -Force
                     $Moved = $true
@@ -231,10 +295,24 @@ try {{
         throw "New executable missing after copy: $NewExe"
     }}
 
+    # 4. 同步 Windows 控制面板/已安装应用版本号（若通过 NSIS 安装）
+    if ($NewVersion) {{
+        try {{
+            $UninstKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZhilingClassroom'
+            if (Test-Path $UninstKey) {{
+                Set-ItemProperty -Path $UninstKey -Name 'DisplayVersion' -Value $NewVersion -ErrorAction SilentlyContinue
+            }}
+        }} catch {{}}
+    }}
+
     Write-UpdateLog "Update installed successfully. Launching $NewExe"
-    Start-Process -FilePath $NewExe -WorkingDirectory $InstallDir
+    Start-Process -FilePath $NewExe -WorkingDirectory $InstallDir -WindowStyle Normal
+    Remove-Item -Path $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
+    if ($StagedMetaPath -and (Test-Path $StagedMetaPath)) {{
+        Remove-Item -Path $StagedMetaPath -Force -ErrorAction SilentlyContinue
+    }}
 }} catch {{
     Write-UpdateLog "Update FAILED: $($_.Exception.Message)"
     try {{
@@ -248,13 +326,15 @@ try {{
                     Move-Item -Path $BakItem -Destination $DstItem -Force -ErrorAction SilentlyContinue
                 }}
             }}
+            Remove-Item -Path $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
         }}
     }} catch {{
         Write-UpdateLog "Rollback error: $($_.Exception.Message)"
     }}
+    Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
     $OldExe = Join-Path $InstallDir $ExeName
     if (Test-Path $OldExe) {{
-        Start-Process -FilePath $OldExe -WorkingDirectory $InstallDir -ErrorAction SilentlyContinue
+        Start-Process -FilePath $OldExe -WorkingDirectory $InstallDir -WindowStyle Normal -ErrorAction SilentlyContinue
     }}
 }}
 """
@@ -771,30 +851,15 @@ class AppUpdaterService:
                 install_dir=install_dir,
                 exe_name=exe_name,
                 log_path=log_path,
+                version=version,
+                staged_meta_path=self._staged_meta_path(),
             )
             script_path.write_text(script_body, encoding="utf-8-sig")
 
-            if _can_write_directory(install_dir):
-                creationflags = (
-                    getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                    | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                )
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-                    close_fds=True,
-                    creationflags=creationflags,
-                )
-            else:
-                # 受保护目录（如 Program Files）通过 UAC 提权执行替换脚本
-                elev_cmd = (
-                    f"Start-Process powershell -Verb RunAs -WindowStyle Hidden "
-                    f"-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',{_ps_single_quote(str(script_path))})"
-                )
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-Command", elev_cmd],
-                    close_fds=True,
-                )
+            _launch_windows_update_script(
+                script_path,
+                require_elevation=not _can_write_directory(install_dir),
+            )
 
             return UpdateApplyResult(
                 scheduled=True,
