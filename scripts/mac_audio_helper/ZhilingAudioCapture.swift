@@ -13,6 +13,7 @@
 import AVFoundation
 import CoreAudio
 import CoreMedia
+import Darwin
 import Foundation
 import ScreenCaptureKit
 
@@ -165,6 +166,7 @@ private func enumerateDevices() -> DeviceListPayload {
 }
 
 /// 统一高精度 PCM 重采样与输出器：将任意采样率/声道的 Float32 或 Int16 AudioBufferList 转为 16kHz mono s16le 写入 stdout。
+/// 使用零 ObjC 分配的 POSIX `Darwin.write` 直接写入 STDOUT_FILENO，杜绝实时音频回调内 Foundation/FileHandle 内存泄漏与 SIGPIPE 闪退。
 private final class Pcm16MonoEmitter {
     private let targetRate: Double = 16000.0
     private var samplesPerOutput: Double = 3.0
@@ -172,13 +174,14 @@ private final class Pcm16MonoEmitter {
     private var accumulator: Double = 0.0
     private var lastRate: Double = 0.0
     private var outSamples: [Int16] = []
-    private let stdoutHandle = FileHandle.standardOutput
+    private(set) var pipeBroken: Bool = false
 
     init() {
         outSamples.reserveCapacity(1024)
     }
 
     func emit(bufferList: UnsafePointer<AudioBufferList>, asbd: AudioStreamBasicDescription) {
+        if pipeBroken { return }
         let inRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 48000.0
         if inRate != lastRate {
             lastRate = inRate
@@ -259,9 +262,19 @@ private final class Pcm16MonoEmitter {
 
         if !outSamples.isEmpty {
             outSamples.withUnsafeBytes { rawBuf in
-                if let baseAddr = rawBuf.baseAddress {
-                    let data = Data(bytes: baseAddr, count: rawBuf.count)
-                    try? stdoutHandle.write(contentsOf: data)
+                guard let baseAddr = rawBuf.baseAddress else { return }
+                var written = 0
+                let total = rawBuf.count
+                while written < total {
+                    let n = Darwin.write(STDOUT_FILENO, baseAddr.advanced(by: written), total - written)
+                    if n > 0 {
+                        written += n
+                    } else if n < 0 && errno == EINTR {
+                        continue
+                    } else {
+                        pipeBroken = true
+                        break
+                    }
                 }
             }
         }
@@ -392,8 +405,10 @@ private final class CoreAudioProcessTapCapture {
         var procID: AudioDeviceIOProcID?
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, ioQueue) {
             [weak self] _, inInputData, _, _, _ in
-            guard let self = self else { return }
-            self.emitter.emit(bufferList: inInputData, asbd: capturedAsbd)
+            autoreleasepool {
+                guard let self = self else { return }
+                self.emitter.emit(bufferList: inInputData, asbd: capturedAsbd)
+            }
         }
         guard ioStatus == noErr, let validProcID = procID else {
             stop()
@@ -414,6 +429,23 @@ private final class CoreAudioProcessTapCapture {
                 userInfo: [NSLocalizedDescriptionKey: "AudioDeviceStart failed (\(startStatus))"]
             )
         }
+    }
+
+    var isPipeBroken: Bool {
+        return emitter.pipeBroken
+    }
+
+    func isDeviceAlive() -> Bool {
+        guard aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) else { return false }
+        var alive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let st = AudioObjectGetPropertyData(aggregateDeviceID, &addr, 0, nil, &size, &alive)
+        return st == noErr && alive != 0
     }
 
     func stop() {
@@ -440,49 +472,55 @@ private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegat
     private let emitter = Pcm16MonoEmitter()
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .audio, CMSampleBufferIsValid(sampleBuffer) else { return }
-        guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) else {
-            return
-        }
-        let asbd = asbdPtr.pointee
+        autoreleasepool {
+            guard outputType == .audio, CMSampleBufferIsValid(sampleBuffer) else { return }
+            guard let desc = CMSampleBufferGetFormatDescription(sampleBuffer),
+                  let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) else {
+                return
+            }
+            let asbd = asbdPtr.pointee
 
-        var listSizeNeeded = 0
-        let probeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: &listSizeNeeded,
-            bufferListOut: nil,
-            bufferListSize: 0,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: nil
-        )
-        guard probeStatus == noErr || probeStatus == kCMSampleBufferError_BufferHasNoSampleSizes || listSizeNeeded > 0 else {
-            return
-        }
-        let allocSize = max(listSizeNeeded, MemoryLayout<AudioBufferList>.size)
-        let rawPtr = UnsafeMutableRawPointer.allocate(
-            byteCount: allocSize,
-            alignment: MemoryLayout<AudioBufferList>.alignment
-        )
-        defer { rawPtr.deallocate() }
-        let ablPtr = rawPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
+            var listSizeNeeded = 0
+            let probeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: &listSizeNeeded,
+                bufferListOut: nil,
+                bufferListSize: 0,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: 0,
+                blockBufferOut: nil
+            )
+            guard probeStatus == noErr || probeStatus == kCMSampleBufferError_BufferHasNoSampleSizes || listSizeNeeded > 0 else {
+                return
+            }
+            let allocSize = max(listSizeNeeded, MemoryLayout<AudioBufferList>.size)
+            let rawPtr = UnsafeMutableRawPointer.allocate(
+                byteCount: allocSize,
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { rawPtr.deallocate() }
+            let ablPtr = rawPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
 
-        var blockBuffer: CMBlockBuffer?
-        let copyStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: ablPtr,
-            bufferListSize: allocSize,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
-            blockBufferOut: &blockBuffer
-        )
-        guard copyStatus == noErr else { return }
-        emitter.emit(bufferList: ablPtr, asbd: asbd)
-        _ = blockBuffer
+            var blockBuffer: CMBlockBuffer?
+            let copyStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: ablPtr,
+                bufferListSize: allocSize,
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
+                blockBufferOut: &blockBuffer
+            )
+            guard copyStatus == noErr else { return }
+            emitter.emit(bufferList: ablPtr, asbd: asbd)
+            _ = blockBuffer
+        }
+    }
+
+    var isPipeBroken: Bool {
+        return emitter.pipeBroken
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -497,6 +535,7 @@ private final class AudioStreamWriter: NSObject, SCStreamOutput, SCStreamDelegat
 private var activeCleanup: (() -> Void)?
 
 private func installSignalHandlers() {
+    signal(SIGPIPE, SIG_IGN)
     signal(SIGTERM) { _ in
         activeCleanup?()
         Foundation.exit(0)
@@ -537,6 +576,32 @@ struct ZhilingAudioCaptureMain {
                     activeCleanup = { tapCapture.stop() }
                     while true {
                         try await Task.sleep(nanoseconds: 1_000_000_000)
+                        if tapCapture.isPipeBroken {
+                            tapCapture.stop()
+                            Foundation.exit(0)
+                        }
+                        if !tapCapture.isDeviceAlive() {
+                            // 音频路由切换（如蓝牙耳机休眠/重连）导致聚合设备失效时，带退避重试重建 Process Tap
+                            tapCapture.stop()
+                            var recovered = false
+                            for delayNs in [UInt64(400_000_000), UInt64(800_000_000), UInt64(1_500_000_000)] {
+                                try await Task.sleep(nanoseconds: delayNs)
+                                do {
+                                    try tapCapture.start()
+                                    recovered = true
+                                    break
+                                } catch {
+                                    tapCapture.stop()
+                                }
+                            }
+                            if !recovered {
+                                throw NSError(
+                                    domain: "ZhilingAudioCapture",
+                                    code: -2,
+                                    userInfo: [NSLocalizedDescriptionKey: "Process Tap recovery failed after audio route change"]
+                                )
+                            }
+                        }
                     }
                 } catch {
                     let note = "CoreAudio Process Tap unavailable, falling back to ScreenCaptureKit: \(error.localizedDescription)\n"
@@ -571,6 +636,10 @@ struct ZhilingAudioCaptureMain {
 
                 while true {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
+                    if writer.isPipeBroken {
+                        try? await stream.stopCapture()
+                        Foundation.exit(0)
+                    }
                 }
             } catch {
                 let msg = "MACOS_AUDIO_PERMISSION_REQUIRED: 请在「系统设置 → 隐私与安全性 → 录屏与系统录音」中勾选知聆课堂后重试（\(error.localizedDescription)）\n"

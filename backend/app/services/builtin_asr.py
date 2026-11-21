@@ -69,10 +69,18 @@ def clean_sensevoice_text(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def pcm16le_to_floats(pcm: bytes) -> list[float]:
+try:
+    import numpy as _np  # type: ignore
+except ImportError:  # pragma: no cover
+    _np = None
+
+
+def pcm16le_to_floats(pcm: bytes):
     usable = len(pcm) - (len(pcm) % 2)
     if usable <= 0:
         return []
+    if _np is not None:
+        return _np.frombuffer(pcm[:usable], dtype="<i2").astype(_np.float32) * (1.0 / 32768.0)
     samples = array("h")
     samples.frombytes(pcm[:usable])
     if sys.byteorder == "big":
@@ -160,14 +168,17 @@ class BuiltinAsrRuntime:
 
     def decode_pcm(self, pcm: bytes, language: str = "auto") -> str:
         floats = pcm16le_to_floats(pcm)
-        if not floats:
+        if len(floats) == 0:
             return ""
         recognizer = self.get_recognizer(language)
         with self._recognizer_lock:
             stream = recognizer.create_stream()
-            stream.accept_waveform(16000, floats)
-            recognizer.decode_stream(stream)
-            raw_text = getattr(stream.result, "text", "") or ""
+            try:
+                stream.accept_waveform(16000, floats)
+                recognizer.decode_stream(stream)
+                raw_text = getattr(stream.result, "text", "") or ""
+            finally:
+                del stream
         return clean_sensevoice_text(raw_text)
 
     def _warmup(self) -> None:

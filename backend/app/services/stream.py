@@ -658,9 +658,10 @@ class ClassroomConnection:
         run.total_bytes += len(pcm)
         await run.enqueue(pcm)
         if run.end_ms // 1000 > self.persist_seconds:
-            if self.archive is not None:
+            next_sec = run.end_ms // 1000
+            if self.archive is not None and (next_sec % 5 == 0 or next_sec - self.persist_seconds >= 5):
                 try:
-                    self.archive.checkpoint()
+                    await asyncio.to_thread(self.archive.checkpoint)
                 except OSError:
                     await self.archive_failed()
             self.persist_seconds = await self.owner.repo.checkpoint(self.id, run.end_ms)

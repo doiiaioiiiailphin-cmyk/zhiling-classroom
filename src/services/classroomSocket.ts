@@ -68,6 +68,8 @@ export class ClassroomSocketClient {
   private connection: Connection | null = null;
   private desktopSocket: WebSocket | null = null;
   private desktopReconnectTimer: number | null = null;
+  private streamReconnectTimer: number | null = null;
+  private streamReconnectAttempts = 0;
   private telemetry: AudioRuntimeTelemetry = IDLE_TELEMETRY;
   private readonly telemetryListeners = new Set<(telemetry: AudioRuntimeTelemetry) => void>();
 
@@ -90,8 +92,8 @@ export class ClassroomSocketClient {
     }
   }
 
-  connect(sessionId: string, handler: ClassroomEventHandler): void {
-    this.disconnect();
+  connect(sessionId: string, handler: ClassroomEventHandler, resetRetries = true): void {
+    this.disconnect(resetRetries);
     if (IS_MOCK_MODE) return;
     const socket = new WebSocket(`${WS_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/stream`);
     socket.binaryType = 'arraybuffer';
@@ -108,7 +110,10 @@ export class ClassroomSocketClient {
     };
     this.connection = connection;
 
-    socket.onopen = () => this.activate(connection);
+    socket.onopen = () => {
+      this.streamReconnectAttempts = 0;
+      this.activate(connection);
+    };
     socket.onmessage = ({ data }) => {
       if (this.connection !== connection || typeof data !== 'string') return;
       let event: ClassroomServerEvent;
@@ -126,7 +131,25 @@ export class ClassroomSocketClient {
     socket.onclose = () => {
       if (this.connection !== connection) return;
       const interrupted = connection.recording || connection.intent;
+      const savedIntent = connection.intent;
+      const savedSessionId = connection.sessionId;
+      const savedHandler = connection.onEvent;
       this.releaseAudio(connection);
+      if (interrupted && this.streamReconnectAttempts < 2) {
+        // 录音期间遭遇偶发 WebSocket 抖动或休眠唤醒断开时，自动执行最多 2 次静默重连恢复录制
+        const attempt = ++this.streamReconnectAttempts;
+        const delayMs = attempt === 1 ? 1200 : 2500;
+        if (this.streamReconnectTimer !== null) {
+          window.clearTimeout(this.streamReconnectTimer);
+        }
+        this.streamReconnectTimer = window.setTimeout(() => {
+          this.streamReconnectTimer = null;
+          if (this.connection !== connection) return;
+          this.connect(savedSessionId, savedHandler, false);
+          this.sendCommand(savedIntent ?? { type: 'recording.resume' });
+        }, delayMs);
+        return;
+      }
       if (interrupted) {
         this.report(connection, 'CLASSROOM_SOCKET_CLOSED', '课堂连接已断开，可暂停后重新开始录音。');
       }
@@ -263,7 +286,14 @@ export class ClassroomSocketClient {
     connection.socket.send(chunk);
   }
 
-  disconnect(): void {
+  disconnect(resetRetries = true): void {
+    if (this.streamReconnectTimer !== null) {
+      window.clearTimeout(this.streamReconnectTimer);
+      this.streamReconnectTimer = null;
+    }
+    if (resetRetries) {
+      this.streamReconnectAttempts = 0;
+    }
     const connection = this.connection;
     if (!connection) return;
     this.releaseAudio(connection);

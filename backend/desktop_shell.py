@@ -12,16 +12,19 @@
 """
 import base64
 import ctypes
+import faulthandler
 import io
 import json
 import multiprocessing
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import webbrowser
 
@@ -60,14 +63,58 @@ def _resolve_app_home() -> Path:
     return home
 
 
+_CRASH_LOG_FH = None
+
+
 def _ensure_windowed_stdio(app_home: Path) -> None:
-    """PyInstaller --windowed 模式下 sys.stdout / sys.stderr 为 None，重定向至日志文件以防日志库崩溃。"""
+    """PyInstaller --windowed 模式下 sys.stdout / sys.stderr 为 None，同时启用崩溃日志与 SIGPIPE 防护。"""
+    global _CRASH_LOG_FH
+    if hasattr(signal, "SIGPIPE"):
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except Exception:
+            pass
+
+    log_dir = app_home / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    # 始终开启原生 faulthandler 与未捕获异常钩子，防止 macOS/Windows 极端崩溃时无任何日志可查
+    try:
+        crash_path = log_dir / "crash.log"
+        if crash_path.exists() and crash_path.stat().st_size > 2 * 1024 * 1024:
+            crash_path.write_text("", encoding="utf-8")
+        _CRASH_LOG_FH = open(crash_path, "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(file=_CRASH_LOG_FH, all_threads=True)
+
+        def _log_unhandled(kind: str, exc_type, exc_value, exc_tb) -> None:
+            try:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                _CRASH_LOG_FH.write(f"\n[{ts}] UNHANDLED {kind}:\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=_CRASH_LOG_FH)
+                _CRASH_LOG_FH.flush()
+            except Exception:
+                pass
+
+        sys.excepthook = lambda t, v, tb: _log_unhandled("MAIN", t, v, tb)
+        threading.excepthook = lambda args: _log_unhandled(
+            f"THREAD({getattr(args.thread, 'name', '?')})",
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+        )
+    except Exception:
+        pass
+
     if sys.stdout is not None and sys.stderr is not None:
         return
     try:
-        log_dir = app_home / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_fh = open(log_dir / "desktop.log", "a", encoding="utf-8", buffering=1)
+        log_path = log_dir / "desktop.log"
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            log_path.write_text("", encoding="utf-8")
+        log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
     except OSError:
         log_fh = io.StringIO()
     if sys.stdout is None:
@@ -289,7 +336,8 @@ def _apply_dwm_alpha_and_frameless(hwnd: int) -> None:
             if empty_rgn:
                 _g32.DeleteObject(empty_rgn)
 
-        for attr, val in ((33, 1), (34, 0xFFFFFFFE), (38, 1)):
+        # 3=DWMWA_TRANSITIONS_FORCEDISABLED(禁系统无边框跳变动画), 33=去系统圆角, 34=去1px外框, 38=去云母底色
+        for attr, val in ((3, 1), (33, 1), (34, 0xFFFFFFFE), (38, 1)):
             c_val = ctypes.c_uint32(val)
             _dwm.DwmSetWindowAttribute(
                 h_wnd,
@@ -370,33 +418,33 @@ def _move_window_only(hwnd: int, x: int, y: int) -> None:
     )
 
 
+def _set_dwm_transitions_disabled(hwnd: int, disabled: bool) -> None:
+    """临时开关 Windows DWM 默认窗口过渡（DWMWA_TRANSITIONS_FORCEDISABLED=3），消除无边框透明窗最小化/关闭时的二次跳变。"""
+    if sys.platform != "win32" or not hwnd:
+        return
+    try:
+        c_val = ctypes.c_int(1 if disabled else 0)
+        _dwm.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            ctypes.c_uint32(3),
+            ctypes.byref(c_val),
+            ctypes.sizeof(c_val),
+        )
+    except Exception:
+        pass
+
+
 def _animate_window_rect(
     hwnd: int,
     start_rect: tuple[int, int, int, int],
     end_rect: tuple[int, int, int, int],
     duration_s: float = 0.175,
 ) -> None:
-    """高刷三次缓出插值过渡窗口位置与尺寸（用于最大化与向下还原窗口动效）。"""
+    """直接一步设置目标窗口矩形，避免 40 次 Win32 Resize 风暴引发 WebView2 先飞左上角再铺满的错位问题。"""
+    _ = (start_rect, duration_s)
     if sys.platform != "win32" or not hwnd:
         return
-    sx, sy, sw, sh = start_rect
-    ex, ey, ew, eh = end_rect
-    if (sx, sy, sw, sh) == (ex, ey, ew, eh):
-        return
-    t0 = time.perf_counter()
-    while True:
-        elapsed = time.perf_counter() - t0
-        if elapsed >= duration_s:
-            break
-        p = elapsed / duration_s
-        eased = 1.0 - (1.0 - p) ** 3.2
-        cx = round(sx + (ex - sx) * eased)
-        cy = round(sy + (ey - sy) * eased)
-        cw = round(sw + (ew - sw) * eased)
-        ch = round(sh + (eh - sh) * eased)
-        _set_window_rect(hwnd, cx, cy, cw, ch)
-        time.sleep(0.004)
-    _set_window_rect(hwnd, ex, ey, ew, eh)
+    _set_window_rect(hwnd, *end_rect)
 
 
 def _get_cursor_pos() -> tuple[int, int]:
@@ -487,7 +535,9 @@ def main() -> None:
         workers=1,
         ws="websockets",
         ws_max_size=262144,
-        ws_max_queue=32,
+        ws_max_queue=64,
+        ws_ping_interval=30.0,
+        ws_ping_timeout=120.0,
         log_config=None,
         access_log=False,
     )
@@ -563,6 +613,13 @@ def main() -> None:
         target_name = "main" if is_main else "mini"
         if sys.platform == "darwin":
             from desktop_macos import configure_macos_window
+
+            def _on_mac_fs(entered: bool) -> None:
+                windows["maximized"] = bool(entered)
+                dispatch_js_event(
+                    "main", "zhiling:window-maximized", "true" if entered else "false"
+                )
+
             return configure_macos_window(
                 win_obj,
                 is_main=is_main,
@@ -570,6 +627,7 @@ def main() -> None:
                 on_restored=lambda t=target_name: dispatch_js_event(
                     t, "zhiling:window-restored-from-min", "true"
                 ),
+                on_fullscreen_change=_on_mac_fs if is_main else None,
             )
 
         diag: dict[str, object] = {"configured": False, "alphaComposited": False}
@@ -591,11 +649,12 @@ def main() -> None:
 
                 def _on_state_or_activate(*_args) -> None:
                     cur_hwnd = int(native.Handle.ToInt32())
-                    _apply_dwm_alpha_and_frameless(cur_hwnd)
                     if native.WindowState == WinForms.FormWindowState.Minimized:
                         windows[min_key] = True
-                    elif windows.get(min_key):
+                        return
+                    if windows.get(min_key):
                         windows[min_key] = False
+                        _apply_dwm_alpha_and_frameless(cur_hwnd)
                         threading.Thread(
                             target=dispatch_js_event,
                             args=(target_name, "zhiling:window-restored-from-min", "true"),
@@ -664,17 +723,113 @@ def main() -> None:
 
         def minimize_window(self) -> None:
             main_win = windows.get("main")
-            if main_win is not None:
-                windows["was_minimized_main"] = True
+            if main_win is None:
+                return
+            windows["was_minimized_main"] = True
+            if sys.platform == "darwin":
+                from desktop_macos import minimize_macos_window
+                minimize_macos_window(main_win)
+                return
+            hwnd = get_hwnd("main")
+            if hwnd:
+                # 保持 DWMWA_TRANSITIONS_FORCEDISABLED=1，杜绝无边框透明窗最小化/唤醒时产生二次大小跳变
+                _set_dwm_transitions_disabled(hwnd, True)
+                _u32.ShowWindow(wintypes.HWND(hwnd), 7)  # SW_SHOWMINNOACTIVE
+            else:
                 main_win.minimize()  # type: ignore[attr-defined]
 
         def is_window_maximized(self) -> bool:
             return bool(windows.get("maximized"))
 
-        def toggle_maximize_window(self) -> bool:
+        def prepare_maximize_transition(self) -> dict[str, object]:
+            """协调丝滑全屏/最大化过渡：macOS 触发原生全屏 Space；Windows 返回精确比例供前端 120fps GPU FLIP 展开/收起。"""
+            if sys.platform == "darwin":
+                from desktop_macos import toggle_macos_fullscreen
+                next_max = toggle_macos_fullscreen(windows.get("main"), windows)
+                return {"nativeHandled": True, "maximized": bool(next_max)}
+
+            hwnd = get_hwnd("main")
+            if not hwnd:
+                return {"nativeHandled": True, "maximized": bool(windows.get("maximized"))}
+
+            work = _get_monitor_work_area(hwnd)
+            cur_rect = _get_window_rect(hwnd)
+            if not work or not cur_rect:
+                next_max = self.toggle_maximize_window()
+                return {"nativeHandled": True, "maximized": bool(next_max)}
+
+            wx, wy, ww, wh = work
+            ww = max(1, ww)
+            wh = max(1, wh)
+
+            if windows.get("maximized"):
+                prev = windows.get("normal_rect")
+                if not (isinstance(prev, tuple) and len(prev) == 4):
+                    scale = _get_window_dpi_scale(hwnd)
+                    pw, ph = min(ww - 40, int(1400 * scale)), min(wh - 40, int(880 * scale))
+                    prev = (wx + (ww - pw) // 2, wy + (wh - ph) // 2, pw, ph)
+                    windows["normal_rect"] = prev
+                nx, ny, nw, nh = prev
+                windows["maximized"] = False
+                return {
+                    "nativeHandled": False,
+                    "maximized": False,
+                    "dxPct": round((nx - wx) / ww * 100.0, 4),
+                    "dyPct": round((ny - wy) / wh * 100.0, 4),
+                    "scaleX": round(max(0.2, min(1.0, nw / ww)), 5),
+                    "scaleY": round(max(0.2, min(1.0, nh / wh)), 5),
+                }
+
+            sx, sy, sw, sh = cur_rect
+            windows["normal_rect"] = cur_rect
+            windows["pending_max_rect"] = (wx, wy, ww, wh)
+            windows["maximized"] = True
+            # 暂不立即改变 HWND，交由前端挂载 resize 首帧同步钩子后再调用 commit_maximize_rect()，实现零闪烁 120fps GPU FLIP
+            return {
+                "nativeHandled": False,
+                "maximized": True,
+                "dxPct": round((sx - wx) / ww * 100.0, 4),
+                "dyPct": round((sy - wy) / wh * 100.0, 4),
+                "scaleX": round(max(0.2, min(1.0, sw / ww)), 5),
+                "scaleY": round(max(0.2, min(1.0, sh / wh)), 5),
+            }
+
+        def commit_maximize_rect(self) -> bool:
+            """前端挂好首帧 resize FLIP 钩子后一步原子将透明宿主铺满工作区（杜绝 1 帧左上角闪烁）。"""
+            if sys.platform != "win32":
+                return True
+            hwnd = get_hwnd("main")
+            target = windows.pop("pending_max_rect", None)
+            if not (isinstance(target, tuple) and len(target) == 4):
+                target = _get_monitor_work_area(hwnd) if hwnd else None
+            if hwnd and isinstance(target, tuple) and len(target) == 4 and windows.get("maximized"):
+                _set_window_rect(hwnd, *target)
+                return True
+            return False
+
+        def commit_restore_rect(self) -> bool:
+            """Windows GPU 还原动效结束后一步原子收回透明宿主至浮动圆角坐标。"""
+            if sys.platform != "win32":
+                return True
+            hwnd = get_hwnd("main")
+            prev = windows.get("normal_rect")
+            if hwnd and isinstance(prev, tuple) and len(prev) == 4 and not windows.get("maximized"):
+                _set_window_rect(hwnd, *prev)
+                return True
+            return False
+
+        def zoom_window(self) -> dict[str, object]:
+            """双击顶栏：macOS 使用 NSAnimationContext 平滑铺满工作区；Windows 复用 GPU FLIP 最大化/还原。"""
             if sys.platform == "darwin":
                 from desktop_macos import toggle_macos_zoom
-                return toggle_macos_zoom(windows.get("main"), windows)
+                next_max = toggle_macos_zoom(windows.get("main"), windows)
+                return {"nativeHandled": True, "maximized": bool(next_max)}
+            return self.prepare_maximize_transition()
+
+        def toggle_maximize_window(self) -> bool:
+            if sys.platform == "darwin":
+                from desktop_macos import toggle_macos_fullscreen
+                return toggle_macos_fullscreen(windows.get("main"), windows)
             hwnd = get_hwnd("main")
             if not hwnd:
                 return False
@@ -682,9 +837,7 @@ def main() -> None:
             if windows.get("maximized"):
                 prev = windows.get("normal_rect")
                 windows["maximized"] = False
-                if isinstance(prev, tuple) and len(prev) == 4 and cur_rect:
-                    _animate_window_rect(hwnd, cur_rect, prev, duration_s=0.175)
-                elif isinstance(prev, tuple) and len(prev) == 4:
+                if isinstance(prev, tuple) and len(prev) == 4:
                     _set_window_rect(hwnd, *prev)
                 else:
                     main_win = windows.get("main")
@@ -695,15 +848,12 @@ def main() -> None:
                     windows["normal_rect"] = cur_rect
                 work = _get_monitor_work_area(hwnd)
                 windows["maximized"] = True
-                if work and cur_rect:
-                    _animate_window_rect(hwnd, cur_rect, work, duration_s=0.175)
-                elif work:
+                if work:
                     _set_window_rect(hwnd, *work)
                 else:
                     main_win = windows.get("main")
                     if main_win is not None:
                         main_win.maximize()  # type: ignore[attr-defined]
-            _apply_dwm_alpha_and_frameless(hwnd)
             return bool(windows["maximized"])
 
         def close_window(self) -> None:
@@ -714,11 +864,30 @@ def main() -> None:
                 except Exception:
                     pass
             main_win = windows.get("main")
-            if main_win is not None:
+            if main_win is None:
+                return
+            if sys.platform == "darwin":
+                from desktop_macos import close_macos_window
+
+                def _destroy_main() -> None:
+                    try:
+                        main_win.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                close_macos_window(main_win, destroy_after=_destroy_main)
+                return
+            hwnd = get_hwnd("main")
+            if hwnd:
+                _set_dwm_transitions_disabled(hwnd, True)
                 try:
-                    main_win.destroy()  # type: ignore[attr-defined]
+                    _u32.ShowWindow(wintypes.HWND(hwnd), 0)  # SW_HIDE
                 except Exception:
                     pass
+            try:
+                main_win.destroy()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
         def start_native_drag(self, target: str) -> bool:
             """启动原生窗口拖拽（Windows 走 500Hz Win32 循环，macOS 走 Cocoa performWindowDragWithEvent_）。"""
@@ -771,17 +940,14 @@ def main() -> None:
                         last_cx, last_cy = cx, cy
                     time.sleep(0.002)
 
-                # 主窗口拖到当前显示器最顶端边缘松手时，触发平滑贴边最大化
+                # 主窗口拖到当前显示器最顶端边缘松手时，触发与按钮一致的丝滑 GPU FLIP 贴边最大化
                 if target == "main" and not windows.get("maximized") and windows.get("drag_token") == token:
                     end_cx, end_cy = _get_cursor_pos()
                     if abs(end_cx - start_cx) > 8 or abs(end_cy - start_cy) > 8:
                         work = _get_monitor_work_area(hwnd)
                         cur_now = _get_window_rect(hwnd)
                         if work and cur_now and end_cy <= work[1] + 4:
-                            windows["normal_rect"] = (rx, ry, rw, rh)
-                            windows["maximized"] = True
-                            dispatch_js_event("main", "zhiling:window-maximized", "true")
-                            _animate_window_rect(hwnd, cur_now, work, duration_s=0.165)
+                            dispatch_js_event("main", "zhiling:trigger-maximize", "true")
 
             threading.Thread(target=_drag_loop, name="zhiling-win32-drag", daemon=True).start()
             return True
@@ -888,17 +1054,46 @@ def main() -> None:
 
         def minimize_mini_overlay(self) -> None:
             mini_win = windows.get("mini")
-            if mini_win is not None:
-                windows["was_minimized_mini"] = True
+            if mini_win is None:
+                return
+            windows["was_minimized_mini"] = True
+            if sys.platform == "darwin":
+                from desktop_macos import minimize_macos_window
+                minimize_macos_window(mini_win)
+                return
+            hwnd = get_hwnd("mini")
+            if hwnd:
+                _set_dwm_transitions_disabled(hwnd, True)
+                _u32.ShowWindow(wintypes.HWND(hwnd), 7)  # SW_SHOWMINNOACTIVE
+            else:
                 mini_win.minimize()  # type: ignore[attr-defined]
 
         def close_mini_overlay(self) -> None:
             mini_win = windows.pop("mini", None)
-            if mini_win is not None:
+            if mini_win is None:
+                return
+            if sys.platform == "darwin":
+                from desktop_macos import close_macos_window
+
+                def _destroy_mini() -> None:
+                    try:
+                        mini_win.destroy()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                close_macos_window(mini_win, destroy_after=_destroy_mini, use_order_out=True)
+                return
+            hwnd = get_hwnd("mini")
+            if hwnd:
+                _set_dwm_transitions_disabled(hwnd, True)
                 try:
-                    mini_win.destroy()  # type: ignore[attr-defined]
+                    _u32.ShowWindow(wintypes.HWND(hwnd), 0)
                 except Exception:
                     pass
+            try:
+                mini_win.destroy()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
         def begin_window_op(self, target: str, mode: str) -> bool:
             if mode == "move":

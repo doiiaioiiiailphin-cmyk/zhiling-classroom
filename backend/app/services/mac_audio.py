@@ -173,7 +173,29 @@ class MacAudioBackend:
                         except ProcessLookupError:
                             pass
 
+            stderr_tail = bytearray()
+
+            async def drain_stderr():
+                """持续消费助手 stderr，彻底防止长时间录制时 CoreAudio/ScreenCaptureKit 诊断输出写满 64KB 管道死锁。"""
+                assert proc is not None and proc.stderr is not None
+                try:
+                    while True:
+                        chunk = await proc.stderr.read(2048)
+                        if not chunk:
+                            break
+                        stderr_tail.extend(chunk)
+                        if len(stderr_tail) > 4096:
+                            del stderr_tail[:-4096]
+                        line_preview = chunk.decode("utf-8", errors="replace").strip()
+                        if line_preview:
+                            logger.info("ZhilingAudioCapture stderr: %s", line_preview[:300])
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+
             watcher = asyncio.create_task(watch_disconnect())
+            stderr_drainer = asyncio.create_task(drain_stderr())
             buf = bytearray()
             try:
                 assert proc.stdout is not None
@@ -189,10 +211,8 @@ class MacAudioBackend:
 
                 if not stop_event.is_set():
                     rc = await proc.wait()
-                    err_text = ""
-                    if proc.stderr is not None:
-                        raw_err = await proc.stderr.read()
-                        err_text = raw_err.decode("utf-8", errors="replace").strip()
+                    await asyncio.gather(stderr_drainer, return_exceptions=True)
+                    err_text = stderr_tail.decode("utf-8", errors="replace").strip()
                     if rc != 0:
                         code = (
                             "MACOS_AUDIO_PERMISSION_REQUIRED"
@@ -213,7 +233,8 @@ class MacAudioBackend:
             finally:
                 stop_event.set()
                 watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
+                stderr_drainer.cancel()
+                await asyncio.gather(watcher, stderr_drainer, return_exceptions=True)
         finally:
             if proc is not None and proc.returncode is None:
                 try:

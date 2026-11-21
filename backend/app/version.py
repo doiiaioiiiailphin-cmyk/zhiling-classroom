@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import re
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 DEFAULT_CNB_REPO = "dolphin114/zhiling-classroom"
 CNB_WEB_BASE = "https://cnb.cool"
 CNB_API_BASE = "https://api.cnb.cool"

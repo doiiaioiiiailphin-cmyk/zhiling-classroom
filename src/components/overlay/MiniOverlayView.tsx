@@ -162,11 +162,15 @@ export const MiniOverlayView: React.FC = () => {
   const handleMinimize = async () => {
     const bridge = getDesktopBridge();
     if (bridge?.minimize_mini_overlay) {
+      if (isMacPlatform()) {
+        void bridge.minimize_mini_overlay();
+        return;
+      }
       setMotionState('minimizing');
       window.setTimeout(() => {
         setMotionState('minimized-hidden');
         void bridge.minimize_mini_overlay?.();
-      }, 155);
+      }, 200);
       return;
     }
     setMinimizedInBrowser((prev) => !prev);
@@ -175,10 +179,14 @@ export const MiniOverlayView: React.FC = () => {
   const handleClose = async () => {
     const bridge = getDesktopBridge();
     if (bridge?.close_mini_overlay) {
+      if (isMacPlatform()) {
+        void bridge.close_mini_overlay();
+        return;
+      }
       setMotionState('closing');
       window.setTimeout(() => {
         void bridge.close_mini_overlay?.();
-      }, 145);
+      }, 180);
       return;
     }
     window.close();
@@ -209,14 +217,14 @@ export const MiniOverlayView: React.FC = () => {
 
   const motionClass =
     motionState === 'minimized-hidden'
-      ? 'opacity-0 scale-[0.94] translate-y-3 transition-none'
+      ? 'opacity-0 scale-[0.92] translate-y-4 transition-none will-change-transform'
       : motionState === 'minimizing'
-        ? 'opacity-0 scale-[0.94] translate-y-3 transition-[transform,opacity] duration-150 ease-[cubic-bezier(0.4,0,1,1)]'
+        ? 'opacity-0 scale-[0.92] translate-y-4 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform'
         : motionState === 'closing'
-          ? 'opacity-0 scale-[0.94] translate-y-1 transition-[transform,opacity] duration-150 ease-[cubic-bezier(0.32,0,0.67,0)]'
+          ? 'opacity-0 scale-[0.94] translate-y-1.5 transition-[transform,opacity] duration-180 ease-[cubic-bezier(0.32,0,0.67,0)] will-change-transform'
           : motionState === 'entering'
             ? 'opacity-0 scale-[0.96] translate-y-1.5 transition-none'
-            : 'opacity-100 scale-100 translate-y-0 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]';
+            : 'opacity-100 scale-100 translate-y-0 transition-[transform,opacity] duration-220 ease-[cubic-bezier(0.16,1,0.3,1)]';
 
   return (
     <div

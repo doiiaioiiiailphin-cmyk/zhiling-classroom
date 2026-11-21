@@ -21,10 +21,51 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-# 强引用池：防止 Objective-C weak delegate / notification observer / active panel 被 Python GC 提前回收
+# 强引用池：防止 Objective-C weak delegate / notification observer / active panel / App Nap activity 被 Python GC 提前回收
 _RETAINED_OBJECTS: list[object] = []
 _ACTIVE_ALERT_PANEL: dict[str, object] = {}
+_ACTIVITY_TOKEN: object | None = None
 _MENU_INSTALLED = False
+
+
+def prevent_macos_app_nap() -> bool:
+    """禁用 macOS App Nap、自动终止与空闲系统休眠，防止后台持续录音 30-60 分钟时被系统冻结或静默关闭。"""
+    global _ACTIVITY_TOKEN
+    if _ACTIVITY_TOKEN is not None:
+        return True
+    try:
+        import Foundation  # type: ignore
+
+        proc_info = Foundation.NSProcessInfo.processInfo()
+        try:
+            proc_info.disableAutomaticTermination_("ZhilingClassroom active audio capture")
+        except Exception:
+            pass
+        try:
+            proc_info.disableSuddenTermination()
+        except Exception:
+            pass
+
+        # NSActivityIdleSystemSleepDisabled (1 << 20)
+        # | NSActivitySuddenTerminationDisabled (1 << 14)
+        # | NSActivityAutomaticTerminationDisabled (1 << 15)
+        # | NSActivityUserInitiated (0x00FFFFFF | 1 << 20)
+        options = (
+            getattr(Foundation, "NSActivityUserInitiated", 0x00FFFFFF)
+            | getattr(Foundation, "NSActivityIdleSystemSleepDisabled", 1 << 20)
+            | getattr(Foundation, "NSActivitySuddenTerminationDisabled", 1 << 14)
+            | getattr(Foundation, "NSActivityAutomaticTerminationDisabled", 1 << 15)
+        )
+        token = proc_info.beginActivityWithOptions_reason_(
+            options, "ZhilingClassroom live classroom recording and transcription"
+        )
+        _ACTIVITY_TOKEN = token
+        if token is not None:
+            _RETAINED_OBJECTS.append(token)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to acquire macOS App Nap prevention activity: %s", exc)
+        return False
 
 
 def resolve_macos_app_home() -> Path:
@@ -261,11 +302,104 @@ def _install_wkwebview_permission_grant(wk_view) -> bool:
         return False
 
 
+_NAV_DELEGATE_PROXY_CLS = None
+
+
+def _install_wkwebview_crash_recovery(wk_view) -> bool:
+    """挂载 WKNavigationDelegate 转发代理：当 macOS 内存压力回收 WebContent 渲染进程时自动重载页面而非白屏或退出。"""
+    global _NAV_DELEGATE_PROXY_CLS
+    try:
+        import Foundation  # type: ignore
+        import WebKit  # noqa: F401
+        import objc  # type: ignore
+
+        current = wk_view.navigationDelegate()
+        if current is not None and type(current).__name__ == "_ZhilingWKNavigationDelegateProxy":
+            return True
+
+        if _NAV_DELEGATE_PROXY_CLS is None:
+            try:
+                protocols = [objc.protocolNamed("WKNavigationDelegate")]
+            except Exception:
+                protocols = []
+
+            class _ZhilingWKNavigationDelegateProxy(Foundation.NSObject, protocols=protocols):  # type: ignore[misc]
+                def initWithTarget_(self, target):
+                    self = objc.super(_ZhilingWKNavigationDelegateProxy, self).init()
+                    if self is None:
+                        return None
+                    self._target = target
+                    return self
+
+                def webViewWebContentProcessDidTerminate_(self, webView):
+                    logger.warning("macOS WKWebView WebContent process terminated under memory pressure; reloading")
+                    try:
+                        webView.reload()
+                    except Exception as exc:
+                        logger.warning("WKWebView reload after termination failed: %s", exc)
+
+                def respondsToSelector_(self, sel):
+                    if sel in (
+                        b"webViewWebContentProcessDidTerminate:",
+                        "webViewWebContentProcessDidTerminate:",
+                    ):
+                        return True
+                    if objc.super(_ZhilingWKNavigationDelegateProxy, self).respondsToSelector_(sel):
+                        return True
+                    target = getattr(self, "_target", None)
+                    if target is not None and target.respondsToSelector_(sel):
+                        return True
+                    return False
+
+                def forwardingTargetForSelector_(self, sel):
+                    target = getattr(self, "_target", None)
+                    if target is not None and target.respondsToSelector_(sel):
+                        return target
+                    return None
+
+            _NAV_DELEGATE_PROXY_CLS = _ZhilingWKNavigationDelegateProxy
+
+        proxy = _NAV_DELEGATE_PROXY_CLS.alloc().initWithTarget_(current)
+        if proxy is None:
+            return False
+        wk_view.setNavigationDelegate_(proxy)
+        _RETAINED_OBJECTS.append(proxy)
+        if current is not None:
+            _RETAINED_OBJECTS.append(current)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to install WKNavigationDelegate crash recovery proxy: %s", exc)
+        return False
+
+
+def _hide_standard_window_buttons(ns_win) -> None:
+    """隐藏 AppKit 原生红黄绿三点（退出原生全屏时系统会自动恢复显示，需同步再次隐藏）。"""
+    try:
+        import AppKit  # type: ignore
+
+        for btn_id in (
+            AppKit.NSWindowCloseButton,
+            AppKit.NSWindowMiniaturizeButton,
+            AppKit.NSWindowZoomButton,
+        ):
+            btn = ns_win.standardWindowButton_(btn_id)
+            if btn is not None:
+                btn.setHidden_(True)
+    except Exception:
+        pass
+
+
 _RESTORE_OBSERVER_CLS = None
 
 
-def _install_window_restore_observer(ns_win, on_restored: Callable[[], None]) -> bool:
-    """监听 Dock 还原与激活事件，及时恢复被前端动画隐藏的主窗口 / 小窗内容。"""
+def _install_window_lifecycle_observer(
+    ns_win,
+    *,
+    is_main: bool = True,
+    on_restored: Callable[[], None] | None = None,
+    on_fullscreen_change: Callable[[bool], None] | None = None,
+) -> bool:
+    """监听 Dock 还原与原生全屏切换事件，保证原生 macOS 动效与前端状态完全同步。"""
     global _RESTORE_OBSERVER_CLS
     try:
         import AppKit  # type: ignore
@@ -274,38 +408,71 @@ def _install_window_restore_observer(ns_win, on_restored: Callable[[], None]) ->
 
         if _RESTORE_OBSERVER_CLS is None:
             class _ZhilingWindowObserver(Foundation.NSObject):
-                def initWithCallback_(self, cb):
+                def initWithCallbacks_(self, callbacks):
                     self = objc.super(_ZhilingWindowObserver, self).init()
                     if self is None:
                         return None
-                    self._cb = cb
+                    self._callbacks = callbacks
                     return self
 
-                def handleRestored_(self, _notif):
-                    cb = getattr(self, "_cb", None)
+                def handleRestored_(self, notif):
+                    if self._callbacks.get("hide_std_buttons"):
+                        try:
+                            _hide_standard_window_buttons(notif.object())
+                        except Exception:
+                            pass
+                    cb = self._callbacks.get("restored")
                     if cb is not None:
                         threading.Thread(target=cb, daemon=True).start()
 
+                def handleEnterFullScreen_(self, notif):
+                    if self._callbacks.get("hide_std_buttons"):
+                        try:
+                            _hide_standard_window_buttons(notif.object())
+                        except Exception:
+                            pass
+                    cb = self._callbacks.get("fullscreen")
+                    if cb is not None:
+                        threading.Thread(target=cb, args=(True,), daemon=True).start()
+
+                def handleExitFullScreen_(self, notif):
+                    if self._callbacks.get("hide_std_buttons"):
+                        try:
+                            _hide_standard_window_buttons(notif.object())
+                        except Exception:
+                            pass
+                    cb = self._callbacks.get("fullscreen")
+                    if cb is not None:
+                        threading.Thread(target=cb, args=(False,), daemon=True).start()
+
             _RESTORE_OBSERVER_CLS = _ZhilingWindowObserver
 
-        observer = _RESTORE_OBSERVER_CLS.alloc().initWithCallback_(on_restored)
+        observer = _RESTORE_OBSERVER_CLS.alloc().initWithCallbacks_(
+            {
+                "restored": on_restored,
+                "fullscreen": on_fullscreen_change,
+                "hide_std_buttons": is_main,
+            }
+        )
         center = Foundation.NSNotificationCenter.defaultCenter()
-        center.addObserver_selector_name_object_(
-            observer,
-            "handleRestored:",
-            AppKit.NSWindowDidDeminiaturizeNotification,
-            ns_win,
-        )
-        center.addObserver_selector_name_object_(
-            observer,
-            "handleRestored:",
-            AppKit.NSWindowDidBecomeKeyNotification,
-            ns_win,
-        )
+        if on_restored is not None:
+            center.addObserver_selector_name_object_(
+                observer, "handleRestored:", AppKit.NSWindowDidDeminiaturizeNotification, ns_win
+            )
+            center.addObserver_selector_name_object_(
+                observer, "handleRestored:", AppKit.NSWindowDidBecomeKeyNotification, ns_win
+            )
+        if on_fullscreen_change is not None:
+            center.addObserver_selector_name_object_(
+                observer, "handleEnterFullScreen:", AppKit.NSWindowWillEnterFullScreenNotification, ns_win
+            )
+            center.addObserver_selector_name_object_(
+                observer, "handleExitFullScreen:", AppKit.NSWindowDidExitFullScreenNotification, ns_win
+            )
         _RETAINED_OBJECTS.append(observer)
         return True
     except Exception as exc:
-        logger.warning("Failed to install macOS window restore observer: %s", exc)
+        logger.warning("Failed to install macOS window lifecycle observer: %s", exc)
         return False
 
 
@@ -315,8 +482,9 @@ def configure_macos_window(
     is_main: bool,
     is_self_test: bool = False,
     on_restored: Callable[[], None] | None = None,
+    on_fullscreen_change: Callable[[bool], None] | None = None,
 ) -> dict[str, object]:
-    """在 Cocoa 主线程配置无边框真透明窗口、全屏悬浮层级、WKWebView 透明底色与媒体权限免重复弹窗。"""
+    """在 Cocoa 主线程配置原生透明圆角全内容窗口、原生 Dock/全屏/关闭动效、防 App Nap 与媒体权限免重复弹窗。"""
     diag: dict[str, object] = {"configured": False, "alphaComposited": False}
     ns_win = _get_ns_window(win_obj)
     if ns_win is None:
@@ -327,24 +495,56 @@ def configure_macos_window(
 
         if is_main:
             diag["menuInstalled"] = ensure_macos_main_menu()
+            diag["appNapDisabled"] = prevent_macos_app_nap()
 
-        ns_win.setOpaque_(False)
-        ns_win.setBackgroundColor_(AppKit.NSColor.clearColor())
-        ns_win.setHasShadow_(is_main)
-        ns_win.setMovableByWindowBackground_(False)
-        if not is_main:
+            # 采用标准无边框全内容窗口样式掩码（与 VS Code / Electron / 飞书 macOS 一致），
+            # 使原生 Dock 神奇/缩放最小化、原生全屏 Space 过渡、以及原生窗口关闭动效全部 100% 生效
+            style = (
+                AppKit.NSWindowStyleMaskTitled
+                | AppKit.NSWindowStyleMaskClosable
+                | AppKit.NSWindowStyleMaskMiniaturizable
+                | AppKit.NSWindowStyleMaskResizable
+                | AppKit.NSWindowStyleMaskFullSizeContentView
+            )
+            ns_win.setStyleMask_(style)
+            ns_win.setTitlebarAppearsTransparent_(True)
+            ns_win.setTitleVisibility_(AppKit.NSWindowTitleHidden)
+            if hasattr(ns_win, "setTitlebarSeparatorStyle_"):
+                try:
+                    ns_win.setTitlebarSeparatorStyle_(0)  # NSTitlebarSeparatorStyleNone
+                except Exception:
+                    pass
+            _hide_standard_window_buttons(ns_win)
+            ns_win.setAnimationBehavior_(AppKit.NSWindowAnimationBehaviorDocumentWindow)
+            ns_win.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorFullScreenPrimary)
+        else:
+            # 悬浮字幕小窗同样支持原生最小化与渐隐关闭动画
+            mini_style = (
+                AppKit.NSWindowStyleMaskBorderless
+                | AppKit.NSWindowStyleMaskMiniaturizable
+                | AppKit.NSWindowStyleMaskResizable
+            )
+            try:
+                ns_win.setStyleMask_(mini_style)
+            except Exception:
+                pass
+            ns_win.setAnimationBehavior_(AppKit.NSWindowAnimationBehaviorUtilityWindow)
             ns_win.setLevel_(AppKit.NSFloatingWindowLevel)
             behavior = (
                 AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
                 | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
             )
             ns_win.setCollectionBehavior_(behavior)
-        else:
-            ns_win.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorFullScreenPrimary)
+
+        ns_win.setOpaque_(False)
+        ns_win.setBackgroundColor_(AppKit.NSColor.clearColor())
+        ns_win.setHasShadow_(is_main)
+        ns_win.setMovableByWindowBackground_(False)
 
         wk_views = _find_wkwebviews(ns_win)
         wk_transparent = False
         wk_perm_ok = False
+        wk_recovery_ok = False
         for wv in wk_views:
             try:
                 wv.setValue_forKey_(False, "drawsBackground")
@@ -353,13 +553,21 @@ def configure_macos_window(
                 pass
             if _install_wkwebview_permission_grant(wv):
                 wk_perm_ok = True
+            if _install_wkwebview_crash_recovery(wv):
+                wk_recovery_ok = True
 
-        if on_restored is not None:
-            diag["restoreObserver"] = _install_window_restore_observer(ns_win, on_restored)
+        if on_restored is not None or on_fullscreen_change is not None:
+            diag["restoreObserver"] = _install_window_lifecycle_observer(
+                ns_win,
+                is_main=is_main,
+                on_restored=on_restored,
+                on_fullscreen_change=on_fullscreen_change,
+            )
 
         diag["alphaComposited"] = True
         diag["wkTransparent"] = wk_transparent
         diag["wkMediaPermissionGranted"] = wk_perm_ok
+        diag["wkCrashRecoveryInstalled"] = wk_recovery_ok
         diag["configured"] = True
 
         if not is_self_test:
@@ -392,8 +600,69 @@ def focus_macos_window(win_obj) -> None:
         pass
 
 
-def toggle_macos_zoom(win_obj, windows_state: dict[str, object]) -> bool:
-    """在当前屏幕 NSScreen.visibleFrame()（避开菜单栏和 Dock）与原圆角尺寸间平滑切换。"""
+def minimize_macos_window(win_obj) -> bool:
+    """触发 macOS 原生 Dock 神奇效果 / 缩放最小化动画。"""
+    ns_win = _get_ns_window(win_obj)
+    if ns_win is None:
+        return False
+
+    def _minimize() -> bool:
+        import AppKit  # type: ignore
+
+        # 若当前处于全屏 Space，先退出全屏再最小化，避免 AppKit 忽略 miniaturize_
+        if bool(ns_win.styleMask() & AppKit.NSWindowStyleMaskFullScreen):
+            ns_win.toggleFullScreen_(None)
+            return True
+        ns_win.miniaturize_(None)
+        return True
+
+    try:
+        return bool(_run_on_main_thread(_minimize, wait=False) or True)
+    except Exception:
+        return False
+
+
+def close_macos_window(
+    win_obj,
+    *,
+    destroy_after: Callable[[], None] | None = None,
+    use_order_out: bool = False,
+) -> bool:
+    """使用 macOS 原生 WindowServer 关闭动画平滑收起窗口，再安全释放底层对象。"""
+    ns_win = _get_ns_window(win_obj)
+    if ns_win is None:
+        if destroy_after is not None:
+            destroy_after()
+        return False
+
+    def _close() -> None:
+        try:
+            if use_order_out:
+                ns_win.orderOut_(None)
+            else:
+                ns_win.close()
+        except Exception:
+            try:
+                ns_win.orderOut_(None)
+            except Exception:
+                pass
+
+    try:
+        _run_on_main_thread(_close, wait=False)
+    except Exception:
+        pass
+
+    if destroy_after is not None:
+        def _delayed() -> None:
+            time.sleep(0.24)
+            destroy_after()
+
+        threading.Thread(target=_delayed, name="zhiling-macos-close", daemon=True).start()
+    return True
+
+
+def toggle_macos_fullscreen(win_obj, windows_state: dict[str, object]) -> bool:
+    """触发 macOS 原生全屏 Space 丝滑切换动画（点击绿色交通灯）。"""
     ns_win = _get_ns_window(win_obj)
     if ns_win is None:
         return False
@@ -401,15 +670,41 @@ def toggle_macos_zoom(win_obj, windows_state: dict[str, object]) -> bool:
     def _toggle() -> bool:
         import AppKit  # type: ignore
 
+        is_fs = bool(ns_win.styleMask() & AppKit.NSWindowStyleMaskFullScreen)
+        ns_win.toggleFullScreen_(None)
+        next_state = not is_fs
+        windows_state["maximized"] = next_state
+        return next_state
+
+    try:
+        return bool(_run_on_main_thread(_toggle, wait=True))
+    except Exception:
+        return bool(windows_state.get("maximized"))
+
+
+def toggle_macos_zoom(win_obj, windows_state: dict[str, object]) -> bool:
+    """双击顶栏时在当前屏幕 NSScreen.visibleFrame() 与原尺寸间用 NSAnimationContext 丝滑缩放。"""
+    ns_win = _get_ns_window(win_obj)
+    if ns_win is None:
+        return False
+
+    def _toggle() -> bool:
+        import AppKit  # type: ignore
+
+        if bool(ns_win.styleMask() & AppKit.NSWindowStyleMaskFullScreen):
+            ns_win.toggleFullScreen_(None)
+            windows_state["maximized"] = False
+            return False
+
         if windows_state.get("maximized"):
             prev = windows_state.get("normal_rect")
             windows_state["maximized"] = False
             if isinstance(prev, tuple) and len(prev) == 4:
                 x, y, w, h = prev
-                frame = AppKit.NSMakeRect(float(x), float(y), float(w), float(h))
-                ns_win.setFrame_display_animate_(frame, True, True)
+                target_frame = AppKit.NSMakeRect(float(x), float(y), float(w), float(h))
             else:
                 ns_win.zoom_(None)
+                return False
         else:
             cur = ns_win.frame()
             windows_state["normal_rect"] = (
@@ -421,10 +716,20 @@ def toggle_macos_zoom(win_obj, windows_state: dict[str, object]) -> bool:
             screen = ns_win.screen() or AppKit.NSScreen.mainScreen()
             windows_state["maximized"] = True
             if screen is not None:
-                visible = screen.visibleFrame()
-                ns_win.setFrame_display_animate_(visible, True, True)
+                target_frame = screen.visibleFrame()
             else:
                 ns_win.zoom_(None)
+                return True
+
+        try:
+            AppKit.NSAnimationContext.beginGrouping()
+            ctx = AppKit.NSAnimationContext.currentContext()
+            ctx.setDuration_(0.22)
+            ctx.setAllowsImplicitAnimation_(True)
+            ns_win.animator().setFrame_display_(target_frame, True)
+            AppKit.NSAnimationContext.endGrouping()
+        except Exception:
+            ns_win.setFrame_display_animate_(target_frame, True, True)
         return bool(windows_state["maximized"])
 
     try:

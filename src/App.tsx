@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Aec3DownloadModal } from './components/classroom/Aec3DownloadModal';
 import { ClassroomView } from './components/classroom/ClassroomView';
@@ -76,6 +76,10 @@ export const App: React.FC = () => {
   const checkForAppUpdates = useAppStore((s) => s.checkForAppUpdates);
 
   const [inDesktopShell, setInDesktopShell] = useState<boolean>(() => isDesktopShell());
+  const [isFlipping, setIsFlipping] = useState(false);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const flipBusyRef = useRef(false);
+  const flipTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (IS_MINI_OVERLAY_MODE) return;
@@ -192,14 +196,58 @@ export const App: React.FC = () => {
     };
 
     const bc = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(OVERLAY_CHANNEL_NAME) : null;
-    const publishSnapshot = () => {
-      const snap = buildOverlaySnapshot();
-      bc?.postMessage({ type: 'snapshot', snapshot: snap });
-      classroomSocket.sendOverlaySnapshot(snap);
+    let lastSnapSig = '';
+    let lastSnapSentAt = 0;
+    let snapTimer: number | null = null;
+
+    const getSnapshotSig = () => {
+      const s = useAppStore.getState();
+      const segCount = s.segments.length;
+      const lastSeg = segCount > 0 ? s.segments[segCount - 1] : null;
+      const lastUtt = lastSeg && lastSeg.utterances.length > 0
+        ? lastSeg.utterances[lastSeg.utterances.length - 1]
+        : null;
+      return [
+        s.activeSession?.id ?? '',
+        s.activeSession?.status ?? '',
+        s.activeSession?.durationSeconds ?? 0,
+        s.settings?.micEnabled ?? true,
+        segCount,
+        lastUtt?.id ?? '',
+        lastUtt?.refinedText?.length ?? 0,
+        s.livePartialUtterance?.text ?? '',
+      ].join('|');
+    };
+
+    const publishSnapshot = (force = false) => {
+      const sig = getSnapshotSig();
+      if (!force && sig === lastSnapSig) return;
+      const now = Date.now();
+      const emit = () => {
+        snapTimer = null;
+        lastSnapSig = getSnapshotSig();
+        lastSnapSentAt = Date.now();
+        const snap = buildOverlaySnapshot();
+        bc?.postMessage({ type: 'snapshot', snapshot: snap });
+        classroomSocket.sendOverlaySnapshot(snap);
+      };
+      if (force || now - lastSnapSentAt >= 380) {
+        if (snapTimer !== null) {
+          window.clearTimeout(snapTimer);
+          snapTimer = null;
+        }
+        emit();
+      } else if (snapTimer === null) {
+        snapTimer = window.setTimeout(emit, 380 - (now - lastSnapSentAt));
+      }
     };
 
     if (bc) {
       bc.onmessage = (evt: MessageEvent<OverlayRemoteCommand>) => {
+        if (evt.data?.type === 'request-snapshot') {
+          publishSnapshot(true);
+          return;
+        }
         handleRemoteOverlayCommand(evt.data);
       };
     }
@@ -229,7 +277,12 @@ export const App: React.FC = () => {
       },
       {
         onOverlayCommand: (rawCmd) => {
-          handleRemoteOverlayCommand(rawCmd as OverlayRemoteCommand);
+          const cmd = rawCmd as OverlayRemoteCommand;
+          if (cmd?.type === 'request-snapshot') {
+            publishSnapshot(true);
+            return;
+          }
+          handleRemoteOverlayCommand(cmd);
         },
       }
     );
@@ -243,11 +296,15 @@ export const App: React.FC = () => {
     window.addEventListener('zhiling:alert-resume-recording', handleAlertResume);
 
     const unsubStore = useAppStore.subscribe(() => {
-      publishSnapshot();
+      publishSnapshot(false);
     });
-    publishSnapshot();
+    publishSnapshot(true);
 
     return () => {
+      if (snapTimer !== null) {
+        window.clearTimeout(snapTimer);
+        snapTimer = null;
+      }
       window.removeEventListener('zhiling:alert-resume-recording', handleAlertResume);
       unsubStore();
       bc?.close();
@@ -270,6 +327,178 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const runSmoothMaximizeOrZoom = useCallback(
+    async (mode: 'fullscreen' | 'zoom') => {
+      if (flipBusyRef.current) return;
+      const bridge = getDesktopBridge();
+      if (!bridge) {
+        setWindowMaximized(!useAppStore.getState().windowMaximized);
+        return;
+      }
+
+      const caller =
+        mode === 'zoom' && bridge.zoom_window
+          ? bridge.zoom_window
+          : bridge.prepare_maximize_transition;
+
+      if (!caller) {
+        if (bridge.toggle_maximize_window) {
+          const nextMax = await bridge.toggle_maximize_window();
+          setWindowMaximized(Boolean(nextMax));
+        }
+        return;
+      }
+
+      flipBusyRef.current = true;
+      if (flipTimerRef.current !== null) {
+        window.clearTimeout(flipTimerRef.current);
+        flipTimerRef.current = null;
+      }
+
+      try {
+        const plan = await caller();
+        if (!plan || plan.nativeHandled) {
+          setWindowMaximized(Boolean(plan?.maximized));
+          flipBusyRef.current = false;
+          return;
+        }
+
+        const dxPct = plan.dxPct ?? 0;
+        const dyPct = plan.dyPct ?? 0;
+        const sx = plan.scaleX ?? 0.88;
+        const sy = plan.scaleY ?? 0.88;
+        const el = shellRef.current;
+
+        const clearInlineFlip = (node: HTMLDivElement | null) => {
+          if (!node) return;
+          node.style.transition = 'none';
+          node.style.transformOrigin = '';
+          node.style.transform = '';
+          node.style.borderRadius = '';
+          node.style.willChange = '';
+          void node.offsetWidth;
+          node.style.transition = '';
+        };
+
+        if (!el) {
+          if (plan.maximized) {
+            await bridge.commit_maximize_rect?.();
+            setWindowMaximized(true);
+          } else {
+            await bridge.commit_restore_rect?.();
+            setWindowMaximized(false);
+          }
+          flipBusyRef.current = false;
+          return;
+        }
+
+        setIsFlipping(true);
+
+        if (plan.maximized) {
+          // 1. 先挂同步 resize 钩子再扩容透明宿主：Chromium 在新尺寸绘制首帧前触发 resize，
+          //    同帧直接把反向 FLIP 矩阵写进 DOM，像素级锁死旧浮动位置（零闪烁、零左上角飞跃！）
+          let started = false;
+          let fallbackTimer: number | null = null;
+          const startExpand = () => {
+            if (started) return;
+            started = true;
+            window.removeEventListener('resize', startExpand);
+            if (fallbackTimer !== null) {
+              window.clearTimeout(fallbackTimer);
+              fallbackTimer = null;
+            }
+            el.style.transition = 'none';
+            el.style.transformOrigin = '0 0';
+            el.style.transform = `translate3d(${dxPct}%, ${dyPct}%, 0) scale(${sx}, ${sy})`;
+            el.style.borderRadius = '16px';
+            el.style.willChange = 'transform, border-radius';
+            void el.offsetWidth;
+            setWindowMaximized(true);
+
+            window.requestAnimationFrame(() => {
+              el.style.transition =
+                'transform 250ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 250ms cubic-bezier(0.22, 1, 0.36, 1)';
+              el.style.transform = 'translate3d(0, 0, 0) scale(1, 1)';
+              el.style.borderRadius = '0px';
+              flipTimerRef.current = window.setTimeout(() => {
+                clearInlineFlip(el);
+                setIsFlipping(false);
+                flipBusyRef.current = false;
+              }, 265);
+            });
+          };
+
+          window.addEventListener('resize', startExpand, { once: true });
+          fallbackTimer = window.setTimeout(startExpand, 80);
+          void bridge.commit_maximize_rect?.();
+        } else {
+          // 还原：透明全屏画布内 GPU 丝滑缩回原浮动圆角坐标，随后挂同步 resize 钩子再原子收回 HWND（零末帧回弹闪烁！）
+          el.style.transition = 'none';
+          el.style.transformOrigin = '0 0';
+          el.style.transform = 'translate3d(0, 0, 0) scale(1, 1)';
+          el.style.borderRadius = '0px';
+          el.style.willChange = 'transform, border-radius';
+          void el.offsetWidth;
+
+          window.requestAnimationFrame(() => {
+            el.style.transition =
+              'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 220ms cubic-bezier(0.22, 1, 0.36, 1)';
+            el.style.transform = `translate3d(${dxPct}%, ${dyPct}%, 0) scale(${sx}, ${sy})`;
+            el.style.borderRadius = '16px';
+
+            flipTimerRef.current = window.setTimeout(() => {
+              let finalized = false;
+              let fallbackTimer: number | null = null;
+              const finalizeRestore = () => {
+                if (finalized) return;
+                finalized = true;
+                window.removeEventListener('resize', finalizeRestore);
+                if (fallbackTimer !== null) {
+                  window.clearTimeout(fallbackTimer);
+                  fallbackTimer = null;
+                }
+                clearInlineFlip(el);
+                setWindowMaximized(false);
+                setIsFlipping(false);
+                flipBusyRef.current = false;
+              };
+              window.addEventListener('resize', finalizeRestore, { once: true });
+              fallbackTimer = window.setTimeout(finalizeRestore, 80);
+              void bridge.commit_restore_rect?.();
+            }, 225);
+          });
+        }
+      } catch {
+        if (shellRef.current) {
+          shellRef.current.style.transition = '';
+          shellRef.current.style.transform = '';
+          shellRef.current.style.borderRadius = '';
+          shellRef.current.style.transformOrigin = '';
+          shellRef.current.style.willChange = '';
+        }
+        setIsFlipping(false);
+        flipBusyRef.current = false;
+      }
+    },
+    [setWindowMaximized]
+  );
+
+  useEffect(() => {
+    if (IS_MINI_OVERLAY_MODE) return;
+    const onTriggerMax = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ mode?: 'fullscreen' | 'zoom' } | boolean>).detail;
+      const mode = typeof detail === 'object' && detail?.mode === 'zoom' ? 'zoom' : 'fullscreen';
+      void runSmoothMaximizeOrZoom(mode);
+    };
+    window.addEventListener('zhiling:trigger-maximize', onTriggerMax);
+    return () => {
+      window.removeEventListener('zhiling:trigger-maximize', onTriggerMax);
+      if (flipTimerRef.current !== null) {
+        window.clearTimeout(flipTimerRef.current);
+      }
+    };
+  }, [runSmoothMaximizeOrZoom]);
+
   const handleShellDoubleClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target;
@@ -278,15 +507,12 @@ export const App: React.FC = () => {
       if (isInteractiveDragBlocker(target)) return;
 
       const bridge = getDesktopBridge();
-      if (bridge?.toggle_maximize_window) {
+      if (bridge?.zoom_window || bridge?.prepare_maximize_transition || bridge?.toggle_maximize_window) {
         e.preventDefault();
-        setWindowMaximized(!windowMaximized);
-        void bridge.toggle_maximize_window().then((nextMax) => {
-          setWindowMaximized(Boolean(nextMax));
-        });
+        void runSmoothMaximizeOrZoom('zoom');
       }
     },
-    [windowMaximized, setWindowMaximized]
+    [runSmoothMaximizeOrZoom]
   );
 
   if (IS_MINI_OVERLAY_MODE) {
@@ -295,20 +521,20 @@ export const App: React.FC = () => {
 
   const motionTransformClass =
     windowMotion === 'minimized-hidden'
-      ? 'opacity-0 scale-[0.95] translate-y-4 pointer-events-none transition-none'
+      ? 'opacity-0 scale-[0.92] translate-y-5 pointer-events-none transition-none will-change-transform'
       : windowMotion === 'minimizing'
-        ? 'opacity-0 scale-[0.95] translate-y-4 pointer-events-none transition-[border-radius,transform,opacity] duration-155 ease-[cubic-bezier(0.4,0,1,1)]'
+        ? 'opacity-0 scale-[0.92] translate-y-5 pointer-events-none transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform'
         : windowMotion === 'closing'
-          ? 'opacity-0 scale-[0.95] translate-y-1.5 pointer-events-none transition-[border-radius,transform,opacity] duration-150 ease-[cubic-bezier(0.32,0,0.67,0)]'
+          ? 'opacity-0 scale-[0.94] translate-y-1.5 pointer-events-none transition-[transform,opacity] duration-180 ease-[cubic-bezier(0.32,0,0.67,0)] will-change-transform'
           : windowMotion === 'entering'
             ? 'opacity-0 scale-[0.97] translate-y-2 transition-none'
-            : 'opacity-100 scale-100 translate-y-0 transition-[border-radius,transform,opacity] duration-210 ease-[cubic-bezier(0.16,1,0.3,1)]';
+            : 'opacity-100 scale-100 translate-y-0 transition-[transform,opacity] duration-220 ease-[cubic-bezier(0.16,1,0.3,1)]';
 
   return (
     <div
       onMouseDown={handleShellMouseDown}
       onDoubleClick={handleShellDoubleClick}
-      className={`h-screen w-screen overflow-hidden transition-[padding] duration-220 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+      className={`h-screen w-screen overflow-hidden ${
         windowMaximized
           ? 'p-0 bg-transparent'
           : inDesktopShell
@@ -321,7 +547,10 @@ export const App: React.FC = () => {
       )}
 
       <div
-        className={`h-full w-full overflow-hidden flex flex-col bg-[#F5F6F7] origin-center ${motionTransformClass} ${
+        ref={shellRef}
+        className={`h-full w-full overflow-hidden flex flex-col bg-[#F5F6F7] origin-center ${
+          isFlipping ? '' : motionTransformClass
+        } ${
           windowMaximized
             ? 'rounded-none border-0'
             : inDesktopShell

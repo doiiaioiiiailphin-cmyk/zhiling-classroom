@@ -275,9 +275,76 @@ class MacOSPortTests(unittest.TestCase):
             await adapter.finish()
             items = [item async for item in adapter.results()]
             self.assertTrue(any(item.final and item.text.startswith("decoded-") for item in items))
+            self.assertEqual(adapter._final_jobs.maxlen, 24)
             await adapter.close()
 
         asyncio.run(scenario())
+
+    def test_pcm16le_to_floats_precision_and_zero_list_bloat(self):
+        from backend.app.services.builtin_asr import pcm16le_to_floats
+
+        raw = struct.pack("<4h", -32768, -16384, 0, 32767)
+        samples = pcm16le_to_floats(raw)
+        self.assertEqual(len(samples), 4)
+        self.assertAlmostEqual(float(samples[0]), -1.0, places=4)
+        self.assertAlmostEqual(float(samples[1]), -0.5, places=4)
+        self.assertAlmostEqual(float(samples[2]), 0.0, places=5)
+        self.assertAlmostEqual(float(samples[3]), 32767 / 32768.0, places=4)
+
+    def test_mac_audio_stderr_drain_prevents_pipe_deadlock(self):
+        import sys
+
+        script = (
+            "import sys\n"
+            "sys.stderr.buffer.write(b'WARN_LINE\\n' * 12000)\n"
+            "sys.stderr.buffer.flush()\n"
+            "sys.stdout.buffer.write(b'\\x01\\x00' * 1600)\n"
+            "sys.stdout.buffer.flush()\n"
+        )
+
+        class FakeLoopbackWS:
+            def __init__(self):
+                self.frames: list[bytes] = []
+                self.json_msgs: list[dict] = []
+                self.closed = False
+                self._done = asyncio.Event()
+
+            async def accept(self):
+                pass
+
+            async def send_bytes(self, data: bytes):
+                self.frames.append(data)
+
+            async def send_json(self, payload: dict):
+                self.json_msgs.append(payload)
+
+            async def receive(self) -> dict:
+                await self._done.wait()
+                return {"type": "websocket.disconnect"}
+
+            async def close(self, code: int = 1000):
+                self.closed = True
+                self._done.set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_helper = Path(tmp) / "fake_helper.py"
+            fake_helper.write_text(script, encoding="utf-8")
+
+            async def scenario():
+                backend = MacAudioBackend(helper_path=fake_helper)
+                orig_exec = asyncio.create_subprocess_exec
+
+                async def _wrapped_exec(exe, *args, **kwargs):
+                    return await orig_exec(sys.executable, str(fake_helper), **kwargs)
+
+                ws = FakeLoopbackWS()
+                with patch("backend.app.services.mac_audio.asyncio.create_subprocess_exec", side_effect=_wrapped_exec):
+                    await backend.serve_loopback(ws, "default")
+                self.assertEqual(sum(len(f) for f in ws.frames), 3200)
+                self.assertEqual(ws.json_msgs, [])
+                self.assertTrue(ws.closed)
+
+            asyncio.run(asyncio.wait_for(scenario(), timeout=8.0))
 
 
 if __name__ == "__main__":

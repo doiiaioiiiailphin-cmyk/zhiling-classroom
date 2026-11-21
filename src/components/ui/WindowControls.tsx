@@ -42,14 +42,21 @@ export const WindowControls: React.FC = React.memo(() => {
     const api = getDesktopBridge();
     if (api?.minimize_window) {
       busyRef.current = true;
+      if (isMac) {
+        // macOS 直接触发原生 Dock 神奇/缩放最小化动效，不做假 CSS 缩小遮挡
+        void api.minimize_window().finally(() => {
+          busyRef.current = false;
+        });
+        return;
+      }
+      // Windows 播放唯一一段 200ms GPU 缩小渐隐，完全透明后静默入任务栏（后端已抑制二次 DWM 跳变）
       setWindowMotion('minimizing');
       window.setTimeout(() => {
-        // 先切换为无过渡隐藏态再执行原生最小化，杜绝窗口尚未隐藏完成时反向回弹造成的抽搐
         setWindowMotion('minimized-hidden');
         void api.minimize_window?.().finally(() => {
           busyRef.current = false;
         });
-      }, 165);
+      }, 205);
       return;
     }
     showNotice(
@@ -61,16 +68,10 @@ export const WindowControls: React.FC = React.memo(() => {
   const handleToggleMaximize = async () => {
     if (busyRef.current) return;
     const api = getDesktopBridge();
-    if (api?.toggle_maximize_window) {
-      busyRef.current = true;
-      const optimisticNext = !windowMaximized;
-      setWindowMaximized(optimisticNext);
-      try {
-        const nextMax = await api.toggle_maximize_window();
-        setWindowMaximized(Boolean(nextMax));
-      } finally {
-        busyRef.current = false;
-      }
+    if (api?.prepare_maximize_transition || api?.toggle_maximize_window) {
+      window.dispatchEvent(
+        new CustomEvent('zhiling:trigger-maximize', { detail: { mode: 'fullscreen' } })
+      );
       return;
     }
     setWindowMaximized(!windowMaximized);
@@ -84,10 +85,15 @@ export const WindowControls: React.FC = React.memo(() => {
     }
     const api = getDesktopBridge();
     if (api?.close_window) {
+      if (isMac) {
+        // macOS 走原生 WindowServer 窗口关闭渐隐动效
+        void api.close_window();
+        return;
+      }
       setWindowMotion('closing');
       window.setTimeout(() => {
         void api.close_window?.();
-      }, 150);
+      }, 185);
       return;
     }
     busyRef.current = false;
@@ -159,10 +165,10 @@ export const WindowControls: React.FC = React.memo(() => {
           </button>
         </Tooltip>
 
-        <Tooltip content={windowMaximized ? '还原窗口尺寸' : '缩放铺满工作区'} placement="bottom">
+        <Tooltip content={windowMaximized ? '退出全屏' : '进入全屏'} placement="bottom">
           <button
             type="button"
-            aria-label={windowMaximized ? '还原窗口' : '缩放窗口'}
+            aria-label={windowMaximized ? '退出全屏' : '进入全屏'}
             onClick={() => void handleToggleMaximize()}
             className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-all duration-150 cursor-pointer active:scale-90 border ${
               activeColors

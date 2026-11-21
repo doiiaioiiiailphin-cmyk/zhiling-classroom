@@ -40,7 +40,7 @@ class BuiltinFreeAsrAdapter(ASRStreamAdapter):
         self.options = options
         self._runtime = runtime
         self._queue: asyncio.Queue[Transcript | BaseException | None] = asyncio.Queue()
-        self._final_jobs: deque[tuple[bytes, int, int]] = deque()
+        self._final_jobs: deque[tuple[bytes, int, int]] = deque(maxlen=24)
         self._pending_partial: tuple[bytes, int, int] | None = None
         self._work_event = asyncio.Event()
         self._worker_task: asyncio.Task | None = None

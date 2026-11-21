@@ -13,10 +13,23 @@ export type DesktopWindowOpMode =
   | 'sw'
   | 'se';
 
+export interface MaximizeTransitionPlan {
+  nativeHandled: boolean;
+  maximized: boolean;
+  dxPct?: number;
+  dyPct?: number;
+  scaleX?: number;
+  scaleY?: number;
+}
+
 export interface DesktopBridgeApi {
   focus_main_window?: () => Promise<void>;
   minimize_window?: () => Promise<void>;
   toggle_maximize_window?: () => Promise<boolean>;
+  prepare_maximize_transition?: () => Promise<MaximizeTransitionPlan>;
+  commit_maximize_rect?: () => Promise<boolean>;
+  commit_restore_rect?: () => Promise<boolean>;
+  zoom_window?: () => Promise<MaximizeTransitionPlan>;
   is_window_maximized?: () => Promise<boolean>;
   close_window?: () => Promise<void>;
   toggle_mini_overlay?: () => Promise<boolean>;
