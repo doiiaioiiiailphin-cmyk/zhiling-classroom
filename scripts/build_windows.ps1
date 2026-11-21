@@ -88,12 +88,41 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller 打包失败"
 }
 
-Write-Host "[5/5] 封装 Windows 便携热更新压缩包 (release/ZhilingClassroom-Windows-x86_64.zip)..." -ForegroundColor Cyan
+Write-Host "[5/6] 封装 Windows 便携热更新压缩包 (release/ZhilingClassroom-Windows-x86_64.zip)..." -ForegroundColor Cyan
+$AppVersion = (Get-Content "$Root\package.json" -Raw | ConvertFrom-Json).version
 $WinZip = "$Root\release\ZhilingClassroom-Windows-x86_64.zip"
 if (Test-Path $WinZip) {
     Remove-Item -Force $WinZip
 }
 Compress-Archive -Path "$Root\release\ZhilingClassroom\*" -DestinationPath $WinZip -CompressionLevel Optimal
+
+Write-Host "[6/6] 构建 Windows 图形化安装程序 (release/ZhilingClassroom-Setup-$AppVersion-x86_64.exe)..." -ForegroundColor Cyan
+$Makensis = Get-Command makensis.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+if (-not $Makensis) {
+    $DefaultNsis = "C:\Program Files (x86)\NSIS\makensis.exe"
+    if (Test-Path $DefaultNsis) {
+        $Makensis = $DefaultNsis
+    }
+}
+$SetupExe = "$Root\release\ZhilingClassroom-Setup-$AppVersion-x86_64.exe"
+if ($Makensis) {
+    if (Test-Path $SetupExe) {
+        Remove-Item -Force $SetupExe
+    }
+    & $Makensis `
+        /INPUTCHARSET UTF8 `
+        "/DAPP_VERSION=$AppVersion" `
+        "/DSOURCE_DIR=$Root\release\ZhilingClassroom" `
+        "/DOUT_FILE=$SetupExe" `
+        "/DICON_FILE=$Root\assets\zhiling.ico" `
+        "$Root\scripts\installer_windows.nsi"
+    if ($LASTEXITCODE -ne 0) {
+        throw "NSIS 安装程序构建失败"
+    }
+    Write-Host "Windows 安装程序：$SetupExe" -ForegroundColor Green
+} else {
+    Write-Warning "未检测到 NSIS (makensis.exe)，已跳过图形化安装程序构建。"
+}
 
 Write-Host "打包完成！可执行文件：$Root\release\ZhilingClassroom\ZhilingClassroom.exe" -ForegroundColor Green
 Write-Host "热更新压缩包：$WinZip" -ForegroundColor Green
