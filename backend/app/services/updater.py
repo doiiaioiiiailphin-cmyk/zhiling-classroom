@@ -410,9 +410,10 @@ class AppUpdaterService:
         self.http = http
         self._cnb_repo_override = cnb_repo
         self._cnb_token_override = cnb_token
-        self.current_version = normalize_version(current_version or APP_VERSION)
-        self.platform_name, self.arch_name = _detect_platform_arch(platform_name, arch_name)
         self._frozen_override = frozen_override
+        dev_ver = "" if self.is_frozen else os.getenv("ZHILING_DEV_APP_VERSION", "").strip()
+        self.current_version = normalize_version(current_version or dev_ver or APP_VERSION)
+        self.platform_name, self.arch_name = _detect_platform_arch(platform_name, arch_name)
         self._executable_override = executable_override
         self._lock = asyncio.Lock()
         self._cached_at = 0.0
