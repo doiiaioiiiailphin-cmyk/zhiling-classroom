@@ -1,7 +1,7 @@
 {
   "name": "zhiling-class-ai",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@floating-ui/react": "^0.27.16",
-    "katex": "^0.19.1",
+    "katex": "^0.16.47",
     "lucide-react": "^0.544.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

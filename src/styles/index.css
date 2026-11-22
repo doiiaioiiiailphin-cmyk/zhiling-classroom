@@ -157,6 +157,12 @@ html.mini-overlay-mode #root {
   font-size: 1.04em;
 }
 
+/* 防止 Tailwind CSS 工具类 .underline / .overline 叠加到 KaTeX 同名节点上导致双线 */
+.katex .underline,
+.katex .overline {
+  text-decoration-line: none;
+}
+
 .katex-display {
   margin: 0.65rem 0;
   padding: 0.35rem 0.25rem;

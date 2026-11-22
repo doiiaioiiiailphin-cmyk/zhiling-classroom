@@ -339,6 +339,26 @@ class CnbAutoUpdaterTests(unittest.TestCase):
             self.assertFalse(staged.exists(), "staged.json must be cleaned up after success")
             self.assertFalse(zip_path.exists(), "zip archive must be cleaned up after success")
 
+    def test_app_version_and_katex_css_alignment(self):
+        from backend.app.version import APP_VERSION
+
+        repo_root = Path(__file__).resolve().parents[2]
+        pkg = json.loads((repo_root / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(pkg.get("version"), APP_VERSION)
+
+        # Ensure top-level katex CSS matches rehype-katex's bundled katex minor (0.16.x),
+        # preventing class-prefix mismatches (e.g. .stretchy vs .katex-stretchy breaking \boxed).
+        katex_spec = str(pkg.get("dependencies", {}).get("katex", ""))
+        self.assertTrue(
+            katex_spec.startswith(("^0.16.", "~0.16.", "0.16.")),
+            f"katex dependency {katex_spec!r} must stay aligned with rehype-katex (^0.16.x)",
+        )
+        nested_katex = repo_root / "node_modules" / "rehype-katex" / "node_modules" / "katex"
+        self.assertFalse(
+            nested_katex.exists(),
+            "rehype-katex must share the deduplicated top-level katex version (no nested duplicate)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
