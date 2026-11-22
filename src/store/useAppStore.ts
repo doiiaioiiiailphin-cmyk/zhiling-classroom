@@ -718,6 +718,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         ]);
         const settings = normalizeSettings(rawSettings);
         set({ folders, sessions, settings, aec3Addon, isLoadingHome: false });
+        try {
+          const savedSessionId = window.sessionStorage.getItem('zhiling_active_classroom_id');
+          if (savedSessionId && sessions.some((s) => s.id === savedSessionId)) {
+            await get().openClassroom(savedSessionId);
+          }
+        } catch {
+          // ignore storage restrictions
+        }
       } catch (err) {
         set({ isLoadingHome: false });
         showNotice(
@@ -1036,6 +1044,11 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             onlyBookmarksFilter: false,
             activeView: 'classroom',
           }));
+          try {
+            window.sessionStorage.setItem('zhiling_active_classroom_id', payload.session.id);
+          } catch {
+            // ignore
+          }
         } catch (err) {
           showNotice('error', err instanceof Error ? err.message : '开启新课堂失败');
         }
@@ -1072,6 +1085,11 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           onlyBookmarksFilter: false,
           activeView: 'classroom',
         });
+        try {
+          window.sessionStorage.setItem('zhiling_active_classroom_id', sessionId);
+        } catch {
+          // ignore
+        }
       } catch (err) {
         showNotice('error', err instanceof Error ? err.message : '加载课堂内容失败');
       }
@@ -1091,6 +1109,11 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     leaveClassroom: async () => {
+      try {
+        window.sessionStorage.removeItem('zhiling_active_classroom_id');
+      } catch {
+        // ignore
+      }
       const current = get().activeSession;
       if (current) {
         classroomSocket.sendCommand({ type: 'recording.stop' });

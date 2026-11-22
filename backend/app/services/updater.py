@@ -236,9 +236,9 @@ for ($i = 0; $i -lt 100; $i++) {{
 if (-not $Exited) {{
     Write-UpdateLog "Old PID=$OldPid still running after 20s; forcing termination"
     Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 1000
+    Start-Sleep -Milliseconds 600
 }}
-Start-Sleep -Milliseconds 800
+Start-Sleep -Milliseconds 350
 
 $RunId = [Guid]::NewGuid().ToString("N")
 $WorkRoot = Join-Path (Split-Path -Parent $ZipPath) ("apply_" + $RunId)
@@ -305,8 +305,19 @@ try {{
         }} catch {{}}
     }}
 
+    # 清理可能从旧版 PyInstaller 继承的环境变量，防止新版启动时读到旧路径或直接退出
+    foreach ($PyiVar in @('_MEIPASS', '_MEIPASS2', '_PYI_ARCHIVE_FILE', '_PYI_APPLICATION_HOME_DIR', '_PYI_PARENT_PROCESS_LEVEL', 'PYTHONHOME', 'PYTHONPATH')) {{
+        Remove-Item "Env:$PyiVar" -ErrorAction SilentlyContinue
+    }}
+
     Write-UpdateLog "Update installed successfully. Launching $NewExe"
-    Start-Process -FilePath $NewExe -WorkingDirectory $InstallDir -WindowStyle Normal
+    try {{
+        $Launched = Start-Process -FilePath $NewExe -WorkingDirectory $InstallDir -WindowStyle Normal -PassThru
+        Write-UpdateLog "Launched new process PID=$($Launched.Id)"
+    }} catch {{
+        Write-UpdateLog "Start-Process failed ($($_.Exception.Message)); falling back to explorer.exe"
+        Start-Process -FilePath 'explorer.exe' -ArgumentList $NewExe -ErrorAction SilentlyContinue
+    }}
     Remove-Item -Path $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue

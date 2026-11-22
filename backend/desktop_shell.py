@@ -33,13 +33,18 @@ if sys.platform == "win32":
     # 必须在 WebView2 初始化前设置默认背景色为全透明 (Alpha=0)，彻底消除启动白屏闪烁与底色遮挡
     os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0")
     # 规避 Edge WebView2 / Chromium 157 上游 Blink 缺陷 (crbug.com/549525849):
-    # 流式课堂字幕/AI 输出高频更新文本节点时，Windows UIA 触发的 ax_block_flow_iterator.cc::ComputeNeighborOnLine
-    # 会命中 CHECK 断言导致渲染进程 STATUS_BREAKPOINT (0x80000003) 崩溃白屏。
+    # 流式课堂字幕高频更新文本节点时，Windows UIA/tabtip 触发的 ax_block_flow_iterator.cc::ComputeNeighborOnLine
+    # 会命中 CHECK 断言导致渲染进程 STATUS_BREAKPOINT (0x80000003) 崩溃。
+    # 必须同时传 --disable-platform-accessibility-integration（阻断系统 UIA/WM_GETOBJECT 动态唤醒）
+    # 与 --disable-features=...,UiaProvider + --disable-renderer-accessibility。
     _wv2_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "").strip()
-    if "--disable-renderer-accessibility" not in _wv2_args:
-        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
-            f"{_wv2_args} --disable-renderer-accessibility".strip()
-        )
+    for _flag in (
+        "--disable-platform-accessibility-integration",
+        "--disable-renderer-accessibility",
+    ):
+        if _flag not in _wv2_args:
+            _wv2_args = f"{_wv2_args} {_flag}".strip()
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = _wv2_args
 
 
 def _configure_tls_ca_bundle() -> None:
@@ -602,10 +607,23 @@ def main() -> None:
                         props = getattr(ctrl, "CreationProperties", None)
                         if props is not None:
                             cur = str(getattr(props, "AdditionalBrowserArguments", "") or "")
-                            if "--disable-renderer-accessibility" not in cur:
-                                props.AdditionalBrowserArguments = (
-                                    f"{cur} --disable-renderer-accessibility".strip()
-                                )
+                            # 将 UiaProvider 合并进已有的 --disable-features= 避免重复开关互相覆盖
+                            if "--disable-features=" in cur:
+                                if "UiaProvider" not in cur:
+                                    cur = cur.replace(
+                                        "--disable-features=",
+                                        "--disable-features=UiaProvider,",
+                                        1,
+                                    )
+                            else:
+                                cur = f"{cur} --disable-features=UiaProvider".strip()
+                            for flag in (
+                                "--disable-platform-accessibility-integration",
+                                "--disable-renderer-accessibility",
+                            ):
+                                if flag not in cur:
+                                    cur = f"{cur} {flag}".strip()
+                            props.AdditionalBrowserArguments = cur
 
                     try:
                         form.ControlAdded += _inject_wv2_args
@@ -771,6 +789,10 @@ def main() -> None:
                     if not native.Visible:
                         native.Show()
                     native.Activate()
+                    try:
+                        _u32.SetForegroundWindow(wintypes.HWND(hwnd))
+                    except Exception:
+                        pass
                     diag["visible"] = bool(native.Visible)
 
             if native.InvokeRequired:
@@ -1374,7 +1396,7 @@ def main() -> None:
                 return None
 
         def quit_for_update(self) -> bool:
-            """热更新脚本拉起后立即优雅退出桌面宿主与后端服务，并设硬退出兜底确保 100% 释放文件句柄。"""
+            """热更新脚本拉起后极速退出桌面宿主与后端服务，缩短等待时间并确保 100% 释放文件句柄。"""
             def _shutdown() -> None:
                 time.sleep(0.12)
                 try:
@@ -1394,14 +1416,16 @@ def main() -> None:
                             _u32.ShowWindow(wintypes.HWND(hwnd), 0)  # SW_HIDE 立即反馈退出
                         except Exception:
                             pass
+                    # Windows 下直接短暂等待响应回传后极速退出，避免 WinForms destroy + server_thread.join 阻塞 7 秒
+                    time.sleep(0.35)
+                    os._exit(0)
                 main_win = windows.get("main")
                 if main_win is not None:
                     try:
                         main_win.destroy()  # type: ignore[attr-defined]
                     except Exception:
                         pass
-                # 兜底：若 WebView2 / 后台线程 1.8 秒后仍滞留导致进程未完全结束，强制退出释放 _internal 句柄
-                time.sleep(1.8)
+                time.sleep(1.5)
                 os._exit(0)
 
             threading.Thread(target=_shutdown, name="zhiling-update-quit", daemon=True).start()

@@ -490,7 +490,7 @@ const LiveRecordingBanner: React.FC<{ enableBubble: boolean }> = React.memo(
           <span className="w-1 h-4 rounded-full bg-[#1456F0] animate-wave-2" />
           <span className="w-1 h-4 rounded-full bg-[#1456F0] animate-wave-3" />
         </div>
-        <span className="truncate">
+        <span className="min-w-0 flex-1 break-words leading-relaxed">
           {livePartialUtterance
             ? `${livePartialUtterance.speakerLabel}：${livePartialUtterance.text}`
             : '正在实时拾音并同步识别讲话人语音...'}
