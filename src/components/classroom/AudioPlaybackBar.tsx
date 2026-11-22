@@ -18,11 +18,18 @@ export const AudioPlaybackBar: React.FC = () => {
   const showNotice = useAppStore((s) => s.showNotice);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastHandledSeekSeqRef = useRef<number>(0);
   const [speedIndex, setSpeedIndex] = useState(1); // 1.0x
+  const speedRef = useRef<number>(SPEED_OPTIONS[1]);
   const [durationSec, setDurationSec] = useState(0);
   const [retranscribing, setRetranscribing] = useState(false);
 
   const speed = SPEED_OPTIONS[speedIndex];
+  speedRef.current = speed;
+
+  useEffect(() => {
+    lastHandledSeekSeqRef.current = 0;
+  }, [sessionId]);
 
   useEffect(() => {
     if (!audioPlayback.visible || !sessionId) return;
@@ -35,8 +42,12 @@ export const AudioPlaybackBar: React.FC = () => {
     if (!audioPlayback.visible || !sessionId || audioPlayback.seekRequestMs === null) {
       return;
     }
+    if (audioPlayback.requestSeq <= lastHandledSeekSeqRef.current) {
+      return;
+    }
     const el = audioRef.current;
     if (!el) return;
+    lastHandledSeekSeqRef.current = audioPlayback.requestSeq;
     const targetSec = Math.max(0, audioPlayback.seekRequestMs / 1000);
 
     const applySeekAndPlay = () => {
@@ -45,7 +56,7 @@ export const AudioPlaybackBar: React.FC = () => {
       } catch {
         // wait for metadata if needed
       }
-      el.playbackRate = SPEED_OPTIONS[speedIndex];
+      el.playbackRate = speedRef.current;
       void el.play().catch((err: unknown) => {
         updateAudioPlaybackState({ isPlaying: false });
         showNotice(
@@ -66,7 +77,6 @@ export const AudioPlaybackBar: React.FC = () => {
     audioPlayback.visible,
     audioPlayback.seekRequestMs,
     sessionId,
-    speedIndex,
     updateAudioPlaybackState,
     showNotice,
   ]);

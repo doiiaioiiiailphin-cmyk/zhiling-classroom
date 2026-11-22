@@ -122,6 +122,7 @@ interface ChatComposerProps {
 
 const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, onSend }) => {
   const prefill = useAppStore((s) => s.chatDraftPrefill);
+  const clearChatDraftPrefill = useAppStore((s) => s.clearChatDraftPrefill);
   const uploadSessionAttachment = useAppStore((s) => s.uploadSessionAttachment);
   const segments = useAppStore((s) => s.segments);
 
@@ -130,9 +131,13 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
   const [uploadingCount, setUploadingCount] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const handledPrefillSeqRef = useRef<number>(0);
 
   useEffect(() => {
     if (!prefill) return;
+    if (prefill.seq <= handledPrefillSeqRef.current) return;
+    handledPrefillSeqRef.current = prefill.seq;
+    clearChatDraftPrefill();
     setInput(prefill.text);
     if (prefill.attachments && prefill.attachments.length > 0) {
       setPendingAttachments((prev) => {
@@ -147,7 +152,7 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
     window.requestAnimationFrame(() => {
       textareaRef.current?.focus();
     });
-  }, [prefill]);
+  }, [prefill, clearChatDraftPrefill]);
 
   useEffect(() => {
     const el = textareaRef.current;

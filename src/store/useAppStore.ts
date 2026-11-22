@@ -1,4 +1,8 @@
 import { create } from 'zustand';
+
+let nextTranscriptFocusSeq = 0;
+let nextChatDraftPrefillSeq = 0;
+let nextAudioSeekSeq = 0;
 import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
 import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
@@ -362,7 +366,9 @@ interface AppStoreState {
     utteranceId?: string;
     timestampMs?: number;
   }) => void;
+  clearTranscriptFocusRequest: () => void;
   prefillChatComposer: (text: string, attachments?: SessionAttachmentItem[]) => void;
+  clearChatDraftPrefill: () => void;
 
   uploadSessionAttachment: (
     file: Blob,
@@ -1041,6 +1047,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               isPlaying: false,
             },
             livePartialUtterance: null,
+            transcriptFocusRequest: null,
+            chatDraftPrefill: null,
             onlyBookmarksFilter: false,
             activeView: 'classroom',
           }));
@@ -1082,6 +1090,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             isPlaying: false,
           },
           livePartialUtterance: null,
+          transcriptFocusRequest: null,
+          chatDraftPrefill: null,
           onlyBookmarksFilter: false,
           activeView: 'classroom',
         });
@@ -1141,6 +1151,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               isPlaying: false,
             },
             livePartialUtterance: null,
+            transcriptFocusRequest: null,
+            chatDraftPrefill: null,
             activeView: 'home',
           });
         } catch {
@@ -1150,11 +1162,17 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             flashcards: [],
             attachments: [],
             livePartialUtterance: null,
+            transcriptFocusRequest: null,
+            chatDraftPrefill: null,
             activeView: 'home',
           });
         }
       } else {
-        set({ activeView: 'home' });
+        set({
+          transcriptFocusRequest: null,
+          chatDraftPrefill: null,
+          activeView: 'home',
+        });
       }
     },
 
@@ -1626,12 +1644,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     seekAudioPlayback: (ms) => {
+      nextAudioSeekSeq += 1;
       set((state) => ({
         audioPlayback: {
           ...state.audioPlayback,
           visible: true,
           seekRequestMs: Math.max(0, ms),
-          requestSeq: state.audioPlayback.requestSeq + 1,
+          requestSeq: nextAudioSeekSeq,
           currentMs: Math.max(0, ms),
           isPlaying: true,
         },
@@ -1669,6 +1688,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         audioPlayback: {
           ...state.audioPlayback,
           visible: false,
+          seekRequestMs: null,
           isPlaying: false,
         },
       }));
@@ -1733,6 +1753,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         hasAudio: Boolean(payload.hasAudio),
         audioDurationMs: payload.audioDurationMs ?? 0,
         livePartialUtterance: null,
+        transcriptFocusRequest: null,
+        chatDraftPrefill: null,
         activeView: 'classroom',
       }));
       showNotice('info', `已导入音频并完成「${payload.session.title}」转写分段`);
@@ -1803,22 +1825,32 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     jumpToTranscript: (target) => {
-      set((state) => ({
+      nextTranscriptFocusSeq += 1;
+      set({
         transcriptFocusRequest: {
           ...target,
-          seq: (state.transcriptFocusRequest?.seq ?? 0) + 1,
+          seq: nextTranscriptFocusSeq,
         },
-      }));
+      });
+    },
+
+    clearTranscriptFocusRequest: () => {
+      set((state) => (state.transcriptFocusRequest ? { transcriptFocusRequest: null } : state));
     },
 
     prefillChatComposer: (text, attachments) => {
-      set((state) => ({
+      nextChatDraftPrefillSeq += 1;
+      set({
         chatDraftPrefill: {
           text,
           attachments,
-          seq: (state.chatDraftPrefill?.seq ?? 0) + 1,
+          seq: nextChatDraftPrefillSeq,
         },
-      }));
+      });
+    },
+
+    clearChatDraftPrefill: () => {
+      set((state) => (state.chatDraftPrefill ? { chatDraftPrefill: null } : state));
     },
 
     uploadSessionAttachment: async (file, options) => {

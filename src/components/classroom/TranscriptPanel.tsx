@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlignLeft,
   AudioLines,
@@ -508,6 +508,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   const isRecording = useAppStore((s) => s.activeSession?.status === 'recording');
   const audioPlayback = useAppStore((s) => s.audioPlayback);
   const focusRequest = useAppStore((s) => s.transcriptFocusRequest);
+  const clearTranscriptFocusRequest = useAppStore((s) => s.clearTranscriptFocusRequest);
 
   const enableCorrection = useAppStore(
     (s) => s.settings?.featureRouting.sentenceCorrection.enabled ?? true
@@ -535,6 +536,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     segmentId: string | null;
     utteranceId: string | null;
   }>({ segmentId: null, utteranceId: null });
+  const handledFocusSeqRef = useRef<number>(0);
+  const focusTimerRef = useRef<number | null>(null);
+  const utteranceRefineRafRef = useRef<number | null>(null);
   const [selectionBar, setSelectionBar] = useState<{
     text: string;
     x: number;
@@ -611,10 +615,39 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     overscanPx: 750,
   });
 
-  // 响应来自对话时间戳角标或跨课堂搜索的定位请求
+  const cancelPendingFocusRefine = useCallback(() => {
+    if (utteranceRefineRafRef.current !== null) {
+      window.cancelAnimationFrame(utteranceRefineRafRef.current);
+      utteranceRefineRafRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+        focusTimerRef.current = null;
+      }
+      if (utteranceRefineRafRef.current !== null) {
+        window.cancelAnimationFrame(utteranceRefineRafRef.current);
+        utteranceRefineRafRef.current = null;
+      }
+    };
+  }, []);
+
+  // 响应来自对话时间戳角标或跨课堂搜索的一次性定位请求（严格按 seq 消费并清空，绝不随后续转写更新反复回跳）
   useEffect(() => {
     if (!focusRequest) return;
-    if (onlyBookmarks) setOnlyBookmarks(false);
+    if (focusRequest.seq <= handledFocusSeqRef.current) return;
+
+    if (onlyBookmarks) {
+      setOnlyBookmarks(false);
+      return;
+    }
+    if (renderedSegments.length === 0) return;
+
+    handledFocusSeqRef.current = focusRequest.seq;
+    clearTranscriptFocusRequest();
 
     let targetIndex = -1;
     let targetSegId: string | null = focusRequest.segmentId ?? null;
@@ -645,13 +678,44 @@ export const TranscriptPanel: React.FC = React.memo(() => {
 
     if (targetIndex >= 0) {
       scrollToIndex(targetIndex);
+      cancelPendingFocusRefine();
+      if (targetUttId) {
+        const uttIdToLocate = targetUttId;
+        utteranceRefineRafRef.current = window.requestAnimationFrame(() => {
+          utteranceRefineRafRef.current = null;
+          const container = scrollRef.current;
+          if (!container) return;
+          const uttEl = container.querySelector<HTMLElement>(
+            `[data-utterance-id="${CSS.escape(uttIdToLocate)}"]`
+          );
+          if (uttEl) {
+            const containerRect = container.getBoundingClientRect();
+            const elRect = uttEl.getBoundingClientRect();
+            if (elRect.top < containerRect.top + 8 || elRect.bottom > containerRect.bottom - 8) {
+              uttEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }
+        });
+      }
       setFocusedIds({ segmentId: targetSegId, utteranceId: targetUttId });
-      const timer = window.setTimeout(() => {
+      if (focusTimerRef.current !== null) {
+        window.clearTimeout(focusTimerRef.current);
+      }
+      focusTimerRef.current = window.setTimeout(() => {
+        focusTimerRef.current = null;
         setFocusedIds({ segmentId: null, utteranceId: null });
       }, 2600);
-      return () => window.clearTimeout(timer);
     }
-  }, [focusRequest, onlyBookmarks, renderedSegments, scrollToIndex, setOnlyBookmarks]);
+  }, [
+    focusRequest,
+    onlyBookmarks,
+    renderedSegments,
+    scrollToIndex,
+    scrollRef,
+    setOnlyBookmarks,
+    clearTranscriptFocusRequest,
+    cancelPendingFocusRefine,
+  ]);
 
   const handleAskAboutText = useCallback(
     (quoted: string, timeLabel?: string) => {
@@ -755,6 +819,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
       {/* 知识点分段流 */}
       <div
         ref={scrollRef}
+        onWheel={cancelPendingFocusRefine}
+        onTouchStart={cancelPendingFocusRefine}
+        onPointerDown={cancelPendingFocusRefine}
         onScroll={() => {
           notifyScroll();
           if (selectionBar) setSelectionBar(null);
