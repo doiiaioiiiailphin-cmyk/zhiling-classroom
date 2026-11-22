@@ -25,6 +25,7 @@ import { useAudioDevices } from '../../hooks/useAudioDevices';
 import { classroomSocket } from '../../services/classroomSocket';
 import type { AudioRuntimeTelemetry } from '../../services/classroomAudio';
 import { useAppStore } from '../../store/useAppStore';
+import { isAndroidPlatform } from '../../utils/desktopBridge';
 import { Switch } from '../ui/Switch';
 import { Tooltip } from '../ui/Tooltip';
 
@@ -205,7 +206,8 @@ export const AudioSourceControl: React.FC = React.memo(() => {
         </Tooltip>
       </div>
 
-      {/* ==================== 2. 系统内录源控制（图标直点禁用/启用 + 下拉选源与 AEC3） ==================== */}
+      {/* ==================== 2. 系统内录源控制（桌面端专享；Android 端以原生麦克风+硬件降噪为主） ==================== */}
+      {!isAndroidPlatform() && (
       <div
         ref={sysFloating.refs.setReference}
         className={`h-10 rounded-lg border flex items-center overflow-hidden transition-colors ${
@@ -264,6 +266,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
           </button>
         </Tooltip>
       </div>
+      )}
 
       {/* ==================== 麦克风下拉面板（FloatingPortal 防裁切） ==================== */}
       {micPresence.shouldRender && (

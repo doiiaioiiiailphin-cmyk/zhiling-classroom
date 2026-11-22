@@ -20,7 +20,7 @@ import {
   savePanelScroll,
   type PanelScrollSnapshot,
 } from '../../utils/classroomScrollMemory';
-import { getPasteShortcutLabel } from '../../utils/desktopBridge';
+import { getPasteShortcutLabel, isAndroidPlatform } from '../../utils/desktopBridge';
 import { IconButton } from '../ui/IconButton';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { Modal } from '../ui/Modal';
@@ -223,7 +223,7 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
       }}
     >
       {/* 防走神快捷指令胶囊栏 */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
         <button
           type="button"
           disabled={isSendingChat || segments.length === 0}
@@ -360,7 +360,11 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
               void handleSubmit();
             }
           }}
-          placeholder={`询问本堂课要点、直接 ${getPasteShortcutLabel()} 粘贴板书截图提问...`}
+          placeholder={
+            isAndroidPlatform()
+              ? '询问本堂课要点，或点顶栏相机拍板书提问...'
+              : `询问本堂课要点、直接 ${getPasteShortcutLabel()} 粘贴板书截图提问...`
+          }
           className="flex-1 min-h-[36px] max-h-36 py-[6px] resize-none bg-transparent text-[15px] leading-[24px] text-[#1F2329] placeholder-[#646A73] focus:outline-none"
         />
 

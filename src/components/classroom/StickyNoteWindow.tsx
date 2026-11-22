@@ -35,10 +35,11 @@ const TEXTAREA_PAD_TOP_PX = 10;
 interface StickyNoteWindowProps {
   note: StickyNoteItem;
   displayIndex: number;
+  mobileSheet?: boolean;
 }
 
 export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
-  ({ note, displayIndex }) => {
+  ({ note, displayIndex, mobileSheet = false }) => {
     const allNotes = useAppStore((s) => s.stickyNotes);
     const jumpRequest = useAppStore((s) => s.stickyNoteJumpRequest);
     const activeDurationSec = useAppStore((s) => s.activeSession?.durationSeconds ?? 0);
@@ -394,27 +395,40 @@ export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
         aria-label={`便签窗口：${displayTitle}`}
         data-sticky-note-id={note.id}
         onPointerDown={() => bringStickyNoteToFront(note.id)}
-        style={{
-          left: `${note.posX}px`,
-          top: `${note.posY}px`,
-          width: `${note.width}px`,
-          height: `${note.height}px`,
-          zIndex: effectiveZ,
-          backgroundColor: note.isTranslucent ? theme.bodyBgTranslucent : theme.bodyBg,
-          borderColor: theme.border,
-        }}
-        className={`fixed pointer-events-auto rounded-2xl border shadow-[0_14px_36px_rgba(31,35,41,0.16),0_2px_8px_rgba(111,84,20,0.08)] flex flex-col overflow-hidden select-none ${
-          note.isTranslucent ? 'backdrop-blur-md' : ''
-        }`}
+        style={
+          mobileSheet
+            ? {
+                backgroundColor: theme.bodyBg,
+                borderColor: theme.border,
+              }
+            : {
+                left: `${note.posX}px`,
+                top: `${note.posY}px`,
+                width: `${note.width}px`,
+                height: `${note.height}px`,
+                zIndex: effectiveZ,
+                backgroundColor: note.isTranslucent ? theme.bodyBgTranslucent : theme.bodyBg,
+                borderColor: theme.border,
+              }
+        }
+        className={
+          mobileSheet
+            ? 'w-full h-[68vh] pointer-events-auto rounded-t-2xl border-t border-x shadow-[0_-12px_36px_rgba(31,35,41,0.18)] flex flex-col overflow-hidden select-none'
+            : `fixed pointer-events-auto rounded-2xl border shadow-[0_14px_36px_rgba(31,35,41,0.16),0_2px_8px_rgba(111,84,20,0.08)] flex flex-col overflow-hidden select-none ${
+                note.isTranslucent ? 'backdrop-blur-md' : ''
+              }`
+        }
       >
         {/* 纸色标题栏（拖拽移动 + 标题编辑 + 快捷操作） */}
         <div
-          onPointerDown={handleHeaderPointerDown}
+          onPointerDown={mobileSheet ? undefined : handleHeaderPointerDown}
           style={{
             backgroundColor: theme.headerBg,
             borderColor: theme.border,
           }}
-          className="h-10 px-2.5 border-b flex items-center justify-between gap-1.5 cursor-grab active:cursor-grabbing shrink-0"
+          className={`h-11 md:h-10 px-2.5 border-b flex items-center justify-between gap-1.5 shrink-0 ${
+            mobileSheet ? '' : 'cursor-grab active:cursor-grabbing'
+          }`}
         >
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
             {/* 纸色切换圆点按钮 */}
@@ -761,37 +775,41 @@ export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
           </span>
         </div>
 
-        {/* 边缘与四角缩放句柄 */}
-        <div
-          onPointerDown={startResize('e')}
-          className="absolute top-2 bottom-3 right-0 w-1.5 cursor-ew-resize"
-        />
-        <div
-          onPointerDown={startResize('w')}
-          className="absolute top-2 bottom-3 left-0 w-1.5 cursor-ew-resize"
-        />
-        <div
-          onPointerDown={startResize('s')}
-          className="absolute left-3 right-3 bottom-0 h-1.5 cursor-ns-resize"
-        />
-        <div
-          onPointerDown={startResize('n')}
-          className="absolute left-3 right-3 top-0 h-1 cursor-ns-resize"
-        />
-        <div
-          onPointerDown={startResize('sw')}
-          className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize"
-        />
-        <div
-          onPointerDown={startResize('se')}
-          title="拖拽调整便签大小"
-          className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize flex items-end justify-end p-1"
-        >
-          <span
-            style={{ borderColor: theme.borderStrong }}
-            className="w-2 h-2 border-r-2 border-b-2 rounded-br-[2px] opacity-75 pointer-events-none"
-          />
-        </div>
+        {/* 边缘与四角缩放句柄（桌面浮窗模式） */}
+        {!mobileSheet && (
+          <>
+            <div
+              onPointerDown={startResize('e')}
+              className="absolute top-2 bottom-3 right-0 w-1.5 cursor-ew-resize"
+            />
+            <div
+              onPointerDown={startResize('w')}
+              className="absolute top-2 bottom-3 left-0 w-1.5 cursor-ew-resize"
+            />
+            <div
+              onPointerDown={startResize('s')}
+              className="absolute left-3 right-3 bottom-0 h-1.5 cursor-ns-resize"
+            />
+            <div
+              onPointerDown={startResize('n')}
+              className="absolute left-3 right-3 top-0 h-1 cursor-ns-resize"
+            />
+            <div
+              onPointerDown={startResize('sw')}
+              className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize"
+            />
+            <div
+              onPointerDown={startResize('se')}
+              title="拖拽调整便签大小"
+              className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize flex items-end justify-end p-1"
+            >
+              <span
+                style={{ borderColor: theme.borderStrong }}
+                className="w-2 h-2 border-r-2 border-b-2 rounded-br-[2px] opacity-75 pointer-events-none"
+              />
+            </div>
+          </>
+        )}
       </div>
     );
   }

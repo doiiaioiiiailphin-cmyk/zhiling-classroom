@@ -20,6 +20,7 @@ import { classroomSocket } from './services/classroomSocket';
 import { useAppStore } from './store/useAppStore';
 import {
   getDesktopBridge,
+  isAndroidPlatform,
   isDesktopShell,
   isInteractiveDragBlocker,
 } from './utils/desktopBridge';
@@ -515,6 +516,46 @@ export const App: React.FC = () => {
     [runSmoothMaximizeOrZoom]
   );
 
+  const isAndroid = isAndroidPlatform();
+
+  // Android 物理/手势返回键智能分层接管：弹窗 -> 便签 -> 退出课堂 -> 退出文件夹 -> 后台最小化
+  useEffect(() => {
+    if (!isAndroid || IS_MINI_OVERLAY_MODE) return;
+    const handler = (): boolean => {
+      const s = useAppStore.getState();
+      if (s.settingsOpen) {
+        s.setSettingsOpen(false);
+        return true;
+      }
+      if (s.notesExportModal.open) {
+        s.closeNotesExportModal();
+        return true;
+      }
+      if (s.importAudioModalOpen) {
+        s.setImportAudioModalOpen(false);
+        return true;
+      }
+      if (s.activeView === 'classroom') {
+        if (s.stickyNotes.some((n) => n.isOpen)) {
+          void s.setAllStickyNotesOpen(false);
+          return true;
+        }
+        void s.leaveClassroom();
+        return true;
+      }
+      if (s.currentFolderId !== null) {
+        const curFolder = s.folders.find((f) => f.id === s.currentFolderId);
+        s.setCurrentFolderId(curFolder?.parentId ?? null);
+        return true;
+      }
+      return false;
+    };
+    (window as unknown as { __zhilingHandleAndroidBack?: () => boolean }).__zhilingHandleAndroidBack = handler;
+    return () => {
+      delete (window as unknown as { __zhilingHandleAndroidBack?: () => boolean }).__zhilingHandleAndroidBack;
+    };
+  }, [isAndroid]);
+
   if (IS_MINI_OVERLAY_MODE) {
     return <MiniOverlayView />;
   }
@@ -534,15 +575,25 @@ export const App: React.FC = () => {
     <div
       onMouseDown={handleShellMouseDown}
       onDoubleClick={handleShellDoubleClick}
+      style={
+        isAndroid
+          ? {
+              paddingTop: 'var(--android-safe-top, 0px)',
+              paddingBottom: 'var(--android-safe-bottom, 0px)',
+            }
+          : undefined
+      }
       className={`h-screen w-screen overflow-hidden ${
-        windowMaximized
-          ? 'p-0 bg-transparent'
-          : inDesktopShell
+        isAndroid
+          ? 'p-0 bg-white'
+          : windowMaximized
             ? 'p-0 bg-transparent'
-            : 'p-2 bg-[#E3E6EC]'
+            : inDesktopShell
+              ? 'p-0 bg-transparent'
+              : 'p-2 bg-[#E3E6EC]'
       }`}
     >
-      {inDesktopShell && (
+      {inDesktopShell && !isAndroid && (
         <WindowResizeHandles target="main" disabled={windowMaximized} />
       )}
 
@@ -551,7 +602,7 @@ export const App: React.FC = () => {
         className={`h-full w-full overflow-hidden flex flex-col bg-[#F5F6F7] origin-center ${
           isFlipping ? '' : motionTransformClass
         } ${
-          windowMaximized
+          isAndroid || windowMaximized
             ? 'rounded-none border-0'
             : inDesktopShell
               ? 'rounded-[16px] border border-[#CFD4DC]'

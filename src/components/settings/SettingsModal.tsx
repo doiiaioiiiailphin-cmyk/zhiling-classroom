@@ -198,9 +198,9 @@ export const SettingsModal: React.FC = () => {
         title="系统与模型设置"
         widthClass="max-w-4xl"
       >
-        <div className="flex min-h-[520px] max-h-[76vh]">
-          {/* 左侧分类栏 */}
-          <aside className="w-52 shrink-0 border-r border-[#ECEEF2] bg-[#F5F6F7]/70 p-3 space-y-1">
+        <div className="flex flex-col md:flex-row min-h-[480px] md:min-h-[520px] max-h-[80vh] md:max-h-[76vh]">
+          {/* 分类栏：桌面端左侧竖排 / 手机端顶部横向滑动 */}
+          <aside className="w-full md:w-52 shrink-0 border-b md:border-b-0 md:border-r border-[#ECEEF2] bg-[#F5F6F7]/70 p-2.5 md:p-3 flex md:block items-center gap-1.5 md:space-y-1 overflow-x-auto no-scrollbar">
             {SETTINGS_TABS.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.key;
@@ -209,14 +209,14 @@ export const SettingsModal: React.FC = () => {
                   key={tab.key}
                   type="button"
                   onClick={() => setActiveTab(tab.key)}
-                  className={`w-full flex items-center gap-2.5 rounded-lg px-3.5 py-2.5 text-[15px] transition-colors cursor-pointer ${
+                  className={`shrink-0 md:w-full flex items-center gap-2 md:gap-2.5 rounded-lg px-3 md:px-3.5 py-2 md:py-2.5 text-[14px] md:text-[15px] transition-colors cursor-pointer whitespace-nowrap ${
                     active
                       ? 'bg-[#EBF2FF] text-[#1456F0] font-medium'
                       : 'text-[#4E5969] hover:bg-[#ECEEF2]/80 hover:text-[#1F2329]'
                   }`}
                 >
                   <Icon
-                    className={`w-[18px] h-[18px] ${
+                    className={`w-[17px] h-[17px] md:w-[18px] md:h-[18px] shrink-0 ${
                       active ? 'text-[#1456F0]' : 'text-[#4E5969]'
                     }`}
                     strokeWidth={1.85}
@@ -227,8 +227,8 @@ export const SettingsModal: React.FC = () => {
             })}
           </aside>
 
-          {/* 右侧设置详情区 */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-white">
+          {/* 设置详情区 */}
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5 md:space-y-6 bg-white">
             {/* ==================== Tab 1: 大模型供应商 ==================== */}
             {activeTab === 'llm' && (
               <div className="space-y-6">
@@ -1133,7 +1133,7 @@ export const SettingsModal: React.FC = () => {
                           关于知聆课堂与软件更新
                         </span>
                         <span className="px-2 py-0.5 rounded-md bg-white border border-[#DCE4F7] text-[14px] font-medium text-[#1456F0] tabular-nums">
-                          v{appUpdate.info?.currentVersion || '0.1.10'}
+                          v{appUpdate.info?.currentVersion || '0.1.11'}
                         </span>
                       </div>
                       <p className="text-[14px] text-[#646A73]">

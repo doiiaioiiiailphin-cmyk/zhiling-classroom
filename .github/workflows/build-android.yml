@@ -1,0 +1,72 @@
+name: Build Android App (APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      abis:
+        description: "Target ABIs (comma-separated, e.g. arm64-v8a or arm64-v8a,x86_64)"
+        required: false
+        default: "arm64-v8a"
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install frontend dependencies & build dist
+        env:
+          VITE_USE_MOCK: "false"
+          VITE_API_BASE_URL: "/api/v1"
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - name: Run Android unit tests & assemble Release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ABIS="${{ inputs.abis || 'arm64-v8a' }}"
+          ./gradlew testDebugUnitTest assembleRelease --no-daemon -PzhilingAbis="$ABIS"
+          mkdir -p ../release
+          cp app/build/outputs/apk/release/app-release.apk ../release/ZhilingClassroom-Android-arm64.apk
+          ls -lh ../release/ZhilingClassroom-Android-arm64.apk
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZhilingClassroom-Android-arm64
+          path: release/ZhilingClassroom-Android-arm64.apk
+          if-no-files-found: error
+
+      - name: Sync Android APK to CNB Release (when CNB_TOKEN is configured)
+        if: env.CNB_TOKEN != ''
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: ${{ vars.CNB_REPO }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          python3 scripts/publish_cnb_release.py \
+            --tag "$TAG" \
+            --title "知聆课堂 $TAG" \
+            release/ZhilingClassroom-Android-arm64.apk

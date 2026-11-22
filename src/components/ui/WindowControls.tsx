@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Copy, Minus, Square, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
+import { getDesktopBridge, isAndroidPlatform, isMacPlatform } from '../../utils/desktopBridge';
 import { Tooltip } from './Tooltip';
 
 export const WindowControls: React.FC = React.memo(() => {
@@ -14,6 +14,7 @@ export const WindowControls: React.FC = React.memo(() => {
 
   const busyRef = useRef(false);
   const isMac = isMacPlatform();
+  const isAndroid = isAndroidPlatform();
   const [windowFocused, setWindowFocused] = useState(
     typeof document === 'undefined' ? true : document.hasFocus()
   );
@@ -100,6 +101,10 @@ export const WindowControls: React.FC = React.memo(() => {
     window.close();
     showNotice('info', '已安全保存当前课堂状态，桌面端下将直接退出应用窗口');
   };
+
+  if (isAndroid) {
+    return null;
+  }
 
   if (isMac) {
     const activeColors = windowFocused || groupHovered;

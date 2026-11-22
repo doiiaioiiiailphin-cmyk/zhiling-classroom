@@ -205,9 +205,9 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
                         setSpeakerDraft(utterance.speakerLabel);
                         setIsEditingSpk(true);
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-[#F0F4FF] hover:bg-[#DCE8FF] px-2.5 py-1 text-[14px] font-medium text-[#1456F0] transition-colors cursor-pointer"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[#F0F4FF] hover:bg-[#DCE8FF] px-2.5 py-1 text-[14px] font-medium text-[#1456F0] whitespace-nowrap shrink-0 transition-colors cursor-pointer"
                     >
-                      <UserRound className="w-3.5 h-3.5" strokeWidth={2} />
+                      <UserRound className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
                       <span>{utterance.speakerLabel}</span>
                     </button>
                   </Tooltip>

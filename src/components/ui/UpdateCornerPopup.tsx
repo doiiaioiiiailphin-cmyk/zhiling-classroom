@@ -61,7 +61,7 @@ export const UpdateCornerPopup: React.FC = () => {
     <aside
       role="dialog"
       aria-label="软件版本更新提示"
-      className="fixed right-5 bottom-5 z-[85] w-[376px] max-w-[calc(100vw-32px)] rounded-[14px] border border-[#DCE4F7] bg-white/98 backdrop-blur-md shadow-[0_14px_40px_rgba(20,86,240,0.16),0_2px_10px_rgba(31,35,41,0.08)] overflow-hidden transition-all"
+      className="fixed right-4 left-4 bottom-4 sm:left-auto sm:right-5 sm:bottom-5 z-[85] sm:w-[376px] max-w-[calc(100vw-32px)] rounded-[14px] border border-[#DCE4F7] bg-white/98 backdrop-blur-md shadow-[0_14px_40px_rgba(20,86,240,0.16),0_2px_10px_rgba(31,35,41,0.08)] overflow-hidden transition-all"
     >
       {/* 顶部飞书蓝细亮条 */}
       <div className="h-[3px] w-full bg-gradient-to-r from-[#1456F0] via-[#3370FF] to-[#5B8EFF]" />

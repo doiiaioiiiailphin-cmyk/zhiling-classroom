@@ -8,6 +8,7 @@ import {
   FloatingPortal,
   type Placement,
 } from '@floating-ui/react';
+import { isAndroidPlatform } from '../../utils/desktopBridge';
 
 interface TooltipProps {
   content: React.ReactNode;
@@ -89,6 +90,10 @@ export const Tooltip: React.FC<TooltipProps> = ({
   const tooltipId = useId();
   const [isOpen, setIsOpen] = useState(false);
 
+  const isTouchOnly =
+    typeof window !== 'undefined' &&
+    (isAndroidPlatform() || Boolean(window.matchMedia?.('(hover: none), (pointer: coarse)').matches));
+
   const domRef = useRef<HTMLElement | null>(null);
   const openTimerRef = useRef<number | null>(null);
   const isHoveredRef = useRef(false);
@@ -109,6 +114,7 @@ export const Tooltip: React.FC<TooltipProps> = ({
   }, [clearOpenTimer]);
 
   const scheduleOpen = useCallback(() => {
+    if (isTouchOnly) return;
     clearOpenTimer();
     openTimerRef.current = window.setTimeout(() => {
       openTimerRef.current = null;

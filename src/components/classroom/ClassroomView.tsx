@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlignLeft,
   ArrowLeft,
   Bookmark,
   BookmarkPlus,
@@ -7,13 +8,19 @@ import {
   FileText,
   FileUp,
   Headphones,
+  MessageSquareText,
   Mic,
   Pause,
   PictureInPicture2,
   Settings,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
+import {
+  getDesktopBridge,
+  isAndroidPlatform,
+  isMacPlatform,
+  useIsMobileViewport,
+} from '../../utils/desktopBridge';
 import { formatDuration } from '../../utils/format';
 import { IconButton } from '../ui/IconButton';
 import { MoreGridMenu, type GridMenuItem } from '../ui/MoreGridMenu';
@@ -90,8 +97,28 @@ export const ClassroomView: React.FC = () => {
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
+  const [mobileTab, setMobileTab] = useState<'transcript' | 'chat'>('transcript');
   const containerRef = useRef<HTMLDivElement | null>(null);
   const materialInputRef = useRef<HTMLInputElement | null>(null);
+
+  const isMobileViewport = useIsMobileViewport();
+  const isAndroid = isAndroidPlatform();
+  const transcriptFocusSeq = useAppStore((s) => s.transcriptFocusRequest?.seq ?? 0);
+  const chatPrefillSeq = useAppStore((s) => s.chatDraftPrefill?.seq ?? 0);
+  const isAiSending = useAppStore((s) => s.isSendingChat);
+
+  // 手机端智能切页：点击问答时间戳自动切至「转写记录」；点击转写追问自动切至「课堂问答」
+  useEffect(() => {
+    if (isMobileViewport && transcriptFocusSeq > 0) {
+      setMobileTab('transcript');
+    }
+  }, [isMobileViewport, transcriptFocusSeq]);
+
+  useEffect(() => {
+    if (isMobileViewport && chatPrefillSeq > 0) {
+      setMobileTab('chat');
+    }
+  }, [isMobileViewport, chatPrefillSeq]);
 
   const totalBookmarkCount = useMemo(
     () =>
@@ -207,12 +234,16 @@ export const ClassroomView: React.FC = () => {
         active: onlyBookmarksFilter,
         onClick: () => setOnlyBookmarksFilter(!onlyBookmarksFilter),
       },
-      {
-        id: 'mini-subtitles',
-        label: '实时字幕',
-        icon: PictureInPicture2,
-        onClick: () => void toggleMiniOverlayWindow(),
-      },
+      ...(!isAndroid
+        ? [
+            {
+              id: 'mini-subtitles',
+              label: '实时字幕',
+              icon: PictureInPicture2,
+              onClick: () => void toggleMiniOverlayWindow(),
+            },
+          ]
+        : []),
       {
         id: 'audio-replay',
         label: '原声回放',
@@ -228,6 +259,7 @@ export const ClassroomView: React.FC = () => {
       },
     ],
     [
+      isAndroid,
       sessionId,
       materialCount,
       totalBookmarkCount,
@@ -288,16 +320,16 @@ export const ClassroomView: React.FC = () => {
         }}
       />
 
-      {/* 顶部课堂控制栏：macOS 左置红黄绿交通灯 / Windows 右置三键，支持无边框拖拽移动 */}
+      {/* 顶部课堂控制栏：桌面端保持原样；手机端（<768px）精简为单行紧凑触控栏 */}
       <header
         onDoubleClick={handleHeaderDoubleClick}
-        className={`border-b border-[#DEE0E3] flex items-center justify-between gap-3 shrink-0 pywebview-drag-region ${
+        className={`border-b border-[#DEE0E3] flex items-center justify-between gap-1.5 md:gap-3 shrink-0 pywebview-drag-region ${
           isMac
             ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
-            : 'h-15 bg-white pl-5 pr-3.5'
+            : 'h-14 md:h-15 bg-white px-2.5 md:pl-5 md:pr-3.5'
         }`}
       >
-        <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center gap-1.5 md:gap-2.5 min-w-0 flex-1">
           {isMac && <WindowControls />}
           <IconButton
             icon={ArrowLeft}
@@ -318,7 +350,7 @@ export const ClassroomView: React.FC = () => {
                 if (e.key === 'Enter') void commitTitle();
                 if (e.key === 'Escape') setEditingTitle(false);
               }}
-              className="h-9 w-80 max-w-[42vw] rounded-lg border border-[#1456F0] bg-white px-3 text-[16px] font-semibold text-[#1F2329] focus:outline-none ring-2 ring-[#1456F0]/15"
+              className="h-9 w-full max-w-64 md:w-80 md:max-w-[42vw] rounded-lg border border-[#1456F0] bg-white px-2.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] focus:outline-none ring-2 ring-[#1456F0]/15"
             />
           ) : (
             <button
@@ -327,15 +359,15 @@ export const ClassroomView: React.FC = () => {
                 setTitleDraft(sessionTitle);
                 setEditingTitle(true);
               }}
-              className="truncate rounded-lg px-2.5 py-1.5 text-[16px] font-semibold text-[#1F2329] hover:bg-[#F2F3F5] transition-colors cursor-pointer"
+              className="truncate rounded-lg px-1.5 md:px-2.5 py-1.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] hover:bg-[#F2F3F5] transition-colors cursor-pointer text-left min-w-0"
             >
               {sessionTitle}
             </button>
           )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 app-no-drag">
-          <AudioSourceControl />
+        <div className="flex items-center gap-1.5 md:gap-2 shrink-0 app-no-drag">
+          {!isMobileViewport && <AudioSourceControl />}
 
           <RecordingTimerButton />
 
@@ -343,17 +375,19 @@ export const ClassroomView: React.FC = () => {
             icon={Camera}
             size="lg"
             variant="outline"
-            tooltip="一键抓拍课堂画面锚定至时间轴"
+            tooltip={isAndroid ? '相机拍板书并锚定至时间轴' : '一键抓拍课堂画面锚定至时间轴'}
             onClick={() => void captureClassroomScreen()}
           />
 
-          <IconButton
-            icon={BookmarkPlus}
-            size="lg"
-            variant="outline"
-            tooltip="标记此处没听懂"
-            onClick={() => void markConfusedNow()}
-          />
+          {!isMobileViewport && (
+            <IconButton
+              icon={BookmarkPlus}
+              size="lg"
+              variant="outline"
+              tooltip="标记此处没听懂"
+              onClick={() => void markConfusedNow()}
+            />
+          )}
 
           <StickyNoteTopbarControl />
 
@@ -367,30 +401,90 @@ export const ClassroomView: React.FC = () => {
         </div>
       </header>
 
-      {/* 可拖拽双栏主体：左侧对话问答 + 右侧实时转写与知识点 */}
-      <div
-        ref={containerRef}
-        className={`flex-1 flex min-h-0 ${isDraggingSplit ? 'select-none cursor-col-resize' : ''}`}
-      >
-        <div style={{ width: `${leftRatio}%` }} className="h-full min-w-0">
-          <ChatPanel />
-        </div>
+      {/* 主体：桌面/平板（>=768px）保持可拖拽双栏；手机端（<768px）切换为单栏双 Tab 并保持双侧挂载 */}
+      {isMobileViewport ? (
+        <>
+          <div className="flex-1 relative min-h-0 overflow-hidden">
+            <div className={`h-full w-full ${mobileTab === 'transcript' ? 'block' : 'hidden'}`}>
+              <TranscriptPanel />
+            </div>
+            <div className={`h-full w-full ${mobileTab === 'chat' ? 'block' : 'hidden'}`}>
+              <ChatPanel />
+            </div>
+          </div>
 
+          <nav
+            aria-label="课堂视图切换"
+            className="h-14 border-t border-[#DEE0E3] bg-white px-3 flex items-center justify-between gap-2 shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => setMobileTab('transcript')}
+              className={`flex-1 h-10 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-colors cursor-pointer ${
+                mobileTab === 'transcript'
+                  ? 'bg-[#EBF2FF] text-[#1456F0]'
+                  : 'text-[#4E5969] hover:bg-[#F2F3F5]'
+              }`}
+            >
+              <AlignLeft className="w-4 h-4 shrink-0" />
+              <span>转写记录</span>
+              {segments.length > 0 && (
+                <span className="text-[14px] opacity-75 tabular-nums">({segments.length})</span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setMobileTab('chat')}
+              className={`flex-1 h-10 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-colors cursor-pointer relative ${
+                mobileTab === 'chat'
+                  ? 'bg-[#EBF2FF] text-[#1456F0]'
+                  : 'text-[#4E5969] hover:bg-[#F2F3F5]'
+              }`}
+            >
+              <MessageSquareText className="w-4 h-4 shrink-0" />
+              <span>课堂问答</span>
+              {isAiSending && (
+                <span className="w-2 h-2 rounded-full bg-[#1456F0] animate-pulse" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void markConfusedNow()}
+              aria-label="标记此处没听懂"
+              className="h-10 px-3 rounded-xl border border-[#DEE0E3] bg-[#F8F9FA] active:bg-[#EBF2FF] text-[#1F2329] text-[14px] font-medium inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
+            >
+              <BookmarkPlus className="w-4 h-4 text-[#1456F0]" />
+              <span>标不懂</span>
+            </button>
+          </nav>
+        </>
+      ) : (
         <div
-          role="separator"
-          aria-orientation="vertical"
-          onMouseDown={() => setIsDraggingSplit(true)}
-          className={`w-1.5 shrink-0 cursor-col-resize transition-colors relative group ${
-            isDraggingSplit
-              ? 'bg-[#1456F0]'
-              : 'bg-[#DEE0E3] hover:bg-[#3370FF]'
-          }`}
-        />
+          ref={containerRef}
+          className={`flex-1 flex min-h-0 ${isDraggingSplit ? 'select-none cursor-col-resize' : ''}`}
+        >
+          <div style={{ width: `${leftRatio}%` }} className="h-full min-w-0">
+            <ChatPanel />
+          </div>
 
-        <div style={{ width: `${100 - leftRatio}%` }} className="h-full min-w-0">
-          <TranscriptPanel />
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            onMouseDown={() => setIsDraggingSplit(true)}
+            className={`w-1.5 shrink-0 cursor-col-resize transition-colors relative group ${
+              isDraggingSplit
+                ? 'bg-[#1456F0]'
+                : 'bg-[#DEE0E3] hover:bg-[#3370FF]'
+            }`}
+          />
+
+          <div style={{ width: `${100 - leftRatio}%` }} className="h-full min-w-0">
+            <TranscriptPanel />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 浮动纸色课堂便签小窗口层 */}
       <StickyNotesLayer />

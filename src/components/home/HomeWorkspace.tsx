@@ -32,7 +32,7 @@ import { WindowControls } from '../ui/WindowControls';
 import { api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type { ClassSessionCard, FolderItem, SearchHitItem } from '../../types/domain';
-import { getDesktopBridge, isMacPlatform } from '../../utils/desktopBridge';
+import { getDesktopBridge, isAndroidPlatform, isMacPlatform } from '../../utils/desktopBridge';
 import { formatDuration, formatShortDate } from '../../utils/format';
 
 const HIT_KIND_LABELS: Record<SearchHitItem['kind'], string> = {
@@ -308,6 +308,9 @@ export const HomeWorkspace: React.FC = () => {
     });
   };
 
+  const isMac = isMacPlatform();
+  const isAndroid = isAndroidPlatform();
+
   const homeGridItems = useMemo<GridMenuItem[]>(
     () => [
       {
@@ -328,12 +331,16 @@ export const HomeWorkspace: React.FC = () => {
         icon: FolderPlus,
         onClick: () => void handleCreateFolderAndEdit(),
       },
-      {
-        id: 'grid-mini-sub',
-        label: '实时字幕',
-        icon: PictureInPicture2,
-        onClick: () => void toggleMiniOverlayWindow(),
-      },
+      ...(!isAndroid
+        ? [
+            {
+              id: 'grid-mini-sub',
+              label: '实时字幕',
+              icon: PictureInPicture2,
+              onClick: () => void toggleMiniOverlayWindow(),
+            },
+          ]
+        : []),
       {
         id: 'grid-settings',
         label: '系统设置',
@@ -341,10 +348,8 @@ export const HomeWorkspace: React.FC = () => {
         onClick: () => setSettingsOpen(true),
       },
     ],
-    [startNewClassroom, setImportAudioModalOpen, toggleMiniOverlayWindow, setSettingsOpen]
+    [isAndroid, startNewClassroom, setImportAudioModalOpen, toggleMiniOverlayWindow, setSettingsOpen]
   );
-
-  const isMac = isMacPlatform();
 
   const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
     if (e.target !== e.currentTarget) return;
@@ -363,22 +368,22 @@ export const HomeWorkspace: React.FC = () => {
       className="h-full flex flex-col bg-[#F5F6F7] text-[#1F2329] select-none overflow-hidden"
       onContextMenu={openCanvasContextMenu}
     >
-      {/* 顶部导航栏：macOS 风格左置红黄绿交通灯 / Windows 风格右置三键，支持无边框拖拽移动 */}
+      {/* 顶部导航栏：macOS 左置交通灯 / Windows 右置三键 / 移动端自动单行精简并下置搜索栏 */}
       <header
-        className={`border-b border-[#DEE0E3] flex items-center justify-between shrink-0 pywebview-drag-region ${
+        className={`border-b border-[#DEE0E3] flex items-center justify-between gap-2 shrink-0 pywebview-drag-region ${
           isMac
             ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
-            : 'h-16 bg-white pl-8 pr-4'
+            : 'h-14 md:h-16 bg-white px-4 md:pl-8 md:pr-4'
         }`}
         onContextMenu={(e) => e.stopPropagation()}
         onDoubleClick={handleHeaderDoubleClick}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0">
           {isMac && <WindowControls />}
           <button
             type="button"
             onClick={() => setCurrentFolderId(null)}
-            className="flex items-center gap-2.5 cursor-pointer focus:outline-none group"
+            className="flex items-center gap-2 md:gap-2.5 cursor-pointer focus:outline-none group shrink-0"
           >
             <BrandLogoIcon className="w-7 h-7" />
             <span className="text-[17px] font-semibold tracking-tight text-[#1F2329] group-hover:text-[#1456F0] transition-colors">
@@ -388,22 +393,22 @@ export const HomeWorkspace: React.FC = () => {
 
           {activeFolder && (
             <>
-              <ChevronRight className="w-4 h-4 text-[#8F959E]" strokeWidth={1.8} />
-              <span className="text-[16px] font-medium text-[#1456F0]">
+              <ChevronRight className="w-4 h-4 text-[#8F959E] shrink-0" strokeWidth={1.8} />
+              <span className="text-[15px] md:text-[16px] font-medium text-[#1456F0] truncate">
                 {activeFolder.name}
               </span>
               <IconButton
                 icon={CornerLeftUp}
                 tooltip="返回主目录"
                 onClick={() => setCurrentFolderId(activeFolder.parentId)}
-                className="ml-1"
+                className="ml-0.5 shrink-0"
               />
             </>
           )}
         </div>
 
-        <div className="flex items-center gap-2.5 app-no-drag">
-          <div className="flex items-center gap-2 h-10 w-72 rounded-lg border border-[#DEE0E3] bg-[#F5F6F7]/70 px-3.5 focus-within:bg-white focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all">
+        <div className="flex items-center gap-2 md:gap-2.5 app-no-drag shrink-0">
+          <div className="hidden md:flex items-center gap-2 h-10 w-72 rounded-lg border border-[#DEE0E3] bg-[#F5F6F7]/70 px-3.5 focus-within:bg-white focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all">
             <Search className="w-4 h-4 text-[#646A73] shrink-0" strokeWidth={1.8} />
             <input
               type="text"
@@ -426,9 +431,23 @@ export const HomeWorkspace: React.FC = () => {
         </div>
       </header>
 
+      {/* 移动端专属全局搜索条（桌面端 >= 768px 自动隐藏） */}
+      <div className="md:hidden border-b border-[#ECEEF2] bg-white px-4 py-2.5 shrink-0">
+        <div className="flex items-center gap-2 h-10 w-full rounded-lg border border-[#DEE0E3] bg-[#F5F6F7]/80 px-3 focus-within:bg-white focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all">
+          <Search className="w-4 h-4 text-[#646A73] shrink-0" strokeWidth={1.8} />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="搜索课堂标题、转写、便签或问答..."
+            className="w-full bg-transparent text-[14px] text-[#1F2329] placeholder-[#646A73] focus:outline-none"
+          />
+        </div>
+      </div>
+
       {/* 主体卡片工作区：内部独立滚动，外框保持自定义圆角 */}
       <div className="flex-1 overflow-y-auto">
-        <main className="max-w-7xl w-full mx-auto px-8 py-8 space-y-6">
+        <main className="max-w-7xl w-full mx-auto px-4 py-5 md:px-8 md:py-8 space-y-5 md:space-y-6">
         {searchQuery.trim().length > 0 && (
           <section className="rounded-xl border border-[#DEE0E3] bg-white p-5 space-y-3 shadow-xs">
             <div className="flex items-center justify-between">

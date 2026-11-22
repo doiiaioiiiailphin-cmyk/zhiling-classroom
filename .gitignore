@@ -16,3 +16,11 @@ __pycache__/
 *.tsbuildinfo
 *.sqlite*
 *.db
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/*.aar
+android/app/src/main/assets/www/
+android/local.properties
+android/**/*.keystore
+android/**/*.jks

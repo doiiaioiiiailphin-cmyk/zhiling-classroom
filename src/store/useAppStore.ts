@@ -7,7 +7,13 @@ let nextStickyNoteJumpSeq = 0;
 import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
 import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
-import { getDefaultDesktopHotkeys, getDesktopBridge } from '../utils/desktopBridge';
+import {
+  captureAndroidBlackboardPhoto,
+  getAndroidBridge,
+  getDefaultDesktopHotkeys,
+  getDesktopBridge,
+  isAndroidPlatform,
+} from '../utils/desktopBridge';
 import type {
   Aec3AddonStatus,
   Aec3DownloadProgress,
@@ -1278,7 +1284,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
       if (nextStatus === 'recording') {
         const cfg = get().settings;
-        const isDualTalk = Boolean(cfg ? cfg.micEnabled && cfg.systemAudioEnabled : false);
+        const isDualTalk = Boolean(
+          !isAndroidPlatform() && (cfg ? cfg.micEnabled && cfg.systemAudioEnabled : false)
+        );
         await guardFirstDualTalk(isDualTalk, executeToggle);
       } else {
         await executeToggle();
@@ -1659,6 +1667,19 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         '课堂笔记';
       try {
         const { blob, filename } = await api.exportSessionDocument(sessionId, req, title);
+        const androidBridge = getAndroidBridge();
+        if (androidBridge?.shareExportedFile) {
+          const b64 = await blobToBase64(blob);
+          const shared = androidBridge.shareExportedFile(
+            filename,
+            blob.type || 'application/octet-stream',
+            b64
+          );
+          if (shared) {
+            showNotice('info', `已打开系统分享面板：${filename}`);
+            return;
+          }
+        }
         const bridge = getDesktopBridge();
         if (bridge?.save_exported_file) {
           const b64 = await blobToBase64(blob);
@@ -1925,6 +1946,36 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       const latestSegId = get().segments[get().segments.length - 1]?.id;
       const timestampMs = session.durationSeconds * 1000;
       try {
+        // Android 原生壳：一键拉起手机相机拍黑板/PPT 并锚定当前时间戳
+        if (getAndroidBridge()?.captureBlackboardPhoto) {
+          const photo = await captureAndroidBlackboardPhoto();
+          if (!photo || photo.cancelled) return null;
+          if (photo.error || !photo.base64) {
+            showNotice('error', photo.error || '拍摄板书失败，请重试');
+            return null;
+          }
+          const binary = atob(photo.base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: photo.mimeType || 'image/jpeg' });
+          const created = await api.uploadAttachment(session.id, blob, {
+            fileName: photo.fileName || `blackboard_${Date.now()}.jpg`,
+            kind: 'screenshot',
+            segmentId: latestSegId,
+            timestampMs,
+            caption,
+          });
+          set((state) => ({
+            attachments: state.attachments.some((a) => a.id === created.id)
+              ? state.attachments
+              : [...state.attachments, created],
+          }));
+          showNotice('info', `已拍摄板书并锚定至 [${created.timestampText ?? '00:00'}]`);
+          return created;
+        }
+
         const sharedBlob = await classroomSocket.captureSharedVideoFrame();
         let created: SessionAttachmentItem;
         if (sharedBlob) {

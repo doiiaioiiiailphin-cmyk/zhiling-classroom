@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   getDesktopBridge,
+  isAndroidPlatform,
   isDesktopShell,
   type DesktopWindowOpMode,
   type DesktopWindowTarget,
@@ -29,7 +30,7 @@ const HANDLES: HandleSpec[] = [
 
 export const WindowResizeHandles: React.FC<WindowResizeHandlesProps> = React.memo(
   ({ target, disabled = false }) => {
-    if (disabled || !isDesktopShell()) {
+    if (disabled || !isDesktopShell() || isAndroidPlatform()) {
       return null;
     }
 

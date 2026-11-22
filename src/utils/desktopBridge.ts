@@ -1,7 +1,66 @@
+import { useEffect, useState } from 'react';
 import type { DesktopHotkeys } from '../types/domain';
 
 export type DesktopWindowTarget = 'main' | 'mini';
-export type DesktopPlatform = 'macos' | 'windows' | 'web';
+export type DesktopPlatform = 'macos' | 'windows' | 'android' | 'web';
+
+export interface AndroidBridgeRaw {
+  getAppVersion?: () => string;
+  hasRecordPermission?: () => boolean;
+  requestRecordPermission?: (callbackId: string) => void;
+  captureBlackboardPhoto?: (callbackId: string) => void;
+  shareExportedFile?: (fileName: string, mimeType: string, contentBase64: string) => boolean;
+}
+
+export interface AndroidCameraResult {
+  fileName?: string;
+  mimeType?: string;
+  base64?: string;
+  cancelled?: boolean;
+  error?: string;
+}
+
+const androidCallbacks = new Map<string, (payloadJson: string) => void>();
+let androidCallbackSeq = 0;
+
+if (typeof window !== 'undefined') {
+  (window as unknown as { __zhilingAndroidResolve?: (id: string, json: string) => void }).__zhilingAndroidResolve = (
+    id: string,
+    payloadJson: string
+  ) => {
+    const fn = androidCallbacks.get(id);
+    if (fn) {
+      androidCallbacks.delete(id);
+      fn(payloadJson);
+    }
+  };
+}
+
+function invokeAndroidCallback<T>(trigger: (cbId: string) => void, timeoutMs = 60_000): Promise<T | null> {
+  return new Promise((resolve) => {
+    const cbId = `acb_${Date.now()}_${++androidCallbackSeq}`;
+    const timer = window.setTimeout(() => {
+      if (androidCallbacks.delete(cbId)) {
+        resolve(null);
+      }
+    }, timeoutMs);
+    androidCallbacks.set(cbId, (rawJson) => {
+      window.clearTimeout(timer);
+      try {
+        resolve(JSON.parse(rawJson) as T);
+      } catch {
+        resolve(null);
+      }
+    });
+    try {
+      trigger(cbId);
+    } catch {
+      window.clearTimeout(timer);
+      androidCallbacks.delete(cbId);
+      resolve(null);
+    }
+  });
+}
 export type DesktopWindowOpMode =
   | 'move'
   | 'n'
@@ -60,13 +119,17 @@ export const IS_DESKTOP_SHELL_PARAM =
 export function getDesktopPlatform(): DesktopPlatform {
   if (typeof window === 'undefined') return 'web';
   const param = new URLSearchParams(window.location.search).get('platform')?.toLowerCase();
+  if (param === 'android') return 'android';
   if (param === 'macos' || param === 'mac' || param === 'darwin') return 'macos';
   if (param === 'windows' || param === 'win' || param === 'win32') return 'windows';
+
+  if (getAndroidBridge()) return 'android';
 
   const nav = window.navigator as Navigator & {
     userAgentData?: { platform?: string };
   };
   const uaPlatform = (nav.userAgentData?.platform || nav.platform || nav.userAgent || '').toLowerCase();
+  if (uaPlatform.includes('android')) return 'android';
   if (uaPlatform.includes('mac')) return 'macos';
   if (uaPlatform.includes('win')) return 'windows';
   return 'web';
@@ -74,6 +137,54 @@ export function getDesktopPlatform(): DesktopPlatform {
 
 export function isMacPlatform(): boolean {
   return getDesktopPlatform() === 'macos';
+}
+
+export function isAndroidPlatform(): boolean {
+  return getDesktopPlatform() === 'android';
+}
+
+export function getAndroidBridge(): AndroidBridgeRaw | null {
+  if (typeof window === 'undefined') return null;
+  const win = window as unknown as { ZhilingAndroid?: AndroidBridgeRaw };
+  return win.ZhilingAndroid ?? null;
+}
+
+export async function requestAndroidRecordPermission(): Promise<boolean> {
+  const bridge = getAndroidBridge();
+  if (!bridge) return true;
+  if (bridge.hasRecordPermission?.()) return true;
+  if (!bridge.requestRecordPermission) return true;
+  const res = await invokeAndroidCallback<{ granted?: boolean }>((cbId) =>
+    bridge.requestRecordPermission?.(cbId)
+  );
+  return Boolean(res?.granted);
+}
+
+export async function captureAndroidBlackboardPhoto(): Promise<AndroidCameraResult | null> {
+  const bridge = getAndroidBridge();
+  if (!bridge?.captureBlackboardPhoto) return null;
+  return invokeAndroidCallback<AndroidCameraResult>(
+    (cbId) => bridge.captureBlackboardPhoto?.(cbId),
+    120_000
+  );
+}
+
+export function useIsMobileViewport(): boolean {
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 768;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(max-width: 767px)');
+    const sync = () => setIsMobile(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+
+  return isMobile;
 }
 
 export function getPasteShortcutLabel(): string {

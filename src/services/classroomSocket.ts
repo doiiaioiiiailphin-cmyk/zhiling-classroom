@@ -1,5 +1,10 @@
 import type { AppSettings, ClassroomClientCommand, ClassroomServerEvent } from '../types/domain';
 import { useAppStore } from '../store/useAppStore';
+import {
+  getAndroidBridge,
+  isAndroidPlatform,
+  requestAndroidRecordPermission,
+} from '../utils/desktopBridge';
 import { IS_MOCK_MODE } from './api';
 import {
   ClassroomAudio,
@@ -116,10 +121,23 @@ export class ClassroomSocketClient {
     };
     socket.onmessage = ({ data }) => {
       if (this.connection !== connection || typeof data !== 'string') return;
-      let event: ClassroomServerEvent;
+      type IncomingEvent =
+        | ClassroomServerEvent
+        | { type: 'audio.telemetry'; payload?: { micLevel?: number; sysLevel?: number } };
+      let event: IncomingEvent;
       try {
-        event = JSON.parse(data) as ClassroomServerEvent;
+        event = JSON.parse(data) as IncomingEvent;
       } catch {
+        return;
+      }
+      if (event.type === 'audio.telemetry') {
+        this.emitTelemetry({
+          micLevel: Number(event.payload?.micLevel ?? 0),
+          sysLevel: Number(event.payload?.sysLevel ?? 0),
+          aec3Active: false,
+          aec3Ready: false,
+          activeSysMode: 'none',
+        });
         return;
       }
       if (event.type === 'error') {
@@ -159,6 +177,39 @@ export class ClassroomSocketClient {
   sendCommand(command: ClassroomClientCommand): void {
     let connection = this.connection;
     if (IS_MOCK_MODE || !connection) return;
+
+    // Android 原生壳：录音采集、WAV 写盘与 SenseVoice 转写全部由 ForegroundService 原生接管，锁屏 3 小时不掉线
+    if (isAndroidPlatform() && getAndroidBridge()) {
+      if (command.type === 'recording.start' || command.type === 'recording.resume') {
+        if (connection.socket.readyState >= WebSocket.CLOSING) {
+          this.connect(connection.sessionId, connection.onEvent);
+          connection = this.connection!;
+        }
+        const activeConn = connection;
+        activeConn.intent = command;
+        void requestAndroidRecordPermission().then((granted) => {
+          if (this.connection !== activeConn) return;
+          if (!granted) {
+            activeConn.intent = null;
+            this.report(activeConn, 'MIC_PERMISSION_DENIED', '请授予麦克风录音权限后再开始录课');
+            return;
+          }
+          if (activeConn.socket.readyState === WebSocket.OPEN) {
+            activeConn.socket.send(JSON.stringify(command));
+            activeConn.recording = true;
+          }
+        });
+        return;
+      }
+      connection.intent = null;
+      connection.recording = false;
+      this.emitTelemetry(IDLE_TELEMETRY);
+      if (connection.socket.readyState === WebSocket.OPEN) {
+        connection.socket.send(JSON.stringify(command));
+      }
+      return;
+    }
+
     if (command.type === 'recording.start' || command.type === 'recording.resume') {
       if (connection.socket.readyState >= WebSocket.CLOSING) {
         this.connect(connection.sessionId, connection.onEvent);
@@ -260,6 +311,13 @@ export class ClassroomSocketClient {
     settings: AppSettings,
     options?: { forceRepickSystem?: boolean }
   ): Promise<void> {
+    if (isAndroidPlatform() && getAndroidBridge()) {
+      const ws = this.connection?.socket;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'mic.mute', payload: { muted: !settings.micEnabled } }));
+      }
+      return Promise.resolve();
+    }
     const capture = this.connection?.capture;
     if (!capture) return Promise.resolve();
     return capture.reconfigure(resolveRuntimeAudioSettings(settings), options);
@@ -307,9 +365,16 @@ export class ClassroomSocketClient {
       connection !== this.connection ||
       connection.socket.readyState !== WebSocket.OPEN ||
       !connection.intent ||
-      !connection.capture ||
       connection.recording
     ) {
+      return;
+    }
+    if (isAndroidPlatform() && getAndroidBridge()) {
+      connection.socket.send(JSON.stringify(connection.intent));
+      connection.recording = true;
+      return;
+    }
+    if (!connection.capture) {
       return;
     }
     connection.socket.send(JSON.stringify(connection.intent));
