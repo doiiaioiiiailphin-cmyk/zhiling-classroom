@@ -401,14 +401,14 @@ class BackendTests(unittest.TestCase):
             sid = self.create_session(client)
             u1, _ = client.portal.call(repo.save_final, sid, "0", "我们先学增广矩阵的初等行变换", 0, 1000)
             u2, _ = client.portal.call(repo.save_final, sid, "0", "嗯。", 1000, 1200)
-            u3, _ = client.portal.call(repo.save_final, sid, "0", "对。", 1200, 1400)
+            u3, _ = client.portal.call(repo.save_final, sid, "0", "呃，啊……", 1200, 1400)
             u4, _ = client.portal.call(repo.save_final, sid, "0", "再把增广矩阵用于列昂惕夫模型求解", 1400, 2400)
             u5, _ = client.portal.call(repo.save_final, sid, "0", "由此得到列昂惕夫模型的均衡产出解", 2400, 3400)
 
             parsed_settings = AppSettings.model_validate(settings)
             # 先对首句提取出「增广矩阵」
             client.portal.call(pipeline.highlight, sid, u1.utterance.id, parsed_settings)
-            # 再对积压批次（含 2 条语气词 + 2 条实质句）执行批量处理
+            # 再对积压批次（含 2 条纯语气词 + 2 条实质句）执行批量处理
             substantive = client.portal.call(
                 pipeline._filter_fillers,
                 [u2.utterance.id, u3.utterance.id, u4.utterance.id, u5.utterance.id],
@@ -416,7 +416,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(substantive, [u4.utterance.id, u5.utterance.id])
             client.portal.call(pipeline.process_batch, sid, substantive, parsed_settings)
 
-            # 验证：2 条语气词零调用；2 条实质句合并为 1 次批量校对 + 并发执行的 1 次批量分段与 1 次增量重点词提取（共仅 3 次调用）
+            # 验证：2 条纯语气词零调用；2 条实质句合并为 1 次批量校对 + 并发执行的 1 次批量分段与 1 次增量重点词提取（共仅 3 次调用）
             self.assertEqual(calls_by_model[:2], ["highlight", "correct"])
             self.assertCountEqual(calls_by_model[2:], ["segment", "highlight"])
             ws = client.get(f"/api/v1/sessions/{sid}/workspace").json()["data"]
@@ -424,7 +424,7 @@ class BackendTests(unittest.TestCase):
             # 验证增量合并：前句的「增广矩阵」与后句新增的「列昂惕夫模型」同时保留，不被覆盖清空
             self.assertEqual(terms, ["列昂惕夫模型", "增广矩阵"])
 
-    def test_aggressive_sentence_correction_clears_fillers_and_skips_downstream(self):
+    def test_filler_only_sentence_correction_preserves_fragments_and_blocks_expansion(self):
         calls: list[tuple[str, dict]] = []
 
         def upstream(request: httpx.Request):
@@ -433,12 +433,18 @@ class BackendTests(unittest.TestCase):
             payload = json.loads(body["messages"][-1]["content"])
             calls.append((model, payload))
             if model == "correct":
-                if "就是说" in payload["rawText"] and "增广矩阵" not in payload["rawText"]:
+                raw = payload["rawText"]
+                if raw == "所以我们把矩阵":
+                    # 模拟模型违背指令企图自动补全句子 -> 应被护栏拦截并保留原残句
+                    res = {"refinedText": "所以我们把矩阵做初等行变换，然后求出它的逆矩阵。"}
+                elif raw == "然后它的特征值":
+                    # 模拟模型违背指令企图删除不完整半句 -> 应被护栏拦截并保留原残句
                     res = {"refinedText": ""}
                 else:
-                    res = {"refinedText": "这个矩阵称为增广矩阵，把这一列劈开后左侧称为系数矩阵。"}
+                    # 正常仅删除语气词
+                    res = {"refinedText": "这个矩阵，叫增广矩阵，把这一列劈开。"}
             elif model == "segment":
-                res = {"action": "append_to_last", "updatedTopicTitle": "增广矩阵与系数矩阵"}
+                res = {"action": "append_to_last", "updatedTopicTitle": "增广矩阵与特征值"}
             else:
                 res = {"highlights": [{"term": "增广矩阵", "explanation": GLOSS}]}
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(res, ensure_ascii=False)}}]})
@@ -447,7 +453,7 @@ class BackendTests(unittest.TestCase):
             repo = client.app.state.repo
             pipeline = client.app.state.streams.pipeline
             settings = client.get("/api/v1/settings").json()["data"]
-            settings["llmProviders"]["openai"]["apiKey"] = "aggressive-test-key"
+            settings["llmProviders"]["openai"]["apiKey"] = "filler-only-test-key"
             for feature, model in [
                 ("sentenceCorrection", "correct"),
                 ("resegmentation", "segment"),
@@ -456,20 +462,13 @@ class BackendTests(unittest.TestCase):
             ]:
                 settings["featureRouting"][feature].update(providerId="openai", modelId=model)
             self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
-            parsed_settings = AppSettings.model_validate(settings)
 
             sid = self.create_session(client)
-            u_filler, _ = client.portal.call(repo.save_final, sid, "0", "看到了吗？", 0, 500)
-            u_empty_tic, _ = client.portal.call(
-                repo.save_final, sid, "0", "那个，就是说，你看听懂了没？对不对？", 500, 1500,
-            )
+            u_pure_filler, _ = client.portal.call(repo.save_final, sid, "0", "嗯，呃啊……", 0, 400)
+            u_frag_expand, _ = client.portal.call(repo.save_final, sid, "0", "所以我们把矩阵", 400, 1000)
+            u_frag_delete, _ = client.portal.call(repo.save_final, sid, "0", "然后它的特征值", 1000, 1600)
             u_real, _ = client.portal.call(
-                repo.save_final,
-                sid,
-                "0",
-                "那么这个阵呢就叫正光矩阵，看见没？要把阵把这一列劈开，这个被称之为叫系数阵。",
-                1500,
-                3500,
+                repo.save_final, sid, "0", "嗯，这个矩阵呢，啊，叫增广矩阵，把这一列劈开。", 1600, 3200,
             )
 
             published: list[tuple[str, dict]] = []
@@ -484,27 +483,27 @@ class BackendTests(unittest.TestCase):
             orig_publish = pipeline.publish
             pipeline.publish = capture_publish
             try:
-                # 1. 短口头词通过真实队列快速清空并广播空 refinedText，不调用上游 LLM
-                client.portal.call(submit_and_drain, u_filler.utterance.id)
+                # 1. 纯语气词快速清空并广播空 refinedText，零 LLM 调用
+                client.portal.call(submit_and_drain, u_pure_filler.utterance.id)
                 self.assertEqual(calls, [])
                 self.assertEqual(published[-1][0], "utterance.corrected")
                 self.assertEqual(published[-1][1]["refinedText"], "")
 
-                # 2. 长废话句经校对清空为 "" 后，跳过无意义的分段与重点词调用
-                client.portal.call(submit_and_drain, u_empty_tic.utterance.id)
-                self.assertEqual([m for m, _ in calls], ["correct"])
-
-                # 3. 含口头重复与同音别字的实质句正常精简，且前序已清空的废话句不污染上下文
+                # 2. 半句残片：模型企图自动补全时被护栏拦截，原样保留残句
+                client.portal.call(submit_and_drain, u_frag_expand.utterance.id)
+                # 3. 半句残片：模型企图删成 "" 时被护栏拦截，原样保留残句
+                client.portal.call(submit_and_drain, u_frag_delete.utterance.id)
+                # 4. 含语气词的正常句：仅清除语气词，主体完整保留
                 client.portal.call(submit_and_drain, u_real.utterance.id)
-                self.assertEqual([m for m, _ in calls], ["correct", "correct", "segment", "highlight"])
-                self.assertEqual(calls[1][1]["previousUtterances"], [])
-                self.assertIn("topicTitle", calls[1][1])
             finally:
                 pipeline.publish = orig_publish
 
             ws = client.get(f"/api/v1/sessions/{sid}/workspace").json()["data"]
             utts = ws["segments"][0]["utterances"]
-            self.assertEqual([u["refinedText"] for u in utts], ["", "", "这个矩阵称为增广矩阵，把这一列劈开后左侧称为系数矩阵。"])
+            self.assertEqual(
+                [u["refinedText"] for u in utts],
+                ["", "所以我们把矩阵", "然后它的特征值", "这个矩阵，叫增广矩阵，把这一列劈开。"],
+            )
             self.assertTrue(all(u["isRefined"] for u in utts))
 
     def test_model_routes_dispatch_and_return_plain_id_arrays(self):

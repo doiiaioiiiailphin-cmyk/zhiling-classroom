@@ -236,7 +236,7 @@ export const AI_MODULE_META_LIST: AIModuleMeta[] = [
   },
   {
     key: 'sentenceCorrection',
-    title: '逐句错别字与语句智能修正',
+    title: '逐句智能消除语气词',
     thinkingLabel: '思考：关闭',
     thinkingActive: false,
     canToggle: true,

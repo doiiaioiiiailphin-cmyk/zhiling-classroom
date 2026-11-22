@@ -26,20 +26,53 @@ logger = logging.getLogger(__name__)
 Publish = Callable[[str, str, dict], Awaitable[bool]]
 AUTOMATIC_FEATURES: tuple[Feature, ...] = ("sentenceCorrection", "resegmentation", "keyTermHighlight")
 
-SHORT_FILLER_WORDS = frozenset({
-    "嗯", "嗯嗯", "啊", "啊啊", "哦", "噢", "呃", "额", "欸", "诶", "唉", "哎", "哎呀", "哇", "哈",
-    "对", "对对", "对啊", "对的", "对吧", "好", "好的", "好吧", "好嘞", "是", "是的", "是啊", "是吧",
-    "行", "行吧", "可以", "没错", "哈哈", "呵呵", "你看", "来看", "大家看", "看见没", "看到了吗",
-    "听懂了吗", "听懂了没", "明白了吗", "明白吧", "是不是", "对不对", "那个", "这个", "然后", "就是",
+PURE_FILLER_PARTICLES = frozenset({
+    "嗯", "啊", "哦", "噢", "呃", "额", "欸", "诶", "唉", "哎",
+    "哇", "哈", "呵", "呐", "呀", "呢", "吧", "嘛", "哼", "嘶",
+    "唔", "呦", "哟", "咦", "呜", "嘿", "喂",
 })
+PURE_ENGLISH_FILLERS = frozenset({"um", "umm", "uh", "uhh", "er", "erm", "hm", "hmm", "ah", "ahh", "oh"})
 PUNCT_STRIP_RE = re.compile(r"[\s，。！？、；：,.!?;:…—\-~～“”‘’\"'（）()【】\[\]]+")
 
 
 def is_trivial_filler(text: str) -> bool:
+    """仅当整句去掉标点与空白后全部由纯语气/停顿词构成时才视为空无效句；绝不误删任何实词或半句残片。"""
     stripped = PUNCT_STRIP_RE.sub("", text or "")
     if not stripped:
         return True
-    return len(stripped) <= 5 and stripped in SHORT_FILLER_WORDS
+    if stripped.lower() in PURE_ENGLISH_FILLERS:
+        return True
+    return all(ch in PURE_FILLER_PARTICLES for ch in stripped)
+
+
+def _guard_filler_only_correction(raw_text: str, candidate: str) -> str:
+    """代码级兜底护栏：防止模型误删不完整残句或擅自补全/扩写原文。"""
+    raw = (raw_text or "").strip()
+    refined = (candidate or "").strip()
+    if not raw:
+        return ""
+    if not refined:
+        return "" if is_trivial_filler(raw) else raw
+    raw_core = PUNCT_STRIP_RE.sub("", raw)
+    refined_core = PUNCT_STRIP_RE.sub("", refined)
+    if len(refined_core) > len(raw_core) + 1:
+        logger.info(
+            "Sentence correction attempted auto-completion (%d -> %d chars); preserving rawText",
+            len(raw_core),
+            len(refined_core),
+        )
+        return raw
+    raw_non_filler = "".join(ch for ch in raw_core if ch not in PURE_FILLER_PARTICLES)
+    refined_non_filler = "".join(ch for ch in refined_core if ch not in PURE_FILLER_PARTICLES)
+    if raw_non_filler and len(refined_non_filler) < max(1, int(len(raw_non_filler) * 0.85)):
+        logger.info(
+            "Sentence correction over-deleted non-filler text (%d -> %d chars); preserving rawText",
+            len(raw_non_filler),
+            len(refined_non_filler),
+        )
+        return raw
+    return refined
+
 
 FEATURE_THINKING: dict[Feature, ThinkingLevel] = {
     "chat": "max",
@@ -51,17 +84,14 @@ FEATURE_THINKING: dict[Feature, ThinkingLevel] = {
 
 INSTRUCTIONS = {
     "sentenceCorrection": (
-        "你是激进的课堂语音转写精简与书面化编辑。结合 topicTitle 与 previousUtterances 的学科语境，"
-        "将当前 rawText 深度清洗为紧凑、通顺、规范的书面语句：\n"
-        "1. 删净语气词与停顿词：彻底删除「嗯、啊、呃、哦、噢、哎、唉、呢、吧、嘛、呀、哈、呐」等口语助词。\n"
-        "2. 删净口头禅与互动废话：彻底删除无实质信息的口头词与课堂确认语，如「那个、这个这个、就是、就是说、"
-        "然后呢、其实呢、你看、大家看、看见没、看到了吗、我问你、听懂了没、明白吧、是不是、对不对、好吧、行吧」等；"
-        "将「被称之为叫」等冗余表达精简为「称为」。\n"
-        "3. 果断合并重复与口误折返：删除结巴、词语或半句的反复重复、说错重来的残句，只保留说话人最终想表达的完整意思"
-        "（例如「要把阵把这一列劈开」改为「把这一列劈开」；「用方程组就不用方程组，方程组太太麻烦了」改为「用方程组太麻烦了」）。\n"
-        "4. 纯无效句直接清空：若整句 rawText 仅由语气词、口头禅、确认语或无意义残片组成，不含任何实质学科信息，refinedText 直接输出空字符串 \"\"。\n"
-        "5. 专业纠错与标点重排：修正同音别字、专业术语与公式/代码大小写；重新梳理断句并使用规范中文书面标点（逗号、句号、分号、问号、冒号），消除碎句与一逗到底。\n"
-        "6. 严守事实边界：完整保留原句实质含义，严禁编造事实或跨句扩写，refinedText 仅对应当前句。"
+        "你只负责清除课堂语音转写 rawText 中的纯语气词，必须绝对忠实保留原文内容与残句原貌：\n"
+        "1. 仅消除语气词：只删除「嗯、啊、呃、额、哦、噢、哎、唉、欸、诶、哎呀、哇、哈、呐、嘛、呀、呢、吧」等无实际语义的口语语气/停顿词，"
+        "删除后仅清理残留的多余连续逗号或空格。\n"
+        "2. 严禁自动补全语句或扩写：即使 rawText 是说到一半的半句、缺少主语/谓语/宾语或突然中断（因为语音识别常把一句完整的话切分到前后多条句子中），"
+        "也绝对禁止根据上下文自动补全、续写、改写或添加任何原文未说出的词语。\n"
+        "3. 严禁删除不完整的语句：严禁把半句、残片、短语、连接词（如「然后」「所以」「那么」「但是」「就是」「这个」「对」「好」等）清空为 \"\"。"
+        "只有当整条 rawText 全部由纯语气词和标点组成、删去语气词后不剩任何实词时，refinedText 才输出空字符串 \"\"。\n"
+        "4. 保持原貌：不要书面化改写，不要调整语序，不要删改重复表达或任何非语气词内容。"
     ),
     "resegmentation": (
         "你整理课堂知识段落。依据最近两个段落与最新句子的语义连续性，"
@@ -82,13 +112,13 @@ INSTRUCTIONS = {
 }
 
 BATCH_CORRECTION_INSTRUCTION = (
-    "你是激进的课堂语音转写精简与书面化编辑。结合 topicTitle、previousUtterances 与按时间顺序排列的 utterances 列表，"
-    "逐条将每句 rawText 深度清洗为紧凑、通顺、规范的书面语句，输出对应 utteranceId 的 refinedText：\n"
-    "1. 彻底删除语气词（嗯、啊、呃、哦、哎、呢、吧、嘛等）及无实质信息的口头禅/课堂确认语"
-    "（那个、就是说、你看、大家看、看见没、听懂了没、我问你、是不是、对不对、好吧等）；将「被称之为叫」精简为「称为」。\n"
-    "2. 果断删除结巴、词语或半句的反复重复及说错重来的残句，仅保留最终完整意思，并重新梳理规范中文书面标点。\n"
-    "3. 若某句仅由语气词、口头禅或无意义残片组成，不含任何实质学科信息，该条 refinedText 直接输出空字符串 \"\"。\n"
-    "4. 修正同音别字与专业术语；保持每条 utteranceId 独立对应本句内容，严禁跨句合并或编造事实。"
+    "你只负责逐条清除 utterances 列表中每句 rawText 的纯语气词，输出对应 utteranceId 的 refinedText，必须绝对忠实保留原文：\n"
+    "1. 仅消除语气词：只删除「嗯、啊、呃、额、哦、噢、哎、唉、欸、诶、哎呀、哇、哈、呐、嘛、呀、呢、吧」等无实际语义的口语语气/停顿词，"
+    "删除后仅清理多余的连续标点。\n"
+    "2. 严禁自动补全、改写或扩写：即使某条 rawText 是不完整的半句或残片（因为语音识别常把一句完整的话切分到不同条中），"
+    "也必须原样保留主体文字，严禁补全缺失成分、续写下文或借用前后句内容补写。\n"
+    "3. 严禁删除不全的语句：只有当整条 rawText 全部由纯语气词与标点组成、删完不剩任何文字时，该条 refinedText 才输出空字符串 \"\"；"
+    "任何包含实词、连接词、短语或半句残片的条目都必须保留原主体内容。"
 )
 
 BATCH_RESEGMENT_INSTRUCTION = (
@@ -759,10 +789,11 @@ class TranscriptPipeline:
         if hotwords:
             context["hotwords"] = hotwords[:120]
         result = await self.ai.structured(settings, "sentenceCorrection", context, Correction, session_id=session_id)
+        safe_refined = _guard_filler_only_correction(str(context.get("rawText") or ""), result.refined_text)
         async with self.ai.locks.get("transcript:" + session_id):
-            segment_id, highlights = await self.repo.save_correction(utterance_id, result.refined_text)
+            segment_id, highlights = await self.repo.save_correction(utterance_id, safe_refined)
             await self.publish(session_id, "utterance.corrected", CorrectedEvent(
-                segment_id=segment_id, utterance_id=utterance_id, refined_text=result.refined_text,
+                segment_id=segment_id, utterance_id=utterance_id, refined_text=safe_refined,
             ).wire())
             if highlights is not None:
                 await self.publish(session_id, "highlights.updated", HighlightsEvent(
@@ -779,6 +810,11 @@ class TranscriptPipeline:
         hotwords = await self.ai.merged_hotwords(session_id, settings)
         if hotwords:
             context["hotwords"] = hotwords[:120]
+        raw_map = {
+            str(item.get("utteranceId") or ""): str(item.get("rawText") or "")
+            for item in (context.get("utterances") or [])
+            if isinstance(item, dict)
+        }
         model, binding = self.ai.adapter(settings, "sentenceCorrection")
         try:
             async with self.ai.capacity:
@@ -802,7 +838,7 @@ class TranscriptPipeline:
                 if uid not in refined_map:
                     missing_ids.append(uid)
                     continue
-                refined = refined_map[uid]
+                refined = _guard_filler_only_correction(raw_map.get(uid, ""), refined_map[uid])
                 segment_id, highlights = await self.repo.save_correction(uid, refined)
                 await self.publish(session_id, "utterance.corrected", CorrectedEvent(
                     segment_id=segment_id, utterance_id=uid, refined_text=refined,
