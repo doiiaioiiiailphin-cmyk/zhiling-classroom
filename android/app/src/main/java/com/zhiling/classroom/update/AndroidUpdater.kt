@@ -86,7 +86,8 @@ class AndroidUpdater(
             val size = obj["size_in_byte"]?.jsonPrimitive?.longOrNull
                 ?: obj["size"]?.jsonPrimitive?.longOrNull
                 ?: 0L
-            val sha = obj["hash"]?.jsonPrimitive?.contentOrNull
+            val sha = obj["hash_value"]?.jsonPrimitive?.contentOrNull
+                ?: obj["hash"]?.jsonPrimitive?.contentOrNull
                 ?: obj["sha256"]?.jsonPrimitive?.contentOrNull
                 ?: ""
             UpdateAssetInfo(name = name, sizeBytes = size, sha256 = sha, downloadUrl = downloadUrl)
