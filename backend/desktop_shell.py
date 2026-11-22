@@ -32,6 +32,14 @@ if sys.platform == "win32":
     from ctypes import wintypes
     # 必须在 WebView2 初始化前设置默认背景色为全透明 (Alpha=0)，彻底消除启动白屏闪烁与底色遮挡
     os.environ.setdefault("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "0")
+    # 规避 Edge WebView2 / Chromium 157 上游 Blink 缺陷 (crbug.com/549525849):
+    # 流式课堂字幕/AI 输出高频更新文本节点时，Windows UIA 触发的 ax_block_flow_iterator.cc::ComputeNeighborOnLine
+    # 会命中 CHECK 断言导致渲染进程 STATUS_BREAKPOINT (0x80000003) 崩溃白屏。
+    _wv2_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "").strip()
+    if "--disable-renderer-accessibility" not in _wv2_args:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            f"{_wv2_args} --disable-renderer-accessibility".strip()
+        )
 
 
 def _configure_tls_ca_bundle() -> None:
@@ -692,6 +700,31 @@ def main() -> None:
                             args.State = CoreWebView2PermissionState.Allow
 
                     core.PermissionRequested += _on_permission
+
+                    last_reload_at = [0.0]
+
+                    def _on_process_failed(_sender, args) -> None:
+                        kind = str(getattr(args, "ProcessFailedKind", "unknown"))
+                        reason = str(getattr(args, "Reason", ""))
+                        print(
+                            f"[WebView2] ProcessFailed kind={kind} reason={reason}; auto-reloading",
+                            flush=True,
+                        )
+                        now = time.monotonic()
+                        if now - last_reload_at[0] < 3.0:
+                            return
+                        last_reload_at[0] = now
+                        try:
+                            core.Reload()
+                        except Exception:
+                            pass
+
+                    try:
+                        core.ProcessFailed += _on_process_failed
+                        diag["processFailedHooked"] = True
+                    except Exception:
+                        diag["processFailedHooked"] = False
+
                     diag["configured"] = True
 
                 if not is_self_test:
@@ -1474,7 +1507,10 @@ def main() -> None:
             print("SELF_TEST_REPORT:", text)
             bridge.close_window()
 
-    webview_storage = app_home / ("wkwebview" if sys.platform == "darwin" else "webview2")
+    if is_self_test:
+        webview_storage = app_home / ("wkwebview_selftest" if sys.platform == "darwin" else "webview2_selftest")
+    else:
+        webview_storage = app_home / ("wkwebview" if sys.platform == "darwin" else "webview2")
     webview_storage.mkdir(parents=True, exist_ok=True)
     gui_backend = "cocoa" if sys.platform == "darwin" else "edgechromium"
 
