@@ -15,7 +15,8 @@ from .schemas import (
     ASRModelsRequest, Aec3AddonStatus, AppSettings, BookmarkNowRequest, CaptureScreenRequest, ChatMessage, ChatRequest,
     Data, FlashcardItem, FolderCreate, FolderItem, FolderRename, LLMModelsRequest,
     NativeAudioDevices, SearchHitItem, SegmentExplanation, SessionAttachmentItem, SessionCard, SessionCreate,
-    SessionExportRequest, SessionPatch, SpeakerRename, UpdateApplyResult, UpdateCheckResult,
+    SessionExportRequest, SessionPatch, SpeakerRename, StickyNoteBatchOpenPatch, StickyNoteCreate,
+    StickyNoteItem, StickyNotePatch, UpdateApplyResult, UpdateCheckResult,
     UtteranceItem, UtterancePatch, Workspace,
 )
 from .services.exporter import export_session_document
@@ -265,6 +266,38 @@ async def get_attachment_raw(sessionId: str, attachmentId: str, request: Request
 async def delete_attachment(sessionId: str, attachmentId: str, request: Request) -> Response:
     await request.app.state.attachments.remove(sessionId, attachmentId)
     await request.app.state.streams.publish(sessionId, "attachment.deleted", {"attachmentId": attachmentId})
+    return Response(status_code=204)
+
+
+@router.get("/sessions/{sessionId}/sticky-notes", response_model_exclude_unset=True)
+async def list_sticky_notes(sessionId: str, repo: Repo) -> Data[list[StickyNoteItem]]:
+    return Data(data=await repo.list_sticky_notes(sessionId))
+
+
+@router.post("/sessions/{sessionId}/sticky-notes", status_code=201, response_model_exclude_unset=True)
+async def create_sticky_note(
+    sessionId: str, body: StickyNoteCreate, repo: Repo,
+) -> Data[StickyNoteItem]:
+    return Data(data=await repo.create_sticky_note(sessionId, body))
+
+
+@router.patch("/sessions/{sessionId}/sticky-notes/{noteId}", response_model_exclude_unset=True)
+async def update_sticky_note(
+    sessionId: str, noteId: str, body: StickyNotePatch, repo: Repo,
+) -> Data[StickyNoteItem]:
+    return Data(data=await repo.update_sticky_note(sessionId, noteId, body))
+
+
+@router.patch("/sessions/{sessionId}/sticky-notes", response_model_exclude_unset=True)
+async def batch_toggle_sticky_notes(
+    sessionId: str, body: StickyNoteBatchOpenPatch, repo: Repo,
+) -> Data[list[StickyNoteItem]]:
+    return Data(data=await repo.set_all_sticky_notes_open(sessionId, body.is_open))
+
+
+@router.delete("/sessions/{sessionId}/sticky-notes/{noteId}", status_code=204)
+async def delete_sticky_note(sessionId: str, noteId: str, repo: Repo) -> Response:
+    await repo.delete_sticky_note(sessionId, noteId)
     return Response(status_code=204)
 
 

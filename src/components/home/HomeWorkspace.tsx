@@ -42,6 +42,7 @@ const HIT_KIND_LABELS: Record<SearchHitItem['kind'], string> = {
   highlight: '重点术语',
   note: '个人批注',
   chat: '课堂问答',
+  sticky_note: '课堂便签',
 };
 
 export const HomeWorkspace: React.FC = () => {

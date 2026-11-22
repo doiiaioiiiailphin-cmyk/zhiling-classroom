@@ -3,6 +3,7 @@ import { create } from 'zustand';
 let nextTranscriptFocusSeq = 0;
 let nextChatDraftPrefillSeq = 0;
 let nextAudioSeekSeq = 0;
+let nextStickyNoteJumpSeq = 0;
 import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
 import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
@@ -25,10 +26,19 @@ import type {
   SessionExportRequest,
   SessionStudyNote,
   SpeakerProfile,
+  StickyNoteCreateInput,
+  StickyNoteItem,
+  StickyNotePatchInput,
   UpdateCheckResult,
   UpdateDownloadProgress,
   UtterancePatch,
 } from '../types/domain';
+import {
+  computeCascadeStickyPosition,
+  computeSessionTimestampClaims,
+  formatStickyBracket,
+  reconcileNoteDraftTimestamps,
+} from '../utils/stickyNoteTimestamps';
 
 export interface AppUpdateState {
   status:
@@ -225,6 +235,13 @@ interface AppStoreState {
   studyNote: SessionStudyNote | null;
   flashcards: FlashcardItem[];
   attachments: SessionAttachmentItem[];
+  stickyNotes: StickyNoteItem[];
+  stickyNoteJumpRequest: {
+    noteId: string;
+    timestampSec?: number;
+    charOffset?: number;
+    seq: number;
+  } | null;
   hasAudio: boolean;
   audioDurationMs: number;
   livePartialUtterance: { speakerLabel: string; text: string } | null;
@@ -382,6 +399,16 @@ interface AppStoreState {
   ) => Promise<SessionAttachmentItem | null>;
   captureClassroomScreen: (caption?: string) => Promise<SessionAttachmentItem | null>;
   deleteSessionAttachment: (attachmentId: string) => Promise<void>;
+  createStickyNote: (initial?: StickyNoteCreateInput) => Promise<StickyNoteItem | null>;
+  updateStickyNoteLocal: (noteId: string, patch: StickyNotePatchInput) => void;
+  persistStickyNote: (noteId: string, patch: StickyNotePatchInput) => Promise<StickyNoteItem | null>;
+  bringStickyNoteToFront: (noteId: string) => void;
+  setStickyNoteOpen: (noteId: string, isOpen: boolean) => Promise<void>;
+  setAllStickyNotesOpen: (isOpen: boolean) => Promise<void>;
+  deleteStickyNote: (noteId: string) => Promise<void>;
+  focusStickyNoteTimestamp: (noteId: string, timestampSec?: number, charOffset?: number) => void;
+  clearStickyNoteJumpRequest: () => void;
+  quickNoteAtUtterance: (utterance: { startTimeMs: number; timestampText: string }) => Promise<void>;
   toggleMiniOverlayWindow: () => Promise<void>;
 
   updateSettings: (updater: (prev: AppSettings) => AppSettings) => Promise<void>;
@@ -674,6 +701,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     studyNote: null,
     flashcards: [],
     attachments: [],
+    stickyNotes: [],
+    stickyNoteJumpRequest: null,
     hasAudio: false,
     audioDurationMs: 0,
     livePartialUtterance: null,
@@ -1037,6 +1066,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             studyNote: payload.studyNote ?? null,
             flashcards: payload.flashcards ?? [],
             attachments: payload.attachments ?? [],
+            stickyNotes: payload.stickyNotes ?? [],
+            stickyNoteJumpRequest: null,
             hasAudio: Boolean(payload.hasAudio),
             audioDurationMs: payload.audioDurationMs ?? 0,
             audioPlayback: {
@@ -1080,6 +1111,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           studyNote: payload.studyNote ?? null,
           flashcards: payload.flashcards ?? [],
           attachments: payload.attachments ?? [],
+          stickyNotes: payload.stickyNotes ?? [],
+          stickyNoteJumpRequest: null,
           hasAudio: Boolean(payload.hasAudio),
           audioDurationMs: payload.audioDurationMs ?? 0,
           audioPlayback: {
@@ -1107,6 +1140,13 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
     openSessionAtHit: async (hit) => {
       await get().openClassroom(hit.sessionId);
+      if (hit.kind === 'sticky_note' && hit.stickyNoteId) {
+        const noteId = hit.stickyNoteId;
+        window.setTimeout(() => {
+          get().focusStickyNoteTimestamp(noteId);
+        }, 120);
+        return;
+      }
       if (hit.segmentId || hit.utteranceId || hit.timestampMs !== undefined) {
         window.setTimeout(() => {
           get().jumpToTranscript({
@@ -1143,6 +1183,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             studyNote: null,
             flashcards: [],
             attachments: [],
+            stickyNotes: [],
+            stickyNoteJumpRequest: null,
             audioPlayback: {
               visible: false,
               seekRequestMs: null,
@@ -1161,6 +1203,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             studyNote: null,
             flashcards: [],
             attachments: [],
+            stickyNotes: [],
+            stickyNoteJumpRequest: null,
             livePartialUtterance: null,
             transcriptFocusRequest: null,
             chatDraftPrefill: null,
@@ -1750,6 +1794,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         studyNote: payload.studyNote ?? null,
         flashcards: payload.flashcards ?? [],
         attachments: payload.attachments ?? [],
+        stickyNotes: payload.stickyNotes ?? [],
+        stickyNoteJumpRequest: null,
         hasAudio: Boolean(payload.hasAudio),
         audioDurationMs: payload.audioDurationMs ?? 0,
         livePartialUtterance: null,
@@ -1920,6 +1966,225 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       } catch (err) {
         showNotice('error', err instanceof Error ? err.message : '删除附件失败');
       }
+    },
+
+    createStickyNote: async (initial) => {
+      const session = get().activeSession;
+      if (!session) return null;
+      const existing = get().stickyNotes;
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      const cascade = computeCascadeStickyPosition(existing, vw, vh);
+      const maxZ = existing.reduce((m, n) => Math.max(m, n.zOrder), 0);
+      try {
+        const created = await api.createStickyNote(session.id, {
+          title: initial?.title ?? '',
+          content: initial?.content ?? '',
+          paperColor: initial?.paperColor ?? 'cream',
+          posX: initial?.posX ?? cascade.posX,
+          posY: initial?.posY ?? cascade.posY,
+          width: initial?.width ?? cascade.width,
+          height: initial?.height ?? cascade.height,
+          isOpen: initial?.isOpen ?? true,
+          zOrder: initial?.zOrder ?? maxZ + 1,
+          isTranslucent: initial?.isTranslucent ?? false,
+        });
+        set((state) => ({
+          stickyNotes: [...state.stickyNotes.filter((n) => n.id !== created.id), created],
+        }));
+        return created;
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '创建便签失败');
+        return null;
+      }
+    },
+
+    updateStickyNoteLocal: (noteId, patch) => {
+      set((state) => {
+        const list = state.stickyNotes;
+        const target = list.find((n) => n.id === noteId);
+        if (!target) return state;
+        const nextNote: StickyNoteItem = { ...target, ...patch };
+        if (patch.content !== undefined) {
+          const reconciled = reconcileNoteDraftTimestamps(target, patch.content, list);
+          nextNote.timestamps = reconciled.timestamps;
+          nextNote.conflicts = reconciled.conflicts;
+        }
+        return {
+          stickyNotes: list.map((n) => (n.id === noteId ? nextNote : n)),
+        };
+      });
+    },
+
+    persistStickyNote: async (noteId, patch) => {
+      const session = get().activeSession;
+      if (!session) return null;
+      try {
+        const saved = await api.updateStickyNote(session.id, noteId, patch);
+        set((state) => ({
+          stickyNotes: state.stickyNotes.map((n) => {
+            if (n.id !== noteId) return n;
+            // 若保存请求在途期间用户继续输入了更新内容，保留最新本地内容不回滚光标
+            if (patch.content !== undefined && n.content !== patch.content) {
+              return {
+                ...saved,
+                content: n.content,
+                timestamps: n.timestamps,
+                conflicts: n.conflicts,
+              };
+            }
+            return saved;
+          }),
+        }));
+        return saved;
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '保存便签失败');
+        return null;
+      }
+    },
+
+    bringStickyNoteToFront: (noteId) => {
+      const session = get().activeSession;
+      const list = get().stickyNotes;
+      const target = list.find((n) => n.id === noteId);
+      if (!target) return;
+      const maxZ = list.reduce((m, n) => Math.max(m, n.zOrder), 0);
+      if (target.zOrder >= maxZ && list.filter((n) => n.zOrder === maxZ).length === 1) {
+        return;
+      }
+      const nextZ = maxZ + 1;
+      set((state) => ({
+        stickyNotes: state.stickyNotes.map((n) =>
+          n.id === noteId ? { ...n, zOrder: nextZ } : n
+        ),
+      }));
+      if (session) {
+        void api.updateStickyNote(session.id, noteId, { zOrder: nextZ }).catch(() => {
+          // zOrder is non-critical; ignore transient errors
+        });
+      }
+    },
+
+    setStickyNoteOpen: async (noteId, isOpen) => {
+      const session = get().activeSession;
+      if (!session) return;
+      const list = get().stickyNotes;
+      const target = list.find((n) => n.id === noteId);
+      if (!target) return;
+      const maxZ = list.reduce((m, n) => Math.max(m, n.zOrder), 0);
+      const nextZ = isOpen ? Math.max(target.zOrder, maxZ + 1) : target.zOrder;
+      set((state) => ({
+        stickyNotes: state.stickyNotes.map((n) =>
+          n.id === noteId ? { ...n, isOpen, zOrder: nextZ } : n
+        ),
+      }));
+      try {
+        const saved = await api.updateStickyNote(session.id, noteId, { isOpen, zOrder: nextZ });
+        set((state) => ({
+          stickyNotes: state.stickyNotes.map((n) => (n.id === noteId ? saved : n)),
+        }));
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '更新便签状态失败');
+      }
+    },
+
+    setAllStickyNotesOpen: async (isOpen) => {
+      const session = get().activeSession;
+      if (!session) return;
+      set((state) => ({
+        stickyNotes: state.stickyNotes.map((n) => ({ ...n, isOpen })),
+      }));
+      try {
+        const savedList = await api.setAllStickyNotesOpen(session.id, isOpen);
+        set({ stickyNotes: savedList });
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '批量切换便签状态失败');
+      }
+    },
+
+    deleteStickyNote: async (noteId) => {
+      const session = get().activeSession;
+      if (!session) return;
+      const prev = get().stickyNotes;
+      set((state) => ({
+        stickyNotes: state.stickyNotes.filter((n) => n.id !== noteId),
+      }));
+      try {
+        await api.deleteStickyNote(session.id, noteId);
+        // 刷新列表，使被删除便签释放的时间戳冲突状态立即更新
+        const fresh = await api.listStickyNotes(session.id);
+        set({ stickyNotes: fresh });
+      } catch (err) {
+        set({ stickyNotes: prev });
+        showNotice('error', err instanceof Error ? err.message : '删除便签失败');
+      }
+    },
+
+    focusStickyNoteTimestamp: (noteId, timestampSec, charOffset) => {
+      const session = get().activeSession;
+      const list = get().stickyNotes;
+      const target = list.find((n) => n.id === noteId);
+      if (!target) return;
+      const maxZ = list.reduce((m, n) => Math.max(m, n.zOrder), 0);
+      const nextZ = target.zOrder >= maxZ ? target.zOrder + 1 : maxZ + 1;
+      const wasClosed = !target.isOpen;
+      nextStickyNoteJumpSeq += 1;
+      set((state) => ({
+        stickyNotes: state.stickyNotes.map((n) =>
+          n.id === noteId ? { ...n, isOpen: true, zOrder: nextZ } : n
+        ),
+        stickyNoteJumpRequest: {
+          noteId,
+          timestampSec,
+          charOffset,
+          seq: nextStickyNoteJumpSeq,
+        },
+      }));
+      if (session && (wasClosed || nextZ !== target.zOrder)) {
+        void api
+          .updateStickyNote(session.id, noteId, { isOpen: true, zOrder: nextZ })
+          .catch(() => {});
+      }
+    },
+
+    clearStickyNoteJumpRequest: () => {
+      set((state) => (state.stickyNoteJumpRequest ? { stickyNoteJumpRequest: null } : state));
+    },
+
+    quickNoteAtUtterance: async (utterance) => {
+      const session = get().activeSession;
+      if (!session) return;
+      const sec = Math.max(0, Math.floor(utterance.startTimeMs / 1000));
+      const existingNotes = get().stickyNotes;
+      const claims = computeSessionTimestampClaims(existingNotes);
+      const occupied = claims.get(sec);
+      if (occupied) {
+        get().focusStickyNoteTimestamp(occupied.noteId, sec, occupied.charOffset);
+        showNotice(
+          'info',
+          `[${occupied.timestampText}] 已被便签「${occupied.noteTitle}」先记录，已为你定位`
+        );
+        return;
+      }
+
+      const token = `${formatStickyBracket(sec)} `;
+      const openNotes = existingNotes.filter((n) => n.isOpen);
+      if (openNotes.length === 0) {
+        const created = await get().createStickyNote({ content: token });
+        if (created) {
+          get().focusStickyNoteTimestamp(created.id, sec, 0);
+        }
+        return;
+      }
+
+      const topNote = openNotes.reduce((best, cur) => (cur.zOrder >= best.zOrder ? cur : best));
+      const separator =
+        topNote.content.length === 0 || topNote.content.endsWith('\n') ? '' : '\n';
+      const charOffset = topNote.content.length + separator.length;
+      const nextContent = `${topNote.content}${separator}${token}`;
+      get().updateStickyNoteLocal(topNote.id, { content: nextContent });
+      get().focusStickyNoteTimestamp(topNote.id, sec, charOffset);
+      await get().persistStickyNote(topNote.id, { content: nextContent });
     },
 
     toggleMiniOverlayWindow: async () => {

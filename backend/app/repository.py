@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -13,14 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import (
     ClassSession, Database, Folder, Message, Segment, SegmentHighlight,
-    SessionAttachment, Speaker, Utterance, now,
+    SessionAttachment, Speaker, StickyNote, StickyNoteTimestamp, Utterance, now,
 )
 from .errors import AppError, missing
 from .schemas import (
     BookmarkNowRequest, ChatMessage, FinalEvent, FlashcardItem, FolderItem, Highlight,
     KnowledgeSegment, Regrouping, SearchHitItem, SegmentExplanation, SessionAttachmentItem,
-    SessionCard, SessionPatch, SessionStatus, SessionStudyNote, SpeakerProfile, Term,
-    UtteranceItem, UtterancePatch, Workspace, iso_utc,
+    SessionCard, SessionPatch, SessionStatus, SessionStudyNote, SpeakerProfile,
+    StickyNoteCreate, StickyNoteItem, StickyNotePatch, StickyNoteTimestampConflict,
+    StickyNoteTimestampItem, Term, UtteranceItem, UtterancePatch, Workspace, iso_utc,
 )
 
 
@@ -45,6 +47,83 @@ async def require(db: AsyncSession, table, id_: str, label: str):
 def format_ms(ms: int) -> str:
     minutes, seconds = divmod(max(0, ms) // 1000, 60)
     return f"{minutes:02d}:{seconds:02d}"
+
+
+STICKY_TIMESTAMP_RE = re.compile(r"\[(?:(\d{1,2}):)?(\d{1,3}):(\d{2})\]")
+
+
+def format_sticky_sec(total_sec: int) -> str:
+    safe = max(0, int(total_sec))
+    hours, rem = divmod(safe, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def extract_sticky_timestamps(content: str) -> list[tuple[int, str, int]]:
+    """Extract valid [MM:SS] or [HH:MM:SS] (seconds last) timestamps as (sec, formatted_text, char_offset)."""
+    if not content:
+        return []
+    matches: list[tuple[int, str, int]] = []
+    for match in STICKY_TIMESTAMP_RE.finditer(content):
+        hrs_raw, mins_raw, secs_raw = match.group(1), match.group(2), match.group(3)
+        hrs = int(hrs_raw) if hrs_raw is not None else 0
+        mins = int(mins_raw)
+        secs = int(secs_raw)
+        if secs >= 60:
+            continue
+        if hrs_raw is not None and mins >= 60:
+            continue
+        total_sec = hrs * 3600 + mins * 60 + secs
+        matches.append((total_sec, format_sticky_sec(total_sec), match.start()))
+    return matches
+
+
+def sticky_note_display_title(row: StickyNote, fallback_index: int = 1) -> str:
+    if row.title and row.title.strip():
+        return row.title.strip()
+    for line in (row.content or "").splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            return cleaned[:24]
+    return f"课堂便签 #{fallback_index}"
+
+
+def sticky_note_item(
+    row: StickyNote,
+    timestamps: list[StickyNoteTimestamp],
+    conflicts: list[StickyNoteTimestampConflict] | None = None,
+) -> StickyNoteItem:
+    sorted_ts = sorted(timestamps, key=lambda t: (t.char_offset, t.timestamp_sec, t.id))
+    return StickyNoteItem(
+        id=row.id,
+        session_id=row.session_id,
+        title=row.title or "",
+        content=row.content or "",
+        paper_color=row.paper_color if row.paper_color in {"cream", "butter", "sage", "blush"} else "cream",
+        pos_x=row.pos_x,
+        pos_y=row.pos_y,
+        width=row.width,
+        height=row.height,
+        is_open=bool(row.is_open),
+        z_order=row.z_order,
+        is_translucent=bool(row.is_translucent),
+        timestamps=[
+            StickyNoteTimestampItem(
+                id=t.id,
+                note_id=t.note_id,
+                timestamp_sec=t.timestamp_sec,
+                timestamp_text=t.timestamp_text,
+                char_offset=t.char_offset,
+                created_at=iso_utc(t.created_at),
+            )
+            for t in sorted_ts
+        ],
+        conflicts=conflicts or [],
+        created_at=iso_utc(row.created_at),
+        updated_at=iso_utc(row.updated_at),
+    )
 
 
 def parse_hotwords(raw_json: str | None) -> list[str]:
@@ -321,6 +400,9 @@ class Repository:
                     pass
             if attachments:
                 ws.attachments = attachments
+            sticky_notes = await self._load_sticky_notes(db, id_)
+            if sticky_notes:
+                ws.sticky_notes = sticky_notes
             resolved_audio_ms = audio_duration_ms
             if resolved_audio_ms <= 0 and row.audio_file_path:
                 try:
@@ -1051,6 +1133,188 @@ class Repository:
             await db.delete(row)
             return file_path
 
+    async def _load_sticky_notes(self, db: AsyncSession, session_id: str) -> list[StickyNoteItem]:
+        notes = list(await db.scalars(
+            select(StickyNote)
+            .where(StickyNote.session_id == session_id)
+            .order_by(StickyNote.created_at, StickyNote.id)
+        ))
+        if not notes:
+            return []
+        ts_rows = list(await db.scalars(
+            select(StickyNoteTimestamp)
+            .where(StickyNoteTimestamp.session_id == session_id)
+            .order_by(StickyNoteTimestamp.created_at, StickyNoteTimestamp.id)
+        ))
+        title_map = {
+            note.id: sticky_note_display_title(note, idx + 1)
+            for idx, note in enumerate(notes)
+        }
+        ts_by_note: dict[str, list[StickyNoteTimestamp]] = defaultdict(list)
+        owner_by_sec: dict[int, StickyNoteTimestamp] = {}
+        for ts in ts_rows:
+            ts_by_note[ts.note_id].append(ts)
+            owner_by_sec[ts.timestamp_sec] = ts
+
+        items: list[StickyNoteItem] = []
+        for note in notes:
+            seen_sec_in_note: set[int] = set()
+            conflict_secs: set[int] = set()
+            conflicts: list[StickyNoteTimestampConflict] = []
+            for sec, ts_text, _offset in extract_sticky_timestamps(note.content or ""):
+                owner = owner_by_sec.get(sec)
+                if owner is not None and owner.note_id != note.id:
+                    if sec not in conflict_secs:
+                        conflict_secs.add(sec)
+                        conflicts.append(StickyNoteTimestampConflict(
+                            timestamp_sec=sec,
+                            timestamp_text=ts_text,
+                            owner_note_id=owner.note_id,
+                            owner_note_title=title_map.get(owner.note_id, "课堂便签"),
+                        ))
+                elif sec in seen_sec_in_note:
+                    if sec not in conflict_secs:
+                        conflict_secs.add(sec)
+                        conflicts.append(StickyNoteTimestampConflict(
+                            timestamp_sec=sec,
+                            timestamp_text=ts_text,
+                            owner_note_id=note.id,
+                            owner_note_title=title_map.get(note.id, "当前便签"),
+                        ))
+                else:
+                    seen_sec_in_note.add(sec)
+            items.append(sticky_note_item(note, ts_by_note.get(note.id, []), conflicts))
+        return items
+
+    async def _sync_sticky_note_timestamps(
+        self, db: AsyncSession, session_id: str, note: StickyNote,
+    ) -> None:
+        existing_rows = list(await db.scalars(
+            select(StickyNoteTimestamp)
+            .where(StickyNoteTimestamp.session_id == session_id)
+            .order_by(StickyNoteTimestamp.created_at, StickyNoteTimestamp.id)
+        ))
+        owned_by_self: dict[int, StickyNoteTimestamp] = {}
+        owned_by_other: set[int] = set()
+        for row in existing_rows:
+            if row.note_id == note.id:
+                owned_by_self[row.timestamp_sec] = row
+            else:
+                owned_by_other.add(row.timestamp_sec)
+
+        extracted = extract_sticky_timestamps(note.content or "")
+        # Keep only the first occurrence of each valid second not already claimed by another note (先来后到).
+        desired_by_sec: dict[int, tuple[str, int]] = {}
+        for sec, ts_text, offset in extracted:
+            if sec in owned_by_other or sec in desired_by_sec:
+                continue
+            desired_by_sec[sec] = (ts_text, offset)
+
+        # Delete timestamps removed from this note first so those seconds are freed.
+        for sec, row in list(owned_by_self.items()):
+            if sec not in desired_by_sec:
+                await db.delete(row)
+
+        await db.flush()
+
+        for sec, (ts_text, offset) in desired_by_sec.items():
+            if sec in owned_by_self:
+                row = owned_by_self[sec]
+                row.timestamp_text = ts_text
+                row.char_offset = offset
+            else:
+                db.add(StickyNoteTimestamp(
+                    session_id=session_id,
+                    note_id=note.id,
+                    timestamp_sec=sec,
+                    timestamp_text=ts_text,
+                    char_offset=offset,
+                ))
+        await db.flush()
+
+    async def list_sticky_notes(self, session_id: str) -> list[StickyNoteItem]:
+        async with self.db.sessions() as db:
+            await require(db, ClassSession, session_id, "课堂")
+            return await self._load_sticky_notes(db, session_id)
+
+    async def create_sticky_note(self, session_id: str, body: StickyNoteCreate) -> StickyNoteItem:
+        async with self.db.write() as db:
+            await require(db, ClassSession, session_id, "课堂")
+            max_z = await db.scalar(
+                select(func.max(StickyNote.z_order)).where(StickyNote.session_id == session_id)
+            )
+            note = StickyNote(
+                session_id=session_id,
+                title=body.title,
+                content=body.content,
+                paper_color=body.paper_color,
+                pos_x=body.pos_x,
+                pos_y=body.pos_y,
+                width=body.width,
+                height=body.height,
+                is_open=body.is_open,
+                z_order=max(body.z_order, (max_z or 0) + 1),
+                is_translucent=body.is_translucent,
+            )
+            db.add(note)
+            await db.flush()
+            if note.content:
+                await self._sync_sticky_note_timestamps(db, session_id, note)
+            all_notes = await self._load_sticky_notes(db, session_id)
+            return next(item for item in all_notes if item.id == note.id)
+
+    async def update_sticky_note(
+        self, session_id: str, note_id: str, patch: StickyNotePatch,
+    ) -> StickyNoteItem:
+        async with self.db.write() as db:
+            note = await db.get(StickyNote, note_id)
+            if note is None or note.session_id != session_id:
+                raise missing("课堂便签")
+            fields = patch.model_fields_set
+            if "title" in fields and patch.title is not None:
+                note.title = patch.title
+            if "content" in fields and patch.content is not None:
+                note.content = patch.content
+            if "paper_color" in fields and patch.paper_color is not None:
+                note.paper_color = patch.paper_color
+            if "pos_x" in fields and patch.pos_x is not None:
+                note.pos_x = patch.pos_x
+            if "pos_y" in fields and patch.pos_y is not None:
+                note.pos_y = patch.pos_y
+            if "width" in fields and patch.width is not None:
+                note.width = patch.width
+            if "height" in fields and patch.height is not None:
+                note.height = patch.height
+            if "is_open" in fields and patch.is_open is not None:
+                note.is_open = patch.is_open
+            if "z_order" in fields and patch.z_order is not None:
+                note.z_order = patch.z_order
+            if "is_translucent" in fields and patch.is_translucent is not None:
+                note.is_translucent = patch.is_translucent
+            note.updated_at = now()
+            await db.flush()
+            if "content" in fields:
+                await self._sync_sticky_note_timestamps(db, session_id, note)
+            all_notes = await self._load_sticky_notes(db, session_id)
+            return next(item for item in all_notes if item.id == note.id)
+
+    async def set_all_sticky_notes_open(self, session_id: str, is_open: bool) -> list[StickyNoteItem]:
+        async with self.db.write() as db:
+            await require(db, ClassSession, session_id, "课堂")
+            await db.execute(
+                update(StickyNote)
+                .where(StickyNote.session_id == session_id)
+                .values(is_open=is_open)
+            )
+            return await self._load_sticky_notes(db, session_id)
+
+    async def delete_sticky_note(self, session_id: str, note_id: str) -> None:
+        async with self.db.write() as db:
+            note = await db.get(StickyNote, note_id)
+            if note is None or note.session_id != session_id:
+                raise missing("课堂便签")
+            await db.delete(note)
+
     async def search_global(
         self, query: str, *, folder_id: str | None = None, limit: int = 40,
     ) -> list[SearchHitItem]:
@@ -1202,6 +1466,28 @@ class Repository:
                             kind="chat",
                             snippet=make_snippet(f"{role_prefix}：{msg.content}"),
                             updated_at=iso_utc(s.updated_at),
+                        ),
+                    ))
+
+            sticky_rows = list(await db.scalars(
+                select(StickyNote).where(StickyNote.session_id.in_(sess_ids)).order_by(StickyNote.updated_at.desc())
+            ))
+            for note in sticky_rows:
+                combined = f"{note.title} {note.content}".strip()
+                if combined and matches_all(combined):
+                    s = sess_map[note.session_id]
+                    label = sticky_note_display_title(note)
+                    hits.append((
+                        80,
+                        note.updated_at,
+                        SearchHitItem(
+                            session_id=s.id,
+                            session_title=s.title,
+                            folder_id=s.folder_id,
+                            kind="sticky_note",
+                            sticky_note_id=note.id,
+                            snippet=make_snippet(f"便签《{label}》：{note.content or note.title}"),
+                            updated_at=iso_utc(note.updated_at),
                         ),
                     ))
 

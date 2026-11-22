@@ -17,6 +17,9 @@ import type {
   SessionExportRequest,
   SessionStudyNote,
   SessionWorkspacePayload,
+  StickyNoteCreateInput,
+  StickyNoteItem,
+  StickyNotePatchInput,
   UpdateApplyResult,
   UpdateCheckResult,
   UpdateDownloadProgress,
@@ -579,6 +582,62 @@ export const api = {
     );
   },
 
+  // ---------------- 课堂便签条与便签篓 ----------------
+  listStickyNotes(sessionId: string): Promise<StickyNoteItem[]> {
+    if (IS_MOCK_MODE) return mockAdapter.listStickyNotes(sessionId);
+    return requestJson<StickyNoteItem[]>(
+      `/sessions/${encodeURIComponent(sessionId)}/sticky-notes`
+    );
+  },
+
+  createStickyNote(
+    sessionId: string,
+    payload: StickyNoteCreateInput
+  ): Promise<StickyNoteItem> {
+    if (IS_MOCK_MODE) return mockAdapter.createStickyNote(sessionId, payload);
+    return requestJson<StickyNoteItem>(
+      `/sessions/${encodeURIComponent(sessionId)}/sticky-notes`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  updateStickyNote(
+    sessionId: string,
+    noteId: string,
+    patch: StickyNotePatchInput
+  ): Promise<StickyNoteItem> {
+    if (IS_MOCK_MODE) return mockAdapter.updateStickyNote(sessionId, noteId, patch);
+    return requestJson<StickyNoteItem>(
+      `/sessions/${encodeURIComponent(sessionId)}/sticky-notes/${encodeURIComponent(noteId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
+  },
+
+  setAllStickyNotesOpen(sessionId: string, isOpen: boolean): Promise<StickyNoteItem[]> {
+    if (IS_MOCK_MODE) return mockAdapter.setAllStickyNotesOpen(sessionId, isOpen);
+    return requestJson<StickyNoteItem[]>(
+      `/sessions/${encodeURIComponent(sessionId)}/sticky-notes`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ isOpen }),
+      }
+    );
+  },
+
+  deleteStickyNote(sessionId: string, noteId: string): Promise<void> {
+    if (IS_MOCK_MODE) return mockAdapter.deleteStickyNote(sessionId, noteId);
+    return requestJson<void>(
+      `/sessions/${encodeURIComponent(sessionId)}/sticky-notes/${encodeURIComponent(noteId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
   searchGlobal(query: string, folderId?: string | null): Promise<SearchHitItem[]> {
     if (IS_MOCK_MODE) return mockAdapter.searchGlobal(query, folderId);
     const params = new URLSearchParams({ q: query });
@@ -718,8 +777,8 @@ export const api = {
   checkAppUpdates(force = false): Promise<UpdateCheckResult> {
     if (IS_MOCK_MODE) {
       return Promise.resolve({
-        currentVersion: '0.1.8',
-        latestVersion: '0.1.8',
+        currentVersion: '0.1.9',
+        latestVersion: '0.1.9',
         hasUpdate: false,
         releaseTitle: '',
         releaseNotes: '',

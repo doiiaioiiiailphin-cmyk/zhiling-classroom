@@ -267,15 +267,94 @@ class SessionExportRequest(WireModel):
     include_highlights: bool = True
     include_chat: bool = True
     include_transcript: bool = True
+    include_sticky_notes: bool = True
+
+
+PaperColor = Literal["cream", "butter", "sage", "blush"]
+
+
+class StickyNoteTimestampItem(WireModel):
+    id: Id
+    note_id: Id
+    timestamp_sec: int
+    timestamp_text: str
+    char_offset: int
+    created_at: str
+
+
+class StickyNoteTimestampConflict(WireModel):
+    timestamp_sec: int
+    timestamp_text: str
+    owner_note_id: Id
+    owner_note_title: str
+
+
+class StickyNoteItem(WireModel):
+    id: Id
+    session_id: Id
+    title: str
+    content: str
+    paper_color: PaperColor = "cream"
+    pos_x: int
+    pos_y: int
+    width: int
+    height: int
+    is_open: bool
+    z_order: int
+    is_translucent: bool = False
+    timestamps: list[StickyNoteTimestampItem] = Field(default_factory=list)
+    conflicts: list[StickyNoteTimestampConflict] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class StickyNoteCreate(WireModel):
+    title: Annotated[str, StringConstraints(max_length=255)] = ""
+    content: Annotated[str, StringConstraints(max_length=32000)] = ""
+    paper_color: PaperColor = "cream"
+    pos_x: Annotated[int, Field(ge=-2000, le=10000)] = 120
+    pos_y: Annotated[int, Field(ge=-2000, le=10000)] = 96
+    width: Annotated[int, Field(ge=240, le=2000)] = 340
+    height: Annotated[int, Field(ge=180, le=2000)] = 300
+    is_open: bool = True
+    z_order: Annotated[int, Field(ge=0, le=1_000_000)] = 1
+    is_translucent: bool = False
+
+
+class StickyNotePatch(WireModel):
+    title: Annotated[str, StringConstraints(max_length=255)] | None = None
+    content: Annotated[str, StringConstraints(max_length=32000)] | None = None
+    paper_color: PaperColor | None = None
+    pos_x: Annotated[int, Field(ge=-2000, le=10000)] | None = None
+    pos_y: Annotated[int, Field(ge=-2000, le=10000)] | None = None
+    width: Annotated[int, Field(ge=240, le=2000)] | None = None
+    height: Annotated[int, Field(ge=180, le=2000)] | None = None
+    is_open: bool | None = None
+    z_order: Annotated[int, Field(ge=0, le=1_000_000)] | None = None
+    is_translucent: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self):
+        if not self.model_fields_set:
+            raise ValueError("请提供需要更新的字段")
+        for field in self.model_fields_set:
+            if getattr(self, field) is None:
+                raise ValueError(f"{to_camel(field)} 不能为空")
+        return self
+
+
+class StickyNoteBatchOpenPatch(WireModel):
+    is_open: bool
 
 
 class SearchHitItem(WireModel):
     session_id: Id
     session_title: str
     folder_id: Id | None = None
-    kind: Literal["title", "topic", "utterance", "highlight", "note", "chat"]
+    kind: Literal["title", "topic", "utterance", "highlight", "note", "chat", "sticky_note"]
     segment_id: Id | None = None
     utterance_id: Id | None = None
+    sticky_note_id: Id | None = None
     timestamp_ms: int | None = None
     timestamp_text: str | None = None
     snippet: str
@@ -306,6 +385,7 @@ class Workspace(WireModel):
     study_note: SessionStudyNote | None = None
     flashcards: list[FlashcardItem] = Field(default_factory=list)
     attachments: list[SessionAttachmentItem] = Field(default_factory=list)
+    sticky_notes: list[StickyNoteItem] = Field(default_factory=list)
     has_audio: bool = False
     audio_duration_ms: int = 0
 

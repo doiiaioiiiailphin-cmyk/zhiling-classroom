@@ -23,9 +23,13 @@ import type {
   SessionStudyNote,
   SessionWorkspacePayload,
   SpeakerProfile,
+  StickyNoteCreateInput,
+  StickyNoteItem,
+  StickyNotePatchInput,
   UtteranceItem,
   UtterancePatch,
 } from '../types/domain';
+import { reconcileNoteDraftTimestamps } from '../utils/stickyNoteTimestamps';
 
 const STORAGE_KEY = 'zhiling_class_demo_state_v1';
 
@@ -41,6 +45,7 @@ interface MockDatabase {
       studyNote?: SessionStudyNote;
       flashcards?: FlashcardItem[];
       attachments?: SessionAttachmentItem[];
+      stickyNotes?: StickyNoteItem[];
     }
   >;
   settings: AppSettings;
@@ -1023,6 +1028,94 @@ export const mockAdapter = {
     const ws = db.workspaces[sessionId];
     if (!ws) return;
     ws.attachments = (ws.attachments ?? []).filter((a) => a.id !== attachmentId);
+    saveDb(db);
+  },
+
+  async listStickyNotes(sessionId: string): Promise<StickyNoteItem[]> {
+    const db = loadDb();
+    return db.workspaces[sessionId]?.stickyNotes ?? [];
+  },
+
+  async createStickyNote(
+    sessionId: string,
+    payload: StickyNoteCreateInput
+  ): Promise<StickyNoteItem> {
+    const db = loadDb();
+    const ws = db.workspaces[sessionId];
+    const nowIso = new Date().toISOString();
+    const existing = ws?.stickyNotes ?? [];
+    const maxZ = existing.reduce((m, n) => Math.max(m, n.zOrder), 0);
+    const draft: StickyNoteItem = {
+      id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      sessionId,
+      title: payload.title ?? '',
+      content: payload.content ?? '',
+      paperColor: payload.paperColor ?? 'cream',
+      posX: payload.posX ?? 120,
+      posY: payload.posY ?? 96,
+      width: payload.width ?? 348,
+      height: payload.height ?? 316,
+      isOpen: payload.isOpen ?? true,
+      zOrder: Math.max(payload.zOrder ?? 1, maxZ + 1),
+      isTranslucent: payload.isTranslucent ?? false,
+      timestamps: [],
+      conflicts: [],
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const reconciled = reconcileNoteDraftTimestamps(draft, draft.content, [...existing, draft]);
+    draft.timestamps = reconciled.timestamps;
+    draft.conflicts = reconciled.conflicts;
+    if (ws) {
+      ws.stickyNotes = [...existing, draft];
+      saveDb(db);
+    }
+    return draft;
+  },
+
+  async updateStickyNote(
+    sessionId: string,
+    noteId: string,
+    patch: StickyNotePatchInput
+  ): Promise<StickyNoteItem> {
+    const db = loadDb();
+    const ws = db.workspaces[sessionId];
+    const list = ws?.stickyNotes ?? [];
+    const target = list.find((n) => n.id === noteId);
+    if (!target) {
+      throw new Error('课堂便签不存在');
+    }
+    const updated: StickyNoteItem = {
+      ...target,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    if (patch.content !== undefined) {
+      const reconciled = reconcileNoteDraftTimestamps(updated, updated.content, list);
+      updated.timestamps = reconciled.timestamps;
+      updated.conflicts = reconciled.conflicts;
+    }
+    if (ws) {
+      ws.stickyNotes = list.map((n) => (n.id === noteId ? updated : n));
+      saveDb(db);
+    }
+    return updated;
+  },
+
+  async setAllStickyNotesOpen(sessionId: string, isOpen: boolean): Promise<StickyNoteItem[]> {
+    const db = loadDb();
+    const ws = db.workspaces[sessionId];
+    if (!ws) return [];
+    ws.stickyNotes = (ws.stickyNotes ?? []).map((n) => ({ ...n, isOpen }));
+    saveDb(db);
+    return ws.stickyNotes;
+  },
+
+  async deleteStickyNote(sessionId: string, noteId: string): Promise<void> {
+    const db = loadDb();
+    const ws = db.workspaces[sessionId];
+    if (!ws) return;
+    ws.stickyNotes = (ws.stickyNotes ?? []).filter((n) => n.id !== noteId);
     saveDb(db);
   },
 

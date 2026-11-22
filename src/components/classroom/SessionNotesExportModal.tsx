@@ -69,6 +69,7 @@ export const SessionNotesExportModal: React.FC = () => {
   const [includeHighlights, setIncludeHighlights] = useState(true);
   const [includeChat, setIncludeChat] = useState(true);
   const [includeTranscript, setIncludeTranscript] = useState(true);
+  const [includeStickyNotes, setIncludeStickyNotes] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
 
   const targetSessionId = modalState.sessionId;
@@ -205,6 +206,7 @@ export const SessionNotesExportModal: React.FC = () => {
         includeHighlights,
         includeChat,
         includeTranscript,
+        includeStickyNotes,
       });
     } finally {
       setIsExporting(false);
@@ -563,6 +565,12 @@ export const SessionNotesExportModal: React.FC = () => {
                         label: '四、分段精修逐字稿（含书签与个人批注）',
                         hint: '按知识分段整理时间戳、讲话人、重点/不懂点标记及批注',
                       },
+                      {
+                        checked: includeStickyNotes,
+                        set: setIncludeStickyNotes,
+                        label: '五、课堂便签速记',
+                        hint: '汇总本堂课在便签篓中保存的纸色便签与时间锚点',
+                      },
                     ] as const
                   ).map((row) => (
                     <label
@@ -592,7 +600,8 @@ export const SessionNotesExportModal: React.FC = () => {
                     (!includeStudyNote &&
                       !includeHighlights &&
                       !includeChat &&
-                      !includeTranscript)
+                      !includeTranscript &&
+                      !includeStickyNotes)
                   }
                   onClick={() => void handleExport()}
                   className="h-11 px-6 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[15px] font-medium inline-flex items-center gap-2 transition-colors cursor-pointer"

@@ -140,15 +140,80 @@ export interface SessionExportRequest {
   includeHighlights?: boolean;
   includeChat?: boolean;
   includeTranscript?: boolean;
+  includeStickyNotes?: boolean;
+}
+
+export type PaperColor = 'cream' | 'butter' | 'sage' | 'blush';
+
+export interface StickyNoteTimestampItem {
+  id: string;
+  noteId: string;
+  timestampSec: number;
+  timestampText: string;
+  charOffset: number;
+  createdAt: string;
+}
+
+export interface StickyNoteTimestampConflict {
+  timestampSec: number;
+  timestampText: string;
+  ownerNoteId: string;
+  ownerNoteTitle: string;
+}
+
+export interface StickyNoteItem {
+  id: string;
+  sessionId: string;
+  title: string;
+  content: string;
+  paperColor: PaperColor;
+  posX: number;
+  posY: number;
+  width: number;
+  height: number;
+  isOpen: boolean;
+  zOrder: number;
+  isTranslucent: boolean;
+  timestamps: StickyNoteTimestampItem[];
+  conflicts: StickyNoteTimestampConflict[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StickyNoteCreateInput {
+  title?: string;
+  content?: string;
+  paperColor?: PaperColor;
+  posX?: number;
+  posY?: number;
+  width?: number;
+  height?: number;
+  isOpen?: boolean;
+  zOrder?: number;
+  isTranslucent?: boolean;
+}
+
+export interface StickyNotePatchInput {
+  title?: string;
+  content?: string;
+  paperColor?: PaperColor;
+  posX?: number;
+  posY?: number;
+  width?: number;
+  height?: number;
+  isOpen?: boolean;
+  zOrder?: number;
+  isTranslucent?: boolean;
 }
 
 export interface SearchHitItem {
   sessionId: string;
   sessionTitle: string;
   folderId?: string | null;
-  kind: 'title' | 'topic' | 'utterance' | 'highlight' | 'note' | 'chat';
+  kind: 'title' | 'topic' | 'utterance' | 'highlight' | 'note' | 'chat' | 'sticky_note';
   segmentId?: string;
   utteranceId?: string;
+  stickyNoteId?: string;
   timestampMs?: number;
   timestampText?: string;
   snippet: string;
@@ -185,6 +250,7 @@ export interface SessionWorkspacePayload {
   studyNote?: SessionStudyNote;
   flashcards?: FlashcardItem[];
   attachments?: SessionAttachmentItem[];
+  stickyNotes?: StickyNoteItem[];
   hasAudio?: boolean;
   audioDurationMs?: number;
 }

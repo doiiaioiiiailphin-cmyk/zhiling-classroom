@@ -21,6 +21,8 @@ import { Tooltip } from '../ui/Tooltip';
 import { WindowControls } from '../ui/WindowControls';
 import { AudioSourceControl } from './AudioSourceControl';
 import { ChatPanel } from './ChatPanel';
+import { StickyNotesLayer } from './StickyNotesLayer';
+import { StickyNoteTopbarControl } from './StickyNoteTopbarControl';
 import { TranscriptPanel } from './TranscriptPanel';
 
 const RecordingTimerButton: React.FC = React.memo(() => {
@@ -353,6 +355,8 @@ export const ClassroomView: React.FC = () => {
             onClick={() => void markConfusedNow()}
           />
 
+          <StickyNoteTopbarControl />
+
           <MoreGridMenu
             items={gridItems}
             tooltip="更多课堂功能与设置"
@@ -387,6 +391,9 @@ export const ClassroomView: React.FC = () => {
           <TranscriptPanel />
         </div>
       </div>
+
+      {/* 浮动纸色课堂便签小窗口层 */}
+      <StickyNotesLayer />
     </div>
   );
 };

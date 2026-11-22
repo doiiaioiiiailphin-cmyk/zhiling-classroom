@@ -150,6 +150,40 @@ class SessionAttachment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, server_default=func.current_timestamp())
 
 
+class StickyNote(Timestamps, Base):
+    __tablename__ = "sticky_notes"
+    __table_args__ = (Index("ix_sticky_notes_session", "session_id", "created_at", "id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    paper_color: Mapped[str] = mapped_column(String(24), default="cream", server_default="cream")
+    pos_x: Mapped[int] = mapped_column(Integer, default=120, server_default="120")
+    pos_y: Mapped[int] = mapped_column(Integer, default=96, server_default="96")
+    width: Mapped[int] = mapped_column(Integer, default=340, server_default="340")
+    height: Mapped[int] = mapped_column(Integer, default=300, server_default="300")
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    z_order: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    is_translucent: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
+
+class StickyNoteTimestamp(Base):
+    __tablename__ = "sticky_note_timestamps"
+    __table_args__ = (
+        UniqueConstraint("session_id", "timestamp_sec", name="uq_sticky_ts_session_sec"),
+        Index("ix_sticky_ts_note", "note_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id", ondelete="CASCADE"))
+    note_id: Mapped[str] = mapped_column(ForeignKey("sticky_notes.id", ondelete="CASCADE"))
+    timestamp_sec: Mapped[int] = mapped_column(Integer)
+    timestamp_text: Mapped[str] = mapped_column(String(32))
+    char_offset: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, server_default=func.current_timestamp())
+
+
 class SettingsRow(Base):
     __tablename__ = "app_settings"
     __table_args__ = (CheckConstraint("id = 1"),)

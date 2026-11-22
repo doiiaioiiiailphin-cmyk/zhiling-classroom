@@ -112,6 +112,19 @@ def build_markdown(workspace: Workspace, req: SessionExportRequest) -> str:
                     lines.append(f"  - *个人批注：{utt.user_note}*")
             lines.append("")
 
+    if req.include_sticky_notes and workspace.sticky_notes:
+        non_empty_notes = [n for n in workspace.sticky_notes if (n.title.strip() or n.content.strip())]
+        if non_empty_notes:
+            lines.extend(["## 五、课堂便签速记", ""])
+            for idx, note in enumerate(non_empty_notes, start=1):
+                heading = note.title.strip() or f"便签 #{idx}"
+                ts_tags = " ".join(f"`[{t.timestamp_text}]`" for t in note.timestamps)
+                lines.append(f"### {idx}. {heading}" + (f" {ts_tags}" if ts_tags else ""))
+                lines.append("")
+                if note.content.strip():
+                    lines.append(note.content.strip())
+                    lines.append("")
+
     return "\n".join(lines).strip() + "\n"
 
 
@@ -161,6 +174,18 @@ def build_plain_text(workspace: Workspace, req: SessionExportRequest) -> str:
                 if utt.user_note:
                     lines.append(f"    批注：{utt.user_note}")
             lines.append("")
+
+    if req.include_sticky_notes and workspace.sticky_notes:
+        non_empty_notes = [n for n in workspace.sticky_notes if (n.title.strip() or n.content.strip())]
+        if non_empty_notes:
+            lines.append("【五、课堂便签速记】")
+            for idx, note in enumerate(non_empty_notes, start=1):
+                heading = note.title.strip() or f"便签 #{idx}"
+                ts_tags = " ".join(f"[{t.timestamp_text}]" for t in note.timestamps)
+                lines.append(f"--- {idx}. {heading}" + (f" {ts_tags}" if ts_tags else "") + " ---")
+                if note.content.strip():
+                    lines.append(_strip_markdown(note.content))
+                lines.append("")
 
     return "\n".join(lines).strip() + "\n"
 
@@ -512,6 +537,22 @@ def build_docx(workspace: Workspace, req: SessionExportRequest) -> bytes:
                         space_before=20,
                         space_after=60,
                         shading_fill="FFFBE6",
+                    )
+
+    if req.include_sticky_notes and workspace.sticky_notes:
+        non_empty_notes = [n for n in workspace.sticky_notes if (n.title.strip() or n.content.strip())]
+        if non_empty_notes:
+            builder.add_heading("五、课堂便签速记", level=2)
+            for idx, note in enumerate(non_empty_notes, start=1):
+                heading = note.title.strip() or f"便签 #{idx}"
+                ts_tags = "  ".join(f"[{t.timestamp_text}]" for t in note.timestamps)
+                builder.add_heading(f"{idx}. {heading}" + (f"  {ts_tags}" if ts_tags else ""), level=3)
+                if note.content.strip():
+                    builder.add_paragraph(
+                        note.content.strip(),
+                        color="1F2329",
+                        left_border_color="D4AF37",
+                        shading_fill="FFFDF2",
                     )
 
     return builder.to_bytes()

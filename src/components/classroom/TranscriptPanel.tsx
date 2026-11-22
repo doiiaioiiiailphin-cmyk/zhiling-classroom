@@ -8,6 +8,7 @@ import {
   MessageSquarePlus,
   Pencil,
   Play,
+  StickyNote,
   Trash2,
   UserRound,
   X,
@@ -15,6 +16,11 @@ import {
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import { getPasteShortcutLabel } from '../../utils/desktopBridge';
+import {
+  mapStickyAnchorsToUtterances,
+  PAPER_THEMES,
+  type UtteranceStickyAnchor,
+} from '../../utils/stickyNoteTimestamps';
 import type {
   HighlightedTerm,
   KnowledgeSegment,
@@ -38,10 +44,13 @@ interface UtteranceRowProps {
   deferOffscreen: boolean;
   isActiveAudio: boolean;
   isFocusedTarget: boolean;
+  stickyAnchors?: UtteranceStickyAnchor[];
   onSeekAudio: (startTimeMs: number) => void;
   onRenameSpeaker: (speakerId: string, label: string) => Promise<void>;
   onUpdateUtterance: (utteranceId: string, patch: UtterancePatch) => Promise<void>;
   onAskAboutText: (quoted: string, timeLabel: string) => void;
+  onFocusStickyAnchor: (noteId: string, timestampSec: number, charOffset: number) => void;
+  onQuickNoteUtterance: (utterance: { startTimeMs: number; timestampText: string }) => void;
 }
 
 const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
@@ -54,10 +63,13 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     deferOffscreen,
     isActiveAudio,
     isFocusedTarget,
+    stickyAnchors,
     onSeekAudio,
     onRenameSpeaker,
     onUpdateUtterance,
     onAskAboutText,
+    onFocusStickyAnchor,
+    onQuickNoteUtterance,
   }) => {
     const [isEditingSpk, setIsEditingSpk] = useState(false);
     const [speakerDraft, setSpeakerDraft] = useState('');
@@ -67,6 +79,12 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
 
     const [isEditingNote, setIsEditingNote] = useState(false);
     const [noteDraft, setNoteDraft] = useState('');
+    const [stickyPickerOpen, setStickyPickerOpen] = useState(false);
+
+    const primarySticky = stickyAnchors && stickyAnchors.length > 0 ? stickyAnchors[0] : null;
+    const stickyTheme = primarySticky
+      ? PAPER_THEMES[primarySticky.paperColor] ?? PAPER_THEMES.cream
+      : null;
 
     const displayedText =
       enableCorrection && utterance.isRefined ? utterance.refinedText : utterance.rawText;
@@ -103,10 +121,21 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
       });
     };
 
+    const handleStickyGradientClick = () => {
+      if (!stickyAnchors || stickyAnchors.length === 0) return;
+      if (stickyAnchors.length === 1) {
+        const only = stickyAnchors[0];
+        onFocusStickyAnchor(only.noteId, only.timestampSec, only.charOffset);
+      } else {
+        setStickyPickerOpen((v) => !v);
+      }
+    };
+
     return (
       <div
         data-utterance-id={utterance.id}
-        className={`group rounded-lg px-2.5 py-2 -mx-2.5 space-y-1.5 transition-colors ${
+        data-has-sticky-anchor={primarySticky ? 'true' : undefined}
+        className={`relative group rounded-lg px-2.5 py-2 -mx-2.5 space-y-1.5 transition-colors ${
           isFocusedTarget
             ? 'bg-[#EBF2FF] ring-2 ring-[#1456F0]/30'
             : isActiveAudio
@@ -119,7 +148,34 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             : undefined
         }
       >
-        <div className="flex items-center justify-between gap-2">
+        {/* 便签时间戳命中的右侧纸色渐变：点击直接跳转至便签中对应时间戳位置 */}
+        {primarySticky && stickyTheme && (
+          <>
+            <div
+              aria-hidden="true"
+              style={{
+                background: `linear-gradient(90deg, transparent 0%, ${stickyTheme.gradientMid} 52%, ${stickyTheme.gradientEnd} 100%)`,
+                borderRight: `3px solid ${stickyTheme.edgeAccent}`,
+              }}
+              className="pointer-events-none absolute inset-y-0 right-0 w-[44%] rounded-r-lg transition-opacity"
+            />
+            <button
+              type="button"
+              aria-label={`跳转到便签「${primarySticky.noteTitle}」的 [${primarySticky.timestampText}] 位置`}
+              onClick={handleStickyGradientClick}
+              title={
+                stickyAnchors && stickyAnchors.length > 1
+                  ? `该行关联 ${stickyAnchors.length} 个便签时间戳，点击选择跳转`
+                  : `点击直达便签「${primarySticky.noteTitle}」[${primarySticky.timestampText}]${
+                      primarySticky.linePreview ? `：${primarySticky.linePreview}` : ''
+                    }`
+              }
+              className="absolute inset-y-0 right-0 w-7 z-10 rounded-r-lg cursor-pointer hover:bg-black/5 transition-colors"
+            />
+          </>
+        )}
+
+        <div className="relative z-10 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5 flex-wrap min-w-0">
             {showDiarization && (
               <>
@@ -179,51 +235,143 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             )}
           </div>
 
-          {/* 悬浮快捷微操作栏：纯矢量图标克制排布 */}
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
-            <Tooltip content="追问 AI 这句话" placement="top">
-              <button
-                type="button"
-                onClick={() => onAskAboutText(displayedText, utterance.timestampText)}
-                className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
-              >
-                <MessageSquarePlus className="w-4 h-4" />
-              </button>
-            </Tooltip>
+          {/* 右侧微操作栏 + 便签纸色直达角标 */}
+          <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <Tooltip content="追问 AI 这句话" placement="top">
+                <button
+                  type="button"
+                  onClick={() => onAskAboutText(displayedText, utterance.timestampText)}
+                  className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
+                >
+                  <MessageSquarePlus className="w-4 h-4" />
+                </button>
+              </Tooltip>
 
-            <Tooltip
-              content={utterance.isBookmarked ? '取消难点书签' : '标记为「没听懂」待复习'}
-              placement="top"
-            >
-              <button
-                type="button"
-                onClick={toggleConfusedBookmark}
-                className={`w-7 h-7 rounded-md hover:bg-[#EBF2FF] flex items-center justify-center cursor-pointer ${
-                  utterance.isBookmarked
-                    ? 'text-[#1456F0]'
-                    : 'text-[#646A73] hover:text-[#1456F0]'
-                }`}
-              >
-                <Bookmark className="w-4 h-4" />
-              </button>
-            </Tooltip>
+              <Tooltip content="把此句时间锚点记到便签" placement="top">
+                <button
+                  type="button"
+                  onClick={() => onQuickNoteUtterance(utterance)}
+                  className="w-7 h-7 rounded-md hover:bg-[#F7F0D6] text-[#646A73] hover:text-[#6F5414] flex items-center justify-center cursor-pointer"
+                >
+                  <StickyNote className="w-4 h-4" />
+                </button>
+              </Tooltip>
 
-            <Tooltip content="手动编辑修正此句转写并添加批注" placement="top">
-              <button
-                type="button"
-                onClick={() => {
-                  setTextDraft(displayedText);
-                  setIsEditingText(true);
-                }}
-                className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
+              <Tooltip
+                content={utterance.isBookmarked ? '取消难点书签' : '标记为「没听懂」待复习'}
+                placement="top"
               >
-                <Pencil className="w-4 h-4" />
-              </button>
-            </Tooltip>
+                <button
+                  type="button"
+                  onClick={toggleConfusedBookmark}
+                  className={`w-7 h-7 rounded-md hover:bg-[#EBF2FF] flex items-center justify-center cursor-pointer ${
+                    utterance.isBookmarked
+                      ? 'text-[#1456F0]'
+                      : 'text-[#646A73] hover:text-[#1456F0]'
+                  }`}
+                >
+                  <Bookmark className="w-4 h-4" />
+                </button>
+              </Tooltip>
+
+              <Tooltip content="手动编辑修正此句转写并添加批注" placement="top">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTextDraft(displayedText);
+                    setIsEditingText(true);
+                  }}
+                  className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+              </Tooltip>
+            </div>
+
+            {primarySticky && stickyTheme && (
+              <div className="relative">
+                <Tooltip
+                  content={
+                    stickyAnchors && stickyAnchors.length > 1
+                      ? `本句关联 ${stickyAnchors.length} 个便签时间戳，点击选择跳转`
+                      : `便签「${primarySticky.noteTitle}」· ${
+                          primarySticky.linePreview || `[${primarySticky.timestampText}]`
+                        }（点击直达）`
+                  }
+                  placement="top"
+                >
+                  <button
+                    type="button"
+                    data-sticky-jump-pill={primarySticky.timestampText}
+                    onClick={handleStickyGradientClick}
+                    style={{
+                      backgroundColor: stickyTheme.chipBg,
+                      borderColor: stickyTheme.chipBorder,
+                      color: stickyTheme.chipText,
+                    }}
+                    className="h-7 px-2 rounded-md border text-[14px] font-mono tabular-nums inline-flex items-center gap-1 hover:brightness-95 shadow-2xs transition-all cursor-pointer"
+                  >
+                    <StickyNote className="w-3.5 h-3.5 shrink-0" />
+                    <span>{primarySticky.timestampText}</span>
+                    {stickyAnchors && stickyAnchors.length > 1 && (
+                      <span className="font-sans text-[14px]">+{stickyAnchors.length - 1}</span>
+                    )}
+                  </button>
+                </Tooltip>
+
+                {stickyPickerOpen && stickyAnchors && stickyAnchors.length > 1 && (
+                  <div
+                    onMouseLeave={() => setStickyPickerOpen(false)}
+                    className="absolute right-0 top-8 z-30 w-64 rounded-xl border border-[#E5D8A8] bg-[#FFFDF8] p-1.5 shadow-lg space-y-1"
+                  >
+                    {stickyAnchors.map((anchor) => {
+                      const t = PAPER_THEMES[anchor.paperColor] ?? PAPER_THEMES.cream;
+                      return (
+                        <button
+                          key={`${anchor.noteId}-${anchor.timestampSec}`}
+                          type="button"
+                          style={{
+                            backgroundColor: t.bodyBg,
+                            borderColor: t.border,
+                          }}
+                          onClick={() => {
+                            setStickyPickerOpen(false);
+                            onFocusStickyAnchor(
+                              anchor.noteId,
+                              anchor.timestampSec,
+                              anchor.charOffset
+                            );
+                          }}
+                          className="w-full rounded-lg border px-2.5 py-1.5 text-left hover:brightness-97 transition-all cursor-pointer space-y-0.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[14px] font-medium text-[#1F2329] truncate">
+                              {anchor.noteTitle}
+                            </span>
+                            <span
+                              style={{ color: t.chipText }}
+                              className="text-[14px] font-mono tabular-nums shrink-0"
+                            >
+                              [{anchor.timestampText}]
+                            </span>
+                          </div>
+                          {anchor.linePreview && (
+                            <div className="text-[14px] text-[#646A73] truncate">
+                              {anchor.linePreview}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="pl-0.5">
+        <div className="relative z-10 pl-0.5">
           {isEditingText ? (
             <div className="space-y-2 pt-1">
               <textarea
@@ -336,6 +484,7 @@ interface SegmentCardProps {
   activeAudioMs: number | null;
   focusedUtteranceId: string | null;
   isFocusedSegment: boolean;
+  utteranceStickyMap: Map<string, UtteranceStickyAnchor[]>;
   onSeekAudio: (ms: number) => void;
   onRenameSpeaker: (speakerId: string, label: string) => Promise<void>;
   onUpdateUtterance: (utteranceId: string, patch: UtterancePatch) => Promise<void>;
@@ -343,6 +492,8 @@ interface SegmentCardProps {
   onAskWithImage: (att: SessionAttachmentItem) => void;
   onDeleteAttachment: (attachmentId: string) => void;
   onPreviewImage: (att: SessionAttachmentItem) => void;
+  onFocusStickyAnchor: (noteId: string, timestampSec: number, charOffset: number) => void;
+  onQuickNoteUtterance: (utterance: { startTimeMs: number; timestampText: string }) => void;
 }
 
 const SegmentCard: React.FC<SegmentCardProps> = React.memo(
@@ -358,6 +509,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     activeAudioMs,
     focusedUtteranceId,
     isFocusedSegment,
+    utteranceStickyMap,
     onSeekAudio,
     onRenameSpeaker,
     onUpdateUtterance,
@@ -365,6 +517,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     onAskWithImage,
     onDeleteAttachment,
     onPreviewImage,
+    onFocusStickyAnchor,
+    onQuickNoteUtterance,
   }) => {
     const isLargeSegment = visibleUtterances.length > 24;
 
@@ -409,10 +563,13 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   deferOffscreen={isLargeSegment && idx < visibleUtterances.length - 8}
                   isActiveAudio={isPlayingHere}
                   isFocusedTarget={focusedUtteranceId === utt.id}
+                  stickyAnchors={utteranceStickyMap.get(utt.id)}
                   onSeekAudio={onSeekAudio}
                   onRenameSpeaker={onRenameSpeaker}
                   onUpdateUtterance={onUpdateUtterance}
                   onAskAboutText={onAskAboutText}
+                  onFocusStickyAnchor={onFocusStickyAnchor}
+                  onQuickNoteUtterance={onQuickNoteUtterance}
                 />
               );
             })}
@@ -505,10 +662,13 @@ LiveRecordingBanner.displayName = 'LiveRecordingBanner';
 export const TranscriptPanel: React.FC = React.memo(() => {
   const segments = useAppStore((s) => s.segments);
   const attachments = useAppStore((s) => s.attachments);
+  const stickyNotes = useAppStore((s) => s.stickyNotes);
   const isRecording = useAppStore((s) => s.activeSession?.status === 'recording');
   const audioPlayback = useAppStore((s) => s.audioPlayback);
   const focusRequest = useAppStore((s) => s.transcriptFocusRequest);
   const clearTranscriptFocusRequest = useAppStore((s) => s.clearTranscriptFocusRequest);
+  const focusStickyNoteTimestamp = useAppStore((s) => s.focusStickyNoteTimestamp);
+  const quickNoteAtUtterance = useAppStore((s) => s.quickNoteAtUtterance);
 
   const enableCorrection = useAppStore(
     (s) => s.settings?.featureRouting.sentenceCorrection.enabled ?? true
@@ -553,6 +713,18 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         0
       ),
     [segments]
+  );
+
+  const utteranceStickyMap = useMemo(
+    () => mapStickyAnchorsToUtterances(stickyNotes, segments),
+    [stickyNotes, segments]
+  );
+
+  const handleQuickNoteUtterance = useCallback(
+    (utterance: { startTimeMs: number; timestampText: string }) => {
+      void quickNoteAtUtterance(utterance);
+    },
+    [quickNoteAtUtterance]
   );
 
   const imagesBySegment = useMemo(() => {
@@ -873,6 +1045,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                       activeAudioMs={activeAudioMs}
                       focusedUtteranceId={focusedIds.utteranceId}
                       isFocusedSegment={focusedIds.segmentId === segment.id}
+                      utteranceStickyMap={utteranceStickyMap}
                       onSeekAudio={seekAudioPlayback}
                       onRenameSpeaker={renameSpeaker}
                       onUpdateUtterance={updateUtterance}
@@ -880,6 +1053,8 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                       onAskWithImage={handleAskWithImage}
                       onDeleteAttachment={(id) => void deleteSessionAttachment(id)}
                       onPreviewImage={setPreviewImage}
+                      onFocusStickyAnchor={focusStickyNoteTimestamp}
+                      onQuickNoteUtterance={handleQuickNoteUtterance}
                     />
                   </div>
                 ))}
