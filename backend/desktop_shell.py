@@ -584,6 +584,46 @@ def main() -> None:
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     webview.settings["DRAG_REGION_SELECTOR"] = ".zhiling-disabled-legacy-drag"
 
+    if sys.platform == "win32":
+        # pywebview EdgeChrome.__init__ 会直接写 CreationProperties.AdditionalBrowserArguments，
+        # 导致 WebView2 忽略 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量。
+        # 通过 form.ControlAdded（在 line 95 同步触发，位于 CreationProperties 赋值之后、
+        # EnsureCoreWebView2Async 启动内核之前）将 --disable-renderer-accessibility 真正注入 WebView2 内核参数，
+        # 彻底规避 Edge WebView2 157 crbug.com/549525849 (ax_block_flow_iterator.cc STATUS_BREAKPOINT) 页面崩溃。
+        try:
+            import webview.platforms.edgechromium as _ec  # type: ignore
+
+            if not getattr(_ec.EdgeChrome, "_zhiling_ax_patched", False):
+                _orig_edge_init = _ec.EdgeChrome.__init__
+
+                def _zhiling_edge_init(self, form, window, cache_dir):
+                    def _inject_wv2_args(_sender, evt_args) -> None:
+                        ctrl = getattr(evt_args, "Control", None)
+                        props = getattr(ctrl, "CreationProperties", None)
+                        if props is not None:
+                            cur = str(getattr(props, "AdditionalBrowserArguments", "") or "")
+                            if "--disable-renderer-accessibility" not in cur:
+                                props.AdditionalBrowserArguments = (
+                                    f"{cur} --disable-renderer-accessibility".strip()
+                                )
+
+                    try:
+                        form.ControlAdded += _inject_wv2_args
+                    except Exception:
+                        pass
+                    try:
+                        _orig_edge_init(self, form, window, cache_dir)
+                    finally:
+                        try:
+                            form.ControlAdded -= _inject_wv2_args
+                        except Exception:
+                            pass
+
+                _ec.EdgeChrome.__init__ = _zhiling_edge_init
+                _ec.EdgeChrome._zhiling_ax_patched = True
+        except Exception:
+            pass
+
     windows: dict[str, object] = {
         "maximized": False,
         "normal_rect": None,
