@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   useFloating,
   autoUpdate,
@@ -16,6 +16,59 @@ interface TooltipProps {
   maxWidthClass?: string;
   delayMs?: number;
 }
+
+interface TooltipBubbleProps {
+  tooltipId: string;
+  referenceEl: HTMLElement | null;
+  content: React.ReactNode;
+  placement: Placement;
+  maxWidthClass: string;
+  onClose: () => void;
+}
+
+const TooltipBubble: React.FC<TooltipBubbleProps> = ({
+  tooltipId,
+  referenceEl,
+  content,
+  placement,
+  maxWidthClass,
+  onClose,
+}) => {
+  const { refs, floatingStyles, isPositioned } = useFloating({
+    open: true,
+    onOpenChange: (next) => {
+      if (!next) onClose();
+    },
+    placement,
+    whileElementsMounted: autoUpdate,
+    middleware: [offset(8), flip({ padding: 10 }), shift({ padding: 10 })],
+  });
+
+  useLayoutEffect(() => {
+    refs.setReference(referenceEl);
+  }, [refs, referenceEl]);
+
+  if (!referenceEl) return null;
+
+  return (
+    <FloatingPortal>
+      <div
+        id={tooltipId}
+        role="tooltip"
+        ref={refs.setFloating}
+        style={{
+          ...floatingStyles,
+          visibility: isPositioned ? 'visible' : 'hidden',
+        }}
+        className={`z-[80] ${maxWidthClass} rounded-lg border border-[#DEE0E3] bg-white px-3.5 py-2 text-[14px] leading-relaxed text-[#1F2329] shadow-[0_8px_24px_rgba(31,35,41,0.12)] pointer-events-none select-none transition-opacity duration-120 ${
+          isPositioned ? 'opacity-100' : 'opacity-0'
+        }`}
+      >
+        {content}
+      </div>
+    </FloatingPortal>
+  );
+};
 
 function assignRef<T>(ref: React.Ref<T> | undefined, value: T | null): void {
   if (!ref) return;
@@ -138,21 +191,7 @@ export const Tooltip: React.FC<TooltipProps> = ({
     };
   }, [isOpen, closeImmediately]);
 
-  const { refs, floatingStyles, isPositioned } = useFloating({
-    open: isOpen,
-    onOpenChange: (next) => {
-      if (!next) {
-        closeImmediately();
-      } else {
-        setIsOpen(true);
-      }
-    },
-    placement,
-    whileElementsMounted: autoUpdate,
-    middleware: [offset(8), flip({ padding: 10 }), shift({ padding: 10 })],
-  });
-
-  // React 19 下 forwardRef 子组件会将 ref 放入 children.props，需单独提取合并，避免覆盖 refs.setReference
+  // React 19 下 forwardRef 子组件会将 ref 放入 children.props，需单独提取合并
   const rawChildProps = children.props as {
     ref?: React.Ref<HTMLElement>;
     onPointerEnter?: (e: React.PointerEvent<HTMLElement>) => void;
@@ -182,7 +221,6 @@ export const Tooltip: React.FC<TooltipProps> = ({
   const setMergedReference = useCallback(
     (node: HTMLElement | null) => {
       domRef.current = node;
-      refs.setReference(node);
       assignRef(childRef, node);
       if (node === null) {
         clearOpenTimer();
@@ -190,7 +228,7 @@ export const Tooltip: React.FC<TooltipProps> = ({
         isFocusedRef.current = false;
       }
     },
-    [refs, childRef, clearOpenTimer]
+    [childRef, clearOpenTimer]
   );
 
   const hasContent = Boolean(content);
@@ -263,22 +301,14 @@ export const Tooltip: React.FC<TooltipProps> = ({
         },
       } as React.Attributes)}
       {hasContent && isOpen && (
-        <FloatingPortal>
-          <div
-            id={tooltipId}
-            role="tooltip"
-            ref={refs.setFloating}
-            style={{
-              ...floatingStyles,
-              visibility: isPositioned ? 'visible' : 'hidden',
-            }}
-            className={`z-[80] ${maxWidthClass} rounded-lg border border-[#DEE0E3] bg-white px-3.5 py-2 text-[14px] leading-relaxed text-[#1F2329] shadow-[0_8px_24px_rgba(31,35,41,0.12)] pointer-events-none select-none transition-opacity duration-120 ${
-              isPositioned ? 'opacity-100' : 'opacity-0'
-            }`}
-          >
-            {content}
-          </div>
-        </FloatingPortal>
+        <TooltipBubble
+          tooltipId={tooltipId}
+          referenceEl={domRef.current}
+          content={content}
+          placement={placement}
+          maxWidthClass={maxWidthClass}
+          onClose={closeImmediately}
+        />
       )}
     </>
   );

@@ -15,6 +15,11 @@ import {
 } from 'lucide-react';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
+import {
+  loadPanelScroll,
+  savePanelScroll,
+  type PanelScrollSnapshot,
+} from '../../utils/classroomScrollMemory';
 import { getPasteShortcutLabel } from '../../utils/desktopBridge';
 import {
   mapStickyAnchorsToUtterances,
@@ -476,6 +481,8 @@ interface SegmentCardProps {
   segment: KnowledgeSegment;
   visibleUtterances: TranscriptUtterance[];
   segmentImages: SessionAttachmentItem[];
+  isFirstChunk: boolean;
+  isLastChunk: boolean;
   enableCorrection: boolean;
   enableResegment: boolean;
   enableHighlight: boolean;
@@ -501,6 +508,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     segment,
     visibleUtterances,
     segmentImages,
+    isFirstChunk,
+    isLastChunk,
     enableCorrection,
     enableResegment,
     enableHighlight,
@@ -520,24 +529,33 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     onFocusStickyAnchor,
     onQuickNoteUtterance,
   }) => {
-    const isLargeSegment = visibleUtterances.length > 24;
+    const borderShapeClass =
+      isFirstChunk && isLastChunk
+        ? 'rounded-xl border p-5'
+        : isFirstChunk
+          ? 'rounded-t-xl border border-b-0 px-5 pt-5 pb-2.5'
+          : isLastChunk
+            ? 'rounded-b-xl border border-t-0 px-5 pt-2.5 pb-5'
+            : 'border-x px-5 py-2.5';
 
     return (
-      <div className="flex items-start gap-3">
+      <div className={`flex items-start gap-3 ${isLastChunk ? 'pb-4' : ''}`}>
         {enableBubble && (
-          <div className="pt-3 shrink-0">
-            <KnowledgeBubblePopover segment={segment} />
+          <div className={isFirstChunk ? 'pt-3 shrink-0' : 'w-9 shrink-0'}>
+            {isFirstChunk && <KnowledgeBubblePopover segment={segment} />}
           </div>
         )}
 
         <article
-          className={`flex-1 min-w-0 rounded-xl border bg-white p-5 shadow-[0_2px_8px_rgba(31,35,41,0.03)] space-y-3.5 transition-all ${
-            isFocusedSegment
+          className={`flex-1 min-w-0 bg-white shadow-[0_2px_8px_rgba(31,35,41,0.03)] space-y-3.5 transition-all ${borderShapeClass} ${
+            isFocusedSegment && isFirstChunk && isLastChunk
               ? 'border-[#1456F0] ring-2 ring-[#1456F0]/20'
-              : 'border-[#DEE0E3]'
+              : isFocusedSegment
+                ? 'border-[#1456F0]'
+                : 'border-[#DEE0E3]'
           }`}
         >
-          {enableResegment && segment.topicTitle && (
+          {isFirstChunk && enableResegment && segment.topicTitle && (
             <div className="flex items-center gap-2 border-b border-[#F2F3F5] pb-2.5">
               <span className="w-2 h-2 rounded-full bg-[#1456F0] shrink-0" />
               <h3 className="text-[15px] font-semibold text-[#1F2329]">
@@ -547,7 +565,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
           )}
 
           <div className="space-y-3">
-            {visibleUtterances.map((utt, idx) => {
+            {visibleUtterances.map((utt) => {
               const isPlayingHere =
                 activeAudioMs !== null &&
                 activeAudioMs >= utt.startTimeMs &&
@@ -560,7 +578,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   enableCorrection={enableCorrection}
                   enableHighlight={enableHighlight}
                   showDiarization={showDiarization}
-                  deferOffscreen={isLargeSegment && idx < visibleUtterances.length - 8}
+                  deferOffscreen={false}
                   isActiveAudio={isPlayingHere}
                   isFocusedTarget={focusedUtteranceId === utt.id}
                   stickyAnchors={utteranceStickyMap.get(utt.id)}
@@ -575,8 +593,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
             })}
           </div>
 
-          {/* 挂载在该知识分段的课堂板书/PPT 截图卡片 */}
-          {segmentImages.length > 0 && (
+          {/* 挂载在该知识分段的课堂板书/PPT 截图卡片（仅尾块渲染） */}
+          {isLastChunk && segmentImages.length > 0 && (
             <div className="pt-2 border-t border-[#F2F3F5] grid grid-cols-1 sm:grid-cols-2 gap-3">
               {segmentImages.map((img) => (
                 <div
@@ -660,6 +678,7 @@ const LiveRecordingBanner: React.FC<{ enableBubble: boolean }> = React.memo(
 LiveRecordingBanner.displayName = 'LiveRecordingBanner';
 
 export const TranscriptPanel: React.FC = React.memo(() => {
+  const sessionId = useAppStore((s) => s.activeSession?.id ?? null);
   const segments = useAppStore((s) => s.segments);
   const attachments = useAppStore((s) => s.attachments);
   const stickyNotes = useAppStore((s) => s.stickyNotes);
@@ -699,6 +718,15 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   const handledFocusSeqRef = useRef<number>(0);
   const focusTimerRef = useRef<number | null>(null);
   const utteranceRefineRafRef = useRef<number | null>(null);
+  const restoredSessionIdRef = useRef<string | null>(null);
+  const restoreRefineRafRef = useRef<number | null>(null);
+  const restoreRefineRaf2Ref = useRef<number | null>(null);
+  const isRestoringScrollRef = useRef<boolean>(false);
+  const saveScrollTimerRef = useRef<number | null>(null);
+  const latestScrollSnapshotRef = useRef<{
+    sessionId: string;
+    snapshot: PanelScrollSnapshot;
+  } | null>(null);
   const [selectionBar, setSelectionBar] = useState<{
     text: string;
     x: number;
@@ -741,31 +769,66 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     return map;
   }, [attachments, segments]);
 
-  const renderedSegments = useMemo(
-    () =>
-      segments
-        .map((segment) => {
-          const base = enableCorrection
-            ? segment.utterances.filter((utt) => !(utt.isRefined && !utt.refinedText.trim()))
-            : segment.utterances;
-          const visibleUtterances = onlyBookmarks
-            ? base.filter((utt) => utt.isBookmarked)
-            : base;
-          const segmentImages = imagesBySegment.get(segment.id) ?? [];
-          return { segment, visibleUtterances, segmentImages };
-        })
-        .filter(({ segment, visibleUtterances, segmentImages }) => {
-          if (onlyBookmarks) return visibleUtterances.length > 0;
-          if (segmentImages.length > 0) return true;
-          return (
-            !enableCorrection || segment.utterances.length === 0 || visibleUtterances.length > 0
-          );
-        }),
-    [segments, enableCorrection, onlyBookmarks, imagesBySegment]
-  );
+  const renderedSegments = useMemo(() => {
+    const CHUNK_THRESHOLD = 32;
+    const CHUNK_SIZE = 24;
+    const rows: Array<{
+      chunkKey: string;
+      segment: KnowledgeSegment;
+      visibleUtterances: TranscriptUtterance[];
+      segmentImages: SessionAttachmentItem[];
+      isFirstChunk: boolean;
+      isLastChunk: boolean;
+    }> = [];
+
+    for (const segment of segments) {
+      const base = enableCorrection
+        ? segment.utterances.filter((utt) => !(utt.isRefined && !utt.refinedText.trim()))
+        : segment.utterances;
+      const visibleUtterances = onlyBookmarks
+        ? base.filter((utt) => utt.isBookmarked)
+        : base;
+      const segmentImages = imagesBySegment.get(segment.id) ?? [];
+
+      const shouldKeep = onlyBookmarks
+        ? visibleUtterances.length > 0
+        : segmentImages.length > 0 ||
+          !enableCorrection ||
+          segment.utterances.length === 0 ||
+          visibleUtterances.length > 0;
+      if (!shouldKeep) continue;
+
+      if (visibleUtterances.length <= CHUNK_THRESHOLD) {
+        rows.push({
+          chunkKey: segment.id,
+          segment,
+          visibleUtterances,
+          segmentImages,
+          isFirstChunk: true,
+          isLastChunk: true,
+        });
+      } else {
+        const totalChunks = Math.ceil(visibleUtterances.length / CHUNK_SIZE);
+        for (let c = 0; c < totalChunks; c += 1) {
+          const slice = visibleUtterances.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+          const isFirstChunk = c === 0;
+          const isLastChunk = c === totalChunks - 1;
+          rows.push({
+            chunkKey: isFirstChunk ? segment.id : `${segment.id}::c${c}`,
+            segment,
+            visibleUtterances: slice,
+            segmentImages: isLastChunk ? segmentImages : [],
+            isFirstChunk,
+            isLastChunk,
+          });
+        }
+      }
+    }
+    return rows;
+  }, [segments, enableCorrection, onlyBookmarks, imagesBySegment]);
 
   const getItemKey = useCallback(
-    (index: number) => renderedSegments[index]?.segment.id ?? String(index),
+    (index: number) => renderedSegments[index]?.chunkKey ?? String(index),
     [renderedSegments]
   );
 
@@ -773,26 +836,270 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     (index: number) => {
       const item = renderedSegments[index];
       if (!item) return 140;
-      const imgRows = Math.ceil(item.segmentImages.length / 2);
-      return 84 + Math.max(1, item.visibleUtterances.length) * 72 + imgRows * 210;
+      const imgRows = item.isLastChunk ? Math.ceil(item.segmentImages.length / 2) : 0;
+      const headerH = item.isFirstChunk ? 64 : 16;
+      const footerH = item.isLastChunk ? 36 : 12;
+      return headerH + footerH + Math.max(1, item.visibleUtterances.length) * 76 + imgRows * 210;
     },
     [renderedSegments]
   );
 
-  const { scrollRef, measureElement, notifyScroll, scrollToIndex, range } = useVirtualList({
+  const {
+    scrollRef,
+    measureElement,
+    notifyScroll,
+    scrollToIndex,
+    scrollToIndexInstant,
+    scrollToOffsetInstant,
+    getAnchorAtScrollTop,
+    range,
+  } = useVirtualList({
     count: renderedSegments.length,
     getItemKey,
     estimateSize,
-    gap: 16,
+    gap: 0,
     overscanPx: 750,
   });
+
+  const cancelPendingRestore = useCallback(() => {
+    if (restoreRefineRafRef.current !== null) {
+      window.cancelAnimationFrame(restoreRefineRafRef.current);
+      restoreRefineRafRef.current = null;
+    }
+    if (restoreRefineRaf2Ref.current !== null) {
+      window.cancelAnimationFrame(restoreRefineRaf2Ref.current);
+      restoreRefineRaf2Ref.current = null;
+    }
+    isRestoringScrollRef.current = false;
+  }, []);
 
   const cancelPendingFocusRefine = useCallback(() => {
     if (utteranceRefineRafRef.current !== null) {
       window.cancelAnimationFrame(utteranceRefineRafRef.current);
       utteranceRefineRafRef.current = null;
     }
+    cancelPendingRestore();
+  }, [cancelPendingRestore]);
+
+  const flushSavedTranscriptScroll = useCallback(() => {
+    if (saveScrollTimerRef.current !== null) {
+      window.clearTimeout(saveScrollTimerRef.current);
+      saveScrollTimerRef.current = null;
+    }
+    const pending = latestScrollSnapshotRef.current;
+    if (pending) {
+      savePanelScroll(pending.sessionId, 'transcript', pending.snapshot);
+    }
   }, []);
+
+  const captureCurrentTranscriptScroll = useCallback(() => {
+    if (!sessionId || onlyBookmarks || renderedSegments.length === 0) return;
+    if (restoredSessionIdRef.current !== sessionId || isRestoringScrollRef.current) return;
+    const container = scrollRef.current;
+    if (!container) return;
+
+    const scrollTop = Math.max(0, Math.round(container.scrollTop));
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const atBottom = maxScrollTop > 40 && maxScrollTop - scrollTop <= 36;
+
+    const containerTop = container.getBoundingClientRect().top;
+    const anchor = getAnchorAtScrollTop(scrollTop);
+    let anchorKey = anchor ? renderedSegments[anchor.index]?.chunkKey : undefined;
+    let anchorOffsetPx = anchor ? Math.round(anchor.offsetPx) : 0;
+
+    if (anchorKey) {
+      const anchorEl = container.querySelector<HTMLElement>(
+        `[data-virtual-key="${CSS.escape(anchorKey)}"]`
+      );
+      if (anchorEl) {
+        anchorOffsetPx = Math.round(containerTop - anchorEl.getBoundingClientRect().top);
+      }
+    }
+
+    // 精确定位到视口顶部第一条可见句（免疫超长分段内 content-visibility: auto 高度估算偏差）
+    let anchorUtteranceId: string | undefined;
+    let anchorUtteranceOffsetPx: number | undefined;
+    const uttNodes = container.querySelectorAll<HTMLElement>('[data-utterance-id]');
+    for (const node of uttNodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom > containerTop + 8) {
+        const uid = node.dataset.utteranceId;
+        if (uid) {
+          anchorUtteranceId = uid;
+          anchorUtteranceOffsetPx = Math.round(containerTop - rect.top);
+          const parentSegEl = node.closest<HTMLElement>('[data-virtual-key]');
+          if (parentSegEl?.dataset.virtualKey) {
+            anchorKey = parentSegEl.dataset.virtualKey;
+            anchorOffsetPx = Math.round(containerTop - parentSegEl.getBoundingClientRect().top);
+          }
+        }
+        break;
+      }
+    }
+
+    latestScrollSnapshotRef.current = {
+      sessionId,
+      snapshot: {
+        anchorKey,
+        anchorOffsetPx,
+        anchorUtteranceId,
+        anchorUtteranceOffsetPx,
+        scrollTop,
+        atBottom,
+        updatedAt: Date.now(),
+      },
+    };
+
+    if (saveScrollTimerRef.current !== null) {
+      window.clearTimeout(saveScrollTimerRef.current);
+    }
+    saveScrollTimerRef.current = window.setTimeout(() => {
+      flushSavedTranscriptScroll();
+    }, 180);
+  }, [
+    sessionId,
+    onlyBookmarks,
+    renderedSegments,
+    scrollRef,
+    getAnchorAtScrollTop,
+    flushSavedTranscriptScroll,
+  ]);
+
+  // 切出课堂或关闭窗口前立刻落盘最后浏览位置
+  useEffect(() => {
+    const handlePageHide = () => flushSavedTranscriptScroll();
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      flushSavedTranscriptScroll();
+    };
+  }, [sessionId, flushSavedTranscriptScroll]);
+
+  // 打开历史课堂时默认恢复到上一次拖动到的精确位置（若有跨课堂搜索定位请求则让位给定位请求）
+  useEffect(() => {
+    if (!sessionId || renderedSegments.length === 0 || onlyBookmarks) return;
+    if (restoredSessionIdRef.current === sessionId) return;
+
+    restoredSessionIdRef.current = sessionId;
+    latestScrollSnapshotRef.current = null;
+
+    if (useAppStore.getState().transcriptFocusRequest) {
+      return;
+    }
+
+    const saved = loadPanelScroll(sessionId, 'transcript');
+    if (!saved) return;
+
+    cancelPendingRestore();
+
+    if (saved.atBottom) {
+      isRestoringScrollRef.current = true;
+      const lastIdx = renderedSegments.length - 1;
+      const lastEstH = estimateSize(lastIdx);
+      const clientH = scrollRef.current?.clientHeight || 600;
+      scrollToIndexInstant(lastIdx, Math.max(0, lastEstH - clientH));
+      restoreRefineRafRef.current = window.requestAnimationFrame(() => {
+        restoreRefineRafRef.current = null;
+        restoreRefineRaf2Ref.current = window.requestAnimationFrame(() => {
+          restoreRefineRaf2Ref.current = null;
+          const container = scrollRef.current;
+          if (container) {
+            container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+            notifyScroll();
+          }
+          isRestoringScrollRef.current = false;
+        });
+      });
+      return;
+    }
+
+    let anchorIndex = -1;
+    let uttIdxInSeg = -1;
+    if (saved.anchorUtteranceId) {
+      anchorIndex = renderedSegments.findIndex((r) => {
+        const idx = r.visibleUtterances.findIndex((u) => u.id === saved.anchorUtteranceId);
+        if (idx >= 0) {
+          uttIdxInSeg = idx;
+          return true;
+        }
+        return false;
+      });
+    }
+    if (anchorIndex < 0 && saved.anchorKey) {
+      anchorIndex = renderedSegments.findIndex(
+        (r) => r.chunkKey === saved.anchorKey || r.segment.id === saved.anchorKey
+      );
+    }
+
+    if (anchorIndex >= 0) {
+      isRestoringScrollRef.current = true;
+      const segItem = renderedSegments[anchorIndex];
+      const anchorKeyToLock = segItem.chunkKey;
+      const uttIdToLock = saved.anchorUtteranceId;
+      const desiredUttOffsetPx = saved.anchorUtteranceOffsetPx ?? 0;
+      const desiredSegOffsetPx = saved.anchorOffsetPx;
+
+      let coarseOffset = Math.max(0, desiredSegOffsetPx);
+      if (uttIdxInSeg >= 0 && segItem.visibleUtterances.length > 0) {
+        const estSegH = estimateSize(anchorIndex);
+        coarseOffset = Math.max(
+          0,
+          Math.round((uttIdxInSeg / segItem.visibleUtterances.length) * estSegH)
+        );
+      }
+
+      scrollToIndexInstant(anchorIndex, coarseOffset);
+      restoreRefineRafRef.current = window.requestAnimationFrame(() => {
+        restoreRefineRafRef.current = null;
+        restoreRefineRaf2Ref.current = window.requestAnimationFrame(() => {
+          restoreRefineRaf2Ref.current = null;
+          const container = scrollRef.current;
+          if (container) {
+            const containerTop = container.getBoundingClientRect().top;
+            const uttEl = uttIdToLock
+              ? container.querySelector<HTMLElement>(
+                  `[data-utterance-id="${CSS.escape(uttIdToLock)}"]`
+                )
+              : null;
+            if (uttEl) {
+              const delta = uttEl.getBoundingClientRect().top - containerTop + desiredUttOffsetPx;
+              if (Math.abs(delta) >= 2) {
+                container.scrollTop = Math.max(0, container.scrollTop + delta);
+                notifyScroll();
+              }
+            } else {
+              const anchorEl = container.querySelector<HTMLElement>(
+                `[data-virtual-key="${CSS.escape(anchorKeyToLock)}"]`
+              );
+              if (anchorEl) {
+                const delta =
+                  anchorEl.getBoundingClientRect().top - containerTop + desiredSegOffsetPx;
+                if (Math.abs(delta) >= 2) {
+                  container.scrollTop = Math.max(0, container.scrollTop + delta);
+                  notifyScroll();
+                }
+              }
+            }
+          }
+          isRestoringScrollRef.current = false;
+        });
+      });
+    } else if (saved.scrollTop > 0) {
+      scrollToOffsetInstant(saved.scrollTop);
+    }
+  }, [
+    sessionId,
+    renderedSegments,
+    onlyBookmarks,
+    cancelPendingRestore,
+    estimateSize,
+    scrollToIndexInstant,
+    scrollToOffsetInstant,
+    scrollRef,
+    notifyScroll,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -804,8 +1111,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         window.cancelAnimationFrame(utteranceRefineRafRef.current);
         utteranceRefineRafRef.current = null;
       }
+      cancelPendingRestore();
     };
-  }, []);
+  }, [cancelPendingRestore]);
 
   // 响应来自对话时间戳角标或跨课堂搜索的一次性定位请求（严格按 seq 消费并清空，绝不随后续转写更新反复回跳）
   useEffect(() => {
@@ -825,18 +1133,18 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     let targetSegId: string | null = focusRequest.segmentId ?? null;
     let targetUttId: string | null = focusRequest.utteranceId ?? null;
 
-    if (targetSegId) {
-      targetIndex = renderedSegments.findIndex((r) => r.segment.id === targetSegId);
-    } else if (targetUttId) {
+    if (targetUttId) {
       targetIndex = renderedSegments.findIndex((r) =>
-        r.segment.utterances.some((u) => u.id === targetUttId)
+        r.visibleUtterances.some((u) => u.id === targetUttId)
       );
       if (targetIndex >= 0) targetSegId = renderedSegments[targetIndex].segment.id;
+    } else if (targetSegId) {
+      targetIndex = renderedSegments.findIndex((r) => r.segment.id === targetSegId);
     } else if (focusRequest.timestampMs !== undefined) {
       const ts = focusRequest.timestampMs;
       let bestDist = Number.POSITIVE_INFINITY;
       renderedSegments.forEach((r, idx) => {
-        for (const u of r.segment.utterances) {
+        for (const u of r.visibleUtterances) {
           const dist = Math.abs(u.startTimeMs - ts);
           if (dist < bestDist) {
             bestDist = dist;
@@ -996,6 +1304,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         onPointerDown={cancelPendingFocusRefine}
         onScroll={() => {
           notifyScroll();
+          captureCurrentTranscriptScroll();
           if (selectionBar) setSelectionBar(null);
         }}
         onMouseUp={handleMouseUpSelection}
@@ -1022,21 +1331,23 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                 style={{
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: '16px',
                   paddingTop: `${range.topSpacerPx}px`,
                   paddingBottom: `${range.bottomSpacerPx}px`,
                 }}
               >
-                {visibleSlice.map(({ segment, visibleUtterances, segmentImages }) => (
-                  <div
-                    key={segment.id}
-                    data-virtual-key={segment.id}
-                    ref={measureElement}
-                  >
-                    <SegmentCard
-                      segment={segment}
-                      visibleUtterances={visibleUtterances}
-                      segmentImages={segmentImages}
+                {visibleSlice.map(
+                  ({ chunkKey, segment, visibleUtterances, segmentImages, isFirstChunk, isLastChunk }) => (
+                    <div
+                      key={chunkKey}
+                      data-virtual-key={chunkKey}
+                      ref={measureElement}
+                    >
+                      <SegmentCard
+                        segment={segment}
+                        visibleUtterances={visibleUtterances}
+                        segmentImages={segmentImages}
+                        isFirstChunk={isFirstChunk}
+                        isLastChunk={isLastChunk}
                       enableCorrection={enableCorrection}
                       enableResegment={enableResegment}
                       enableHighlight={enableHighlight}

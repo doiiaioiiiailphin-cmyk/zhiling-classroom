@@ -21,6 +21,9 @@ export interface VirtualListResult {
   measureElement: (node: HTMLElement | null) => void;
   notifyScroll: () => void;
   scrollToIndex: (index: number) => void;
+  scrollToIndexInstant: (index: number, offsetPx?: number) => number | null;
+  scrollToOffsetInstant: (top: number) => void;
+  getAnchorAtScrollTop: (scrollTop?: number) => { index: number; offsetPx: number } | null;
   range: VirtualRange;
 }
 
@@ -160,11 +163,16 @@ export function useVirtualList({
 
         const prevHeight = measuredHeightsRef.current.get(key);
         if (prevHeight === undefined || Math.abs(prevHeight - nextHeight) >= 0.5) {
-          // If this item sits above the current scroll fold, compensate scrollTop to prevent visual jump
+          // Only compensate scrollTop if the item lies ENTIRELY above the viewport top fold
+          // (never compensate when a tall segment spans across scrollTop, which causes drift / feedback loops)
           if (scrollEl && prevHeight !== undefined) {
             const idx = itemIndexByKeyRef.current.get(key);
             const offsets = offsetsRef.current;
-            if (idx !== undefined && idx < offsets.length && offsets[idx] < scrollEl.scrollTop - 2) {
+            if (
+              idx !== undefined &&
+              idx < offsets.length &&
+              offsets[idx] + prevHeight <= scrollEl.scrollTop + 2
+            ) {
               scrollDelta += nextHeight - prevHeight;
             }
           }
@@ -218,18 +226,17 @@ export function useVirtualList({
         const scrollEl = scrollRef.current;
         const idx = itemIndexByKeyRef.current.get(key);
         const offsets = offsetsRef.current;
-        // Compensate even on first measurement if item mounted above current scrollTop (upward scroll)
-        if (
-          scrollEl &&
-          idx !== undefined &&
-          idx < offsets.length &&
-          offsets[idx] < scrollEl.scrollTop - 2
-        ) {
+        // Compensate on first measurement ONLY if item sits entirely above current scrollTop (upward scroll)
+        if (scrollEl && idx !== undefined && idx < offsets.length) {
           const priorEstimate =
             idx + 1 < offsets.length
               ? offsets[idx + 1] - offsets[idx] - gap
               : prev;
-          if (priorEstimate !== undefined && Math.abs(h - priorEstimate) >= 1) {
+          if (
+            priorEstimate !== undefined &&
+            offsets[idx] + priorEstimate <= scrollEl.scrollTop + 2 &&
+            Math.abs(h - priorEstimate) >= 1
+          ) {
             scrollEl.scrollTop += h - priorEstimate;
           }
         }
@@ -340,11 +347,54 @@ export function useVirtualList({
     setViewport((prev) => ({ ...prev, scrollTop: targetTop }));
   }, []);
 
+  const scrollToIndexInstant = useCallback((index: number, offsetPx = 0): number | null => {
+    const el = scrollRef.current;
+    const offsets = offsetsRef.current;
+    if (!el || index < 0 || index >= offsets.length) return null;
+    const targetTop = Math.max(0, offsets[index] + Math.max(0, offsetPx));
+    el.scrollTop = targetTop;
+    setViewport((prev) => ({
+      scrollTop: targetTop,
+      clientHeight: el.clientHeight || prev.clientHeight,
+    }));
+    return targetTop;
+  }, []);
+
+  const scrollToOffsetInstant = useCallback((top: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const targetTop = Math.max(0, top);
+    el.scrollTop = targetTop;
+    setViewport((prev) => ({
+      scrollTop: targetTop,
+      clientHeight: el.clientHeight || prev.clientHeight,
+    }));
+  }, []);
+
+  const getAnchorAtScrollTop = useCallback((overrideScrollTop?: number) => {
+    const offsets = offsetsRef.current;
+    if (offsets.length === 0) return null;
+    const el = scrollRef.current;
+    const currentTop = Math.max(0, overrideScrollTop ?? el?.scrollTop ?? 0);
+    let idx = lowerBound(offsets, currentTop);
+    if (idx >= offsets.length) idx = offsets.length - 1;
+    if (idx > 0 && offsets[idx] > currentTop) {
+      idx -= 1;
+    }
+    return {
+      index: idx,
+      offsetPx: Math.max(0, currentTop - offsets[idx]),
+    };
+  }, []);
+
   return {
     scrollRef,
     measureElement,
     notifyScroll,
     scrollToIndex,
+    scrollToIndexInstant,
+    scrollToOffsetInstant,
+    getAnchorAtScrollTop,
     range,
   };
 }

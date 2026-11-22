@@ -39,6 +39,7 @@ import {
   formatStickyBracket,
   reconcileNoteDraftTimestamps,
 } from '../utils/stickyNoteTimestamps';
+import { clearClassroomScroll } from '../utils/classroomScrollMemory';
 
 export interface AppUpdateState {
   status:
@@ -1148,13 +1149,11 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         return;
       }
       if (hit.segmentId || hit.utteranceId || hit.timestampMs !== undefined) {
-        window.setTimeout(() => {
-          get().jumpToTranscript({
-            segmentId: hit.segmentId,
-            utteranceId: hit.utteranceId,
-            timestampMs: hit.timestampMs,
-          });
-        }, 120);
+        get().jumpToTranscript({
+          segmentId: hit.segmentId,
+          utteranceId: hit.utteranceId,
+          timestampMs: hit.timestampMs,
+        });
       }
     },
 
@@ -1239,6 +1238,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     deleteSession: async (id) => {
       try {
         await api.deleteSession(id);
+        clearClassroomScroll(id);
         set((state) => ({
           sessions: state.sessions.filter((s) => s.id !== id),
         }));

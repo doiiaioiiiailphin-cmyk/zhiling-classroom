@@ -15,6 +15,11 @@ import { useSmoothStream } from '../../hooks/useSmoothStream';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import type { ChatMessage, SessionAttachmentItem } from '../../types/domain';
+import {
+  loadPanelScroll,
+  savePanelScroll,
+  type PanelScrollSnapshot,
+} from '../../utils/classroomScrollMemory';
 import { getPasteShortcutLabel } from '../../utils/desktopBridge';
 import { IconButton } from '../ui/IconButton';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
@@ -374,6 +379,7 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
 ChatComposer.displayName = 'ChatComposer';
 
 export const ChatPanel: React.FC = React.memo(() => {
+  const sessionId = useAppStore((s) => s.activeSession?.id ?? null);
   const messages = useAppStore((s) => s.messages);
   const segmentCount = useAppStore((s) => s.segments.length);
   const isSendingChat = useAppStore((s) => s.isSendingChat);
@@ -389,6 +395,15 @@ export const ChatPanel: React.FC = React.memo(() => {
   const lastScrollTopRef = useRef<number>(0);
   const programmaticTargetTopRef = useRef<number | null>(null);
   const touchStartYRef = useRef<number | null>(null);
+  const restoredSessionIdRef = useRef<string | null>(null);
+  const restoreRefineRafRef = useRef<number | null>(null);
+  const restoreRefineRaf2Ref = useRef<number | null>(null);
+  const isRestoringScrollRef = useRef<boolean>(false);
+  const saveScrollTimerRef = useRef<number | null>(null);
+  const latestScrollSnapshotRef = useRef<{
+    sessionId: string;
+    snapshot: PanelScrollSnapshot;
+  } | null>(null);
 
   const handleTimestampJump = useCallback(
     (ms: number) => {
@@ -418,13 +433,193 @@ export const ChatPanel: React.FC = React.memo(() => {
     [messages]
   );
 
-  const { scrollRef, measureElement, notifyScroll, range } = useVirtualList({
+  const {
+    scrollRef,
+    measureElement,
+    notifyScroll,
+    scrollToIndexInstant,
+    scrollToOffsetInstant,
+    getAnchorAtScrollTop,
+    range,
+  } = useVirtualList({
     count: messages.length,
     getItemKey,
     estimateSize,
     gap: 24,
     overscanPx: 800,
   });
+
+  const cancelPendingRestore = useCallback(() => {
+    if (restoreRefineRafRef.current !== null) {
+      window.cancelAnimationFrame(restoreRefineRafRef.current);
+      restoreRefineRafRef.current = null;
+    }
+    if (restoreRefineRaf2Ref.current !== null) {
+      window.cancelAnimationFrame(restoreRefineRaf2Ref.current);
+      restoreRefineRaf2Ref.current = null;
+    }
+    isRestoringScrollRef.current = false;
+  }, []);
+
+  const flushSavedChatScroll = useCallback(() => {
+    if (saveScrollTimerRef.current !== null) {
+      window.clearTimeout(saveScrollTimerRef.current);
+      saveScrollTimerRef.current = null;
+    }
+    const pending = latestScrollSnapshotRef.current;
+    if (pending) {
+      savePanelScroll(pending.sessionId, 'chat', pending.snapshot);
+    }
+  }, []);
+
+  const captureCurrentChatScroll = useCallback(() => {
+    if (!sessionId || messages.length === 0) return;
+    if (restoredSessionIdRef.current !== sessionId || isRestoringScrollRef.current) return;
+    const container = scrollRef.current;
+    if (!container) return;
+
+    const scrollTop = Math.max(0, Math.round(container.scrollTop));
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const atBottom = maxScrollTop > 40 && maxScrollTop - scrollTop <= 36;
+
+    const anchor = getAnchorAtScrollTop(scrollTop);
+    const msg = anchor ? messages[anchor.index] : undefined;
+    const anchorKey = msg ? msg.id : undefined;
+    const domKey = msg ? (msg.clientKey ?? msg.id) : undefined;
+    let anchorOffsetPx = anchor ? Math.round(anchor.offsetPx) : 0;
+
+    if (domKey) {
+      const anchorEl = container.querySelector<HTMLElement>(
+        `[data-virtual-key="${CSS.escape(domKey)}"]`
+      );
+      if (anchorEl) {
+        anchorOffsetPx = Math.round(
+          container.getBoundingClientRect().top - anchorEl.getBoundingClientRect().top
+        );
+      }
+    }
+
+    latestScrollSnapshotRef.current = {
+      sessionId,
+      snapshot: {
+        anchorKey,
+        anchorOffsetPx,
+        scrollTop,
+        atBottom,
+        updatedAt: Date.now(),
+      },
+    };
+
+    if (saveScrollTimerRef.current !== null) {
+      window.clearTimeout(saveScrollTimerRef.current);
+    }
+    saveScrollTimerRef.current = window.setTimeout(() => {
+      flushSavedChatScroll();
+    }, 180);
+  }, [sessionId, messages, scrollRef, getAnchorAtScrollTop, flushSavedChatScroll]);
+
+  useEffect(() => {
+    const handlePageHide = () => flushSavedChatScroll();
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      flushSavedChatScroll();
+      cancelPendingRestore();
+    };
+  }, [sessionId, flushSavedChatScroll, cancelPendingRestore]);
+
+  // 打开历史课堂时恢复左侧对话列表上一次拖动到的位置
+  useEffect(() => {
+    if (!sessionId || messages.length === 0) return;
+    if (restoredSessionIdRef.current === sessionId) return;
+
+    restoredSessionIdRef.current = sessionId;
+    latestScrollSnapshotRef.current = null;
+
+    const saved = loadPanelScroll(sessionId, 'chat');
+    if (!saved) return;
+
+    cancelPendingRestore();
+
+    if (saved.atBottom) {
+      isAtBottomRef.current = true;
+      isRestoringScrollRef.current = true;
+      scrollToIndexInstant(messages.length - 1, 0);
+      restoreRefineRafRef.current = window.requestAnimationFrame(() => {
+        restoreRefineRafRef.current = null;
+        restoreRefineRaf2Ref.current = window.requestAnimationFrame(() => {
+          restoreRefineRaf2Ref.current = null;
+          const container = scrollRef.current;
+          if (container) {
+            const bottomTop = Math.max(0, container.scrollHeight - container.clientHeight);
+            programmaticTargetTopRef.current = bottomTop;
+            container.scrollTop = bottomTop;
+            lastScrollTopRef.current = container.scrollTop;
+            notifyScroll();
+          }
+          isRestoringScrollRef.current = false;
+        });
+      });
+      return;
+    }
+
+    isAtBottomRef.current = false;
+    const anchorIndex = saved.anchorKey
+      ? messages.findIndex((m) => m.id === saved.anchorKey || m.clientKey === saved.anchorKey)
+      : -1;
+
+    if (anchorIndex >= 0) {
+      isRestoringScrollRef.current = true;
+      const targetMsg = messages[anchorIndex];
+      const domKeyToLock = targetMsg.clientKey ?? targetMsg.id;
+      const desiredOffsetPx = saved.anchorOffsetPx;
+      const coarseTop = scrollToIndexInstant(anchorIndex, Math.max(0, desiredOffsetPx));
+      if (coarseTop !== null) {
+        programmaticTargetTopRef.current = coarseTop;
+        lastScrollTopRef.current = coarseTop;
+      }
+      restoreRefineRafRef.current = window.requestAnimationFrame(() => {
+        restoreRefineRafRef.current = null;
+        restoreRefineRaf2Ref.current = window.requestAnimationFrame(() => {
+          restoreRefineRaf2Ref.current = null;
+          const container = scrollRef.current;
+          if (container) {
+            const anchorEl = container.querySelector<HTMLElement>(
+              `[data-virtual-key="${CSS.escape(domKeyToLock)}"]`
+            );
+            if (anchorEl) {
+              const delta =
+                anchorEl.getBoundingClientRect().top -
+                container.getBoundingClientRect().top +
+                desiredOffsetPx;
+              if (Math.abs(delta) >= 2) {
+                const refinedTop = Math.max(0, container.scrollTop + delta);
+                programmaticTargetTopRef.current = refinedTop;
+                container.scrollTop = refinedTop;
+                lastScrollTopRef.current = container.scrollTop;
+                notifyScroll();
+              }
+            }
+          }
+          isRestoringScrollRef.current = false;
+        });
+      });
+    } else if (saved.scrollTop > 0) {
+      programmaticTargetTopRef.current = saved.scrollTop;
+      scrollToOffsetInstant(saved.scrollTop);
+      lastScrollTopRef.current = saved.scrollTop;
+    }
+  }, [
+    sessionId,
+    messages,
+    cancelPendingRestore,
+    scrollToIndexInstant,
+    scrollToOffsetInstant,
+    scrollRef,
+    notifyScroll,
+  ]);
 
   const followBottomIfAlreadyAtBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -439,7 +634,7 @@ export const ChatPanel: React.FC = React.memo(() => {
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || isRestoringScrollRef.current) return;
     isAtBottomRef.current = checkIsAtBottom(el);
     lastScrollTopRef.current = el.scrollTop;
   }, [scrollRef]);
@@ -449,7 +644,7 @@ export const ChatPanel: React.FC = React.memo(() => {
     if (!wrapper) return;
 
     const observer = new ResizeObserver(() => {
-      if (isAtBottomRef.current) {
+      if (isAtBottomRef.current && !isRestoringScrollRef.current) {
         followBottomIfAlreadyAtBottom();
       }
     });
@@ -482,9 +677,11 @@ export const ChatPanel: React.FC = React.memo(() => {
       isAtBottomRef.current = checkIsAtBottom(el);
     }
     lastScrollTopRef.current = currentTop;
+    captureCurrentChatScroll();
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    cancelPendingRestore();
     if (e.deltaY < 0) {
       isAtBottomRef.current = false;
       programmaticTargetTopRef.current = null;
@@ -492,6 +689,7 @@ export const ChatPanel: React.FC = React.memo(() => {
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    cancelPendingRestore();
     if (e.touches.length > 0) {
       touchStartYRef.current = e.touches[0].clientY;
     }
@@ -544,6 +742,7 @@ export const ChatPanel: React.FC = React.memo(() => {
         ref={scrollRef}
         onScroll={handleScroll}
         onWheel={handleWheel}
+        onPointerDown={cancelPendingRestore}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         className="flex-1 overflow-y-auto px-6 py-5"
