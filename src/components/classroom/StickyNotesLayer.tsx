@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo } from 'react';
 import { useAppStore } from '../../store/useAppStore';
-import { useIsMobileViewport } from '../../utils/desktopBridge';
-import { clampStickyBounds, getStickyNoteDisplayTitle, PAPER_THEMES } from '../../utils/stickyNoteTimestamps';
+import { useViewportLayout } from '../../utils/desktopBridge';
+import {
+  clampStickyBounds,
+  getStickyNoteDisplayTitle,
+  PAPER_THEMES,
+} from '../../utils/stickyNoteTimestamps';
+import { DraggableBottomSheet } from '../ui/DraggableBottomSheet';
 import { StickyNoteWindow } from './StickyNoteWindow';
 
 export const StickyNotesLayer: React.FC = React.memo(() => {
@@ -9,7 +14,9 @@ export const StickyNotesLayer: React.FC = React.memo(() => {
   const updateStickyNoteLocal = useAppStore((s) => s.updateStickyNoteLocal);
   const bringStickyNoteToFront = useAppStore((s) => s.bringStickyNoteToFront);
   const setAllStickyNotesOpen = useAppStore((s) => s.setAllStickyNotesOpen);
-  const isMobile = useIsMobileViewport();
+  const { width: vw, height: vh, isCompactPhoneLayout, isShortLandscape } = useViewportLayout();
+  // 仅手机窄屏/矮横屏采用底部抽屉形态；平板（>=768x>520）与桌面端一致，以独立可拖放浮动小窗显示
+  const useMobileSheet = isCompactPhoneLayout;
 
   const openNotes = useMemo(
     () =>
@@ -19,15 +26,15 @@ export const StickyNotesLayer: React.FC = React.memo(() => {
     [stickyNotes]
   );
 
-  // 窗口缩放时自动把展开中的便签夹紧回可视区域，防止便签飘出屏幕外
+  // 窗口缩放、平板横竖屏切换或新便签展开时，自动把浮动小窗夹紧回可视区域，防止飘出屏幕外
   useEffect(() => {
-    if (isMobile || openNotes.length === 0) return;
-    const handleResize = () => {
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
+    if (useMobileSheet || openNotes.length === 0) return;
+    const clampAll = () => {
+      const curW = window.innerWidth;
+      const curH = window.innerHeight;
       for (const note of useAppStore.getState().stickyNotes) {
         if (!note.isOpen) continue;
-        const clamped = clampStickyBounds(note, vw, vh);
+        const clamped = clampStickyBounds(note, curW, curH);
         if (
           clamped.posX !== note.posX ||
           clamped.posY !== note.posY ||
@@ -38,58 +45,81 @@ export const StickyNotesLayer: React.FC = React.memo(() => {
         }
       }
     };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [isMobile, openNotes.length, updateStickyNoteLocal]);
+    clampAll();
+    window.addEventListener('resize', clampAll);
+    return () => window.removeEventListener('resize', clampAll);
+  }, [useMobileSheet, openNotes.length, vw, vh, updateStickyNoteLocal]);
 
-  if (openNotes.length === 0) return null;
+  const activeEntry =
+    openNotes.length > 0
+      ? openNotes.reduce((best, cur) => (cur.note.zOrder >= best.note.zOrder ? cur : best))
+      : null;
 
-  if (isMobile) {
-    const activeEntry = openNotes.reduce((best, cur) =>
-      cur.note.zOrder >= best.note.zOrder ? cur : best
-    );
+  if (useMobileSheet) {
+    const activeTheme = activeEntry
+      ? PAPER_THEMES[activeEntry.note.paperColor] ?? PAPER_THEMES.cream
+      : PAPER_THEMES.cream;
     return (
-      <div className="fixed inset-0 z-50 flex flex-col justify-end">
-        <div
-          className="absolute inset-0 bg-[#1F2329]/30 backdrop-blur-[1px]"
-          onClick={() => void setAllStickyNotesOpen(false)}
-        />
-        <div className="relative z-10 flex flex-col max-h-[76vh]">
-          {openNotes.length > 1 && (
-            <div className="px-3 pb-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-              {openNotes.map(({ note, displayIndex }) => {
-                const t = PAPER_THEMES[note.paperColor] ?? PAPER_THEMES.cream;
-                const active = note.id === activeEntry.note.id;
-                return (
-                  <button
-                    key={note.id}
-                    type="button"
-                    onClick={() => bringStickyNoteToFront(note.id)}
-                    style={{
-                      backgroundColor: active ? t.headerBg : '#FFFFFF',
-                      borderColor: active ? t.borderStrong : '#DEE0E3',
-                    }}
-                    className="h-8 px-3 rounded-full border text-[14px] font-medium text-[#1F2329] shrink-0 shadow-xs cursor-pointer"
-                  >
-                    {getStickyNoteDisplayTitle(note, displayIndex)}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <StickyNoteWindow
-            key={activeEntry.note.id}
-            note={activeEntry.note}
-            displayIndex={activeEntry.displayIndex}
-            mobileSheet
-          />
-        </div>
-      </div>
+      <DraggableBottomSheet
+        open={Boolean(activeEntry)}
+        onClose={() => void setAllStickyNotesOpen(false)}
+        ariaLabel="课堂便签"
+        zIndexClass="z-50"
+        maxWidthClass={isShortLandscape ? 'w-full max-w-2xl' : 'w-full'}
+        panelClassName="overflow-hidden flex flex-col max-h-[82vh] border-t"
+        panelStyle={{
+          backgroundColor: activeTheme.headerBg,
+          borderColor: activeTheme.border,
+        }}
+        dataAttributes={{ 'data-mobile-sticky-sheet': 'true' }}
+        showHandle
+      >
+        {activeEntry && (
+          <div
+            style={{ backgroundColor: activeTheme.headerBg }}
+            className="flex flex-col min-h-0 flex-1"
+          >
+            {openNotes.length > 1 && (
+              <div className="px-3 pb-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0">
+                {openNotes.map(({ note, displayIndex }) => {
+                  const t = PAPER_THEMES[note.paperColor] ?? PAPER_THEMES.cream;
+                  const active = note.id === activeEntry.note.id;
+                  return (
+                    <button
+                      key={note.id}
+                      type="button"
+                      onClick={() => bringStickyNoteToFront(note.id)}
+                      style={{
+                        backgroundColor: active ? t.bodyBg : '#FFFFFF',
+                        borderColor: active ? t.borderStrong : '#DEE0E3',
+                      }}
+                      className="h-8 px-3 rounded-full border text-[14px] font-medium text-[#1F2329] shrink-0 shadow-xs cursor-pointer"
+                    >
+                      {getStickyNoteDisplayTitle(note, displayIndex)}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <StickyNoteWindow
+              key={activeEntry.note.id}
+              note={activeEntry.note}
+              displayIndex={activeEntry.displayIndex}
+              mobileSheet
+            />
+          </div>
+        )}
+      </DraggableBottomSheet>
     );
   }
 
+  if (openNotes.length === 0) return null;
+
   return (
-    <div className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
+    <div
+      data-floating-sticky-layer="true"
+      className="pointer-events-none fixed inset-0 z-50 overflow-hidden"
+    >
       {openNotes.map(({ note, displayIndex }) => (
         <StickyNoteWindow key={note.id} note={note} displayIndex={displayIndex} />
       ))}

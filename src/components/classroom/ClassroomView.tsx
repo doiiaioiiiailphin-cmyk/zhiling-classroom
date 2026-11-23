@@ -13,13 +13,15 @@ import {
   Pause,
   PictureInPicture2,
   Settings,
+  StickyNote,
+  Volume2,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import {
   getDesktopBridge,
   isAndroidPlatform,
   isMacPlatform,
-  useIsMobileViewport,
+  useViewportLayout,
 } from '../../utils/desktopBridge';
 import { formatDuration } from '../../utils/format';
 import { IconButton } from '../ui/IconButton';
@@ -29,7 +31,7 @@ import { WindowControls } from '../ui/WindowControls';
 import { AudioSourceControl } from './AudioSourceControl';
 import { ChatPanel } from './ChatPanel';
 import { StickyNotesLayer } from './StickyNotesLayer';
-import { StickyNoteTopbarControl } from './StickyNoteTopbarControl';
+import { MobileStickyBasketSheet, StickyNoteTopbarControl } from './StickyNoteTopbarControl';
 import { TranscriptPanel } from './TranscriptPanel';
 
 const RecordingTimerButton: React.FC = React.memo(() => {
@@ -76,6 +78,9 @@ export const ClassroomView: React.FC = () => {
   const sessionTitle = useAppStore((s) => s.activeSession?.title ?? '');
   const segments = useAppStore((s) => s.segments);
   const attachments = useAppStore((s) => s.attachments);
+  const stickyNotes = useAppStore((s) => s.stickyNotes);
+  const micEnabled = useAppStore((s) => s.settings?.micEnabled ?? true);
+  const systemAudioEnabled = useAppStore((s) => s.settings?.systemAudioEnabled ?? false);
   const onlyBookmarksFilter = useAppStore((s) => s.onlyBookmarksFilter);
   const audioBarVisible = useAppStore((s) => s.audioPlayback.visible);
   const windowMaximized = useAppStore((s) => s.windowMaximized);
@@ -86,6 +91,8 @@ export const ClassroomView: React.FC = () => {
   const openNotesExportModal = useAppStore((s) => s.openNotesExportModal);
   const markConfusedNow = useAppStore((s) => s.markConfusedNow);
   const captureClassroomScreen = useAppStore((s) => s.captureClassroomScreen);
+  const createStickyNote = useAppStore((s) => s.createStickyNote);
+  const focusStickyNoteTimestamp = useAppStore((s) => s.focusStickyNoteTimestamp);
   const uploadSessionAttachment = useAppStore((s) => s.uploadSessionAttachment);
   const toggleMiniOverlayWindow = useAppStore((s) => s.toggleMiniOverlayWindow);
   const toggleAudioPlaybackBar = useAppStore((s) => s.toggleAudioPlaybackBar);
@@ -98,11 +105,58 @@ export const ClassroomView: React.FC = () => {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [mobileTab, setMobileTab] = useState<'transcript' | 'chat'>('transcript');
+  const [mobileStickyBasketOpen, setMobileStickyBasketOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const materialInputRef = useRef<HTMLInputElement | null>(null);
 
-  const isMobileViewport = useIsMobileViewport();
+  const viewport = useViewportLayout();
+  const isMobileViewport = viewport.isCompactWidth;
+  const isShortLandscape = viewport.isShortLandscape;
   const isAndroid = isAndroidPlatform();
+  // 平板大屏（>=768px 且高度 >520px）采用类电脑端顶栏布局，音频设置与便签直接驻留顶栏而非收纳进百宝箱
+  const isCompactMobileChrome = viewport.isCompactPhoneLayout;
+  const hideScreenshotBtn = isCompactMobileChrome || isAndroid;
+  const previewFloatingOverlayOpen = useAppStore((s) => s.previewFloatingOverlayOpen);
+  const openStickyCount = useMemo(
+    () => stickyNotes.filter((n) => n.isOpen).length,
+    [stickyNotes]
+  );
+
+  // Android 返回键优先关闭手机端课堂便签篓抽屉
+  useEffect(() => {
+    if (!mobileStickyBasketOpen) return;
+    const win = window as unknown as {
+      __zhilingHandleClassroomOverlayBack?: () => boolean;
+    };
+    const handler = () => {
+      setMobileStickyBasketOpen(false);
+      return true;
+    };
+    win.__zhilingHandleClassroomOverlayBack = handler;
+    return () => {
+      if (win.__zhilingHandleClassroomOverlayBack === handler) {
+        delete win.__zhilingHandleClassroomOverlayBack;
+      }
+    };
+  }, [mobileStickyBasketOpen]);
+
+  // Android 返回键在手机端问答态下优先平滑切回转写记录，而非直接退出课堂
+  useEffect(() => {
+    if (!isMobileViewport || mobileTab !== 'chat') return;
+    const win = window as unknown as {
+      __zhilingHandleClassroomChatBack?: () => boolean;
+    };
+    const handler = () => {
+      setMobileTab('transcript');
+      return true;
+    };
+    win.__zhilingHandleClassroomChatBack = handler;
+    return () => {
+      if (win.__zhilingHandleClassroomChatBack === handler) {
+        delete win.__zhilingHandleClassroomChatBack;
+      }
+    };
+  }, [isMobileViewport, mobileTab]);
   const transcriptFocusSeq = useAppStore((s) => s.transcriptFocusRequest?.seq ?? 0);
   const chatPrefillSeq = useAppStore((s) => s.chatDraftPrefill?.seq ?? 0);
   const isAiSending = useAppStore((s) => s.isSendingChat);
@@ -219,6 +273,40 @@ export const ClassroomView: React.FC = () => {
           if (sessionId) openNotesExportModal(sessionId, 'notes');
         },
       },
+      ...(isCompactMobileChrome
+        ? [
+            {
+              id: 'mobile-sticky-notes',
+              label: '课堂便签',
+              icon: StickyNote,
+              badge: stickyNotes.length > 0 ? stickyNotes.length : undefined,
+              active: openStickyCount > 0 || mobileStickyBasketOpen,
+              onClick: () => {
+                if (stickyNotes.length === 0) {
+                  void createStickyNote().then((created) => {
+                    if (created) focusStickyNoteTimestamp(created.id);
+                  });
+                } else {
+                  setMobileStickyBasketOpen(true);
+                }
+              },
+            },
+            {
+              id: 'mobile-audio-settings',
+              label: '音频设置',
+              icon: Volume2,
+              badge:
+                !micEnabled && !systemAudioEnabled
+                  ? '静音'
+                  : micEnabled && systemAudioEnabled
+                    ? '双轨'
+                    : systemAudioEnabled
+                      ? '内录'
+                      : undefined,
+              onClick: () => setSettingsOpen(true, 'general'),
+            },
+          ]
+        : []),
       {
         id: 'import-material',
         label: '导入讲义',
@@ -234,16 +322,13 @@ export const ClassroomView: React.FC = () => {
         active: onlyBookmarksFilter,
         onClick: () => setOnlyBookmarksFilter(!onlyBookmarksFilter),
       },
-      ...(!isAndroid
-        ? [
-            {
-              id: 'mini-subtitles',
-              label: '实时字幕',
-              icon: PictureInPicture2,
-              onClick: () => void toggleMiniOverlayWindow(),
-            },
-          ]
-        : []),
+      {
+        id: 'mini-subtitles',
+        label: isAndroid ? '悬浮小窗' : '实时字幕',
+        icon: PictureInPicture2,
+        active: isAndroid ? previewFloatingOverlayOpen : undefined,
+        onClick: () => void toggleMiniOverlayWindow(),
+      },
       {
         id: 'audio-replay',
         label: '原声回放',
@@ -260,12 +345,21 @@ export const ClassroomView: React.FC = () => {
     ],
     [
       isAndroid,
+      isCompactMobileChrome,
+      previewFloatingOverlayOpen,
       sessionId,
+      stickyNotes.length,
+      openStickyCount,
+      mobileStickyBasketOpen,
+      micEnabled,
+      systemAudioEnabled,
       materialCount,
       totalBookmarkCount,
       onlyBookmarksFilter,
       audioBarVisible,
       openNotesExportModal,
+      createStickyNote,
+      focusStickyNoteTimestamp,
       setOnlyBookmarksFilter,
       toggleMiniOverlayWindow,
       toggleAudioPlaybackBar,
@@ -320,13 +414,15 @@ export const ClassroomView: React.FC = () => {
         }}
       />
 
-      {/* 顶部课堂控制栏：桌面端保持原样；手机端（<768px）精简为单行紧凑触控栏 */}
+      {/* 顶部课堂控制栏：桌面端保持原样；手机竖屏与横屏自动精简高度，给内容与课程名留足空间 */}
       <header
         onDoubleClick={handleHeaderDoubleClick}
         className={`border-b border-[#DEE0E3] flex items-center justify-between gap-1.5 md:gap-3 shrink-0 pywebview-drag-region ${
-          isMac
-            ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
-            : 'h-14 md:h-15 bg-white px-2.5 md:pl-5 md:pr-3.5'
+          isShortLandscape
+            ? 'h-12 bg-white px-3'
+            : isMac
+              ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
+              : 'h-14 md:h-15 bg-white px-2.5 md:pl-5 md:pr-3.5'
         }`}
       >
         <div className="flex items-center gap-1.5 md:gap-2.5 min-w-0 flex-1">
@@ -350,7 +446,7 @@ export const ClassroomView: React.FC = () => {
                 if (e.key === 'Enter') void commitTitle();
                 if (e.key === 'Escape') setEditingTitle(false);
               }}
-              className="h-9 w-full max-w-64 md:w-80 md:max-w-[42vw] rounded-lg border border-[#1456F0] bg-white px-2.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] focus:outline-none ring-2 ring-[#1456F0]/15"
+              className="h-9 flex-1 min-w-0 md:flex-none md:w-80 md:max-w-[42vw] rounded-lg border border-[#1456F0] bg-white px-2.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] focus:outline-none ring-2 ring-[#1456F0]/15"
             />
           ) : (
             <button
@@ -359,7 +455,7 @@ export const ClassroomView: React.FC = () => {
                 setTitleDraft(sessionTitle);
                 setEditingTitle(true);
               }}
-              className="truncate rounded-lg px-1.5 md:px-2.5 py-1.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] hover:bg-[#F2F3F5] transition-colors cursor-pointer text-left min-w-0"
+              className="flex-1 md:flex-none truncate rounded-lg px-2 md:px-2.5 py-1.5 text-[15px] md:text-[16px] font-semibold text-[#1F2329] hover:bg-[#F2F3F5] transition-colors cursor-pointer text-left min-w-0"
             >
               {sessionTitle}
             </button>
@@ -367,17 +463,19 @@ export const ClassroomView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-1.5 md:gap-2 shrink-0 app-no-drag">
-          {!isMobileViewport && <AudioSourceControl />}
+          {!isCompactMobileChrome && <AudioSourceControl />}
 
           <RecordingTimerButton />
 
-          <IconButton
-            icon={Camera}
-            size="lg"
-            variant="outline"
-            tooltip={isAndroid ? '相机拍板书并锚定至时间轴' : '一键抓拍课堂画面锚定至时间轴'}
-            onClick={() => void captureClassroomScreen()}
-          />
+          {!hideScreenshotBtn && (
+            <IconButton
+              icon={Camera}
+              size="lg"
+              variant="outline"
+              tooltip="一键抓拍课堂画面锚定至时间轴"
+              onClick={() => void captureClassroomScreen()}
+            />
+          )}
 
           {!isMobileViewport && (
             <IconButton
@@ -389,7 +487,7 @@ export const ClassroomView: React.FC = () => {
             />
           )}
 
-          <StickyNoteTopbarControl />
+          {!isCompactMobileChrome && <StickyNoteTopbarControl />}
 
           <MoreGridMenu
             items={gridItems}
@@ -401,65 +499,81 @@ export const ClassroomView: React.FC = () => {
         </div>
       </header>
 
-      {/* 主体：桌面/平板（>=768px）保持可拖拽双栏；手机端（<768px）切换为单栏双 Tab 并保持双侧挂载 */}
+      {/* 主体：桌面/平板（>=768px）保持可拖拽双栏；手机端（<768px）转写全屏沉浸 + 底部对话框形态，右下角持久变形按钮丝滑切换 */}
       {isMobileViewport ? (
-        <>
-          <div className="flex-1 relative min-h-0 overflow-hidden">
-            <div className={`h-full w-full ${mobileTab === 'transcript' ? 'block' : 'hidden'}`}>
-              <TranscriptPanel />
-            </div>
-            <div className={`h-full w-full ${mobileTab === 'chat' ? 'block' : 'hidden'}`}>
-              <ChatPanel />
-            </div>
+        <div className="flex-1 relative min-h-0 overflow-hidden bg-[#F5F6F7]">
+          {/* 转写记录主层：始终挂载保留滚动位置，切换问答时轻微景深退后 */}
+          <div
+            aria-hidden={mobileTab !== 'transcript'}
+            className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[transform,opacity] ${
+              mobileTab === 'transcript'
+                ? 'opacity-100 scale-100 translate-y-0 pointer-events-auto z-10'
+                : 'opacity-0 scale-[0.968] -translate-y-2.5 pointer-events-none z-0'
+            }`}
+          >
+            <TranscriptPanel />
           </div>
 
-          <nav
-            aria-label="课堂视图切换"
-            className="h-14 border-t border-[#DEE0E3] bg-white px-3 flex items-center justify-between gap-2 shrink-0"
+          {/* 课堂问答层：自带底部对话框底栏，切回转写时整层与底栏一并平滑收起 */}
+          <div
+            aria-hidden={mobileTab !== 'chat'}
+            className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[transform,opacity] ${
+              mobileTab === 'chat'
+                ? 'opacity-100 translate-y-0 scale-100 pointer-events-auto z-20'
+                : 'opacity-0 translate-y-7 scale-[0.985] pointer-events-none z-0'
+            }`}
           >
-            <button
-              type="button"
-              onClick={() => setMobileTab('transcript')}
-              className={`flex-1 h-10 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-colors cursor-pointer ${
-                mobileTab === 'transcript'
-                  ? 'bg-[#EBF2FF] text-[#1456F0]'
-                  : 'text-[#4E5969] hover:bg-[#F2F3F5]'
-              }`}
-            >
-              <AlignLeft className="w-4 h-4 shrink-0" />
-              <span>转写记录</span>
-              {segments.length > 0 && (
-                <span className="text-[14px] opacity-75 tabular-nums">({segments.length})</span>
-              )}
-            </button>
+            <ChatPanel
+              mobileDockMode
+              mobileDockVisible={mobileTab === 'chat'}
+            />
+          </div>
 
-            <button
-              type="button"
-              onClick={() => setMobileTab('chat')}
-              className={`flex-1 h-10 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-colors cursor-pointer relative ${
-                mobileTab === 'chat'
-                  ? 'bg-[#EBF2FF] text-[#1456F0]'
-                  : 'text-[#4E5969] hover:bg-[#F2F3F5]'
-              }`}
-            >
-              <MessageSquareText className="w-4 h-4 shrink-0" />
-              <span>课堂问答</span>
-              {isAiSending && (
-                <span className="w-2 h-2 rounded-full bg-[#1456F0] animate-pulse" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => void markConfusedNow()}
-              aria-label="标记此处没听懂"
-              className="h-10 px-3 rounded-xl border border-[#DEE0E3] bg-[#F8F9FA] active:bg-[#EBF2FF] text-[#1F2329] text-[14px] font-medium inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
-            >
-              <BookmarkPlus className="w-4 h-4 text-[#1456F0]" />
-              <span>标不懂</span>
-            </button>
-          </nav>
-        </>
+          {/* 底栏右下角持久变形切换小按钮：问答态嵌在对话框右下角，转写态仅保留该悬浮小按钮 */}
+          <button
+            type="button"
+            data-mobile-view-toggle={mobileTab}
+            aria-label={mobileTab === 'chat' ? '切换至转写记录' : '切换至课堂问答'}
+            title={mobileTab === 'chat' ? '切回转写记录' : '打开课堂问答'}
+            onClick={() =>
+              setMobileTab((prev) => (prev === 'chat' ? 'transcript' : 'chat'))
+            }
+            className={`absolute right-3 bottom-[calc(12px+env(safe-area-inset-bottom,0px))] z-30 flex items-center justify-center border cursor-pointer select-none transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-90 ${
+              mobileTab === 'chat'
+                ? 'w-[46px] h-[46px] rounded-2xl border-[#DEE0E3] bg-[#F2F4F7] hover:bg-[#EBF2FF] hover:border-[#BEDAFF] text-[#1F2329] hover:text-[#1456F0] shadow-none translate-x-0 translate-y-0'
+                : `w-12 h-12 rounded-2xl border-[#1456F0] bg-[#1456F0] hover:bg-[#3370FF] text-white shadow-[0_8px_24px_rgba(20,86,240,0.32)] -translate-x-0.5 ${
+                    audioBarVisible ? '-translate-y-[74px]' : '-translate-y-1'
+                  }`
+            }`}
+          >
+            <span className="relative w-5 h-5 flex items-center justify-center">
+              <MessageSquareText
+                className={`absolute w-[21px] h-[21px] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+                  mobileTab === 'transcript'
+                    ? 'opacity-100 scale-100 rotate-0'
+                    : 'opacity-0 scale-50 -rotate-45'
+                }`}
+                strokeWidth={2}
+              />
+              <AlignLeft
+                className={`absolute w-5 h-5 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+                  mobileTab === 'chat'
+                    ? 'opacity-100 scale-100 rotate-0'
+                    : 'opacity-0 scale-50 rotate-45'
+                }`}
+                strokeWidth={2.1}
+              />
+            </span>
+            {mobileTab === 'transcript' && isAiSending && (
+              <span
+                aria-hidden="true"
+                className="absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full bg-white flex items-center justify-center shadow-xs"
+              >
+                <span className="w-2 h-2 rounded-full bg-[#3370FF] animate-pulse" />
+              </span>
+            )}
+          </button>
+        </div>
       ) : (
         <div
           ref={containerRef}
@@ -488,6 +602,12 @@ export const ClassroomView: React.FC = () => {
 
       {/* 浮动纸色课堂便签小窗口层 */}
       <StickyNotesLayer />
+
+      {/* 手机端课堂便签篓底部抽屉（由百宝箱「课堂便签」触发） */}
+      <MobileStickyBasketSheet
+        open={mobileStickyBasketOpen}
+        onClose={() => setMobileStickyBasketOpen(false)}
+      />
     </div>
   );
 };

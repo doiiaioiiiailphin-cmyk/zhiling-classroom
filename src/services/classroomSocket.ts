@@ -4,6 +4,7 @@ import {
   getAndroidBridge,
   isAndroidPlatform,
   requestAndroidRecordPermission,
+  requestAndroidSystemAudioPermission,
 } from '../utils/desktopBridge';
 import { IS_MOCK_MODE } from './api';
 import {
@@ -178,7 +179,7 @@ export class ClassroomSocketClient {
     let connection = this.connection;
     if (IS_MOCK_MODE || !connection) return;
 
-    // Android 原生壳：录音采集、WAV 写盘与 SenseVoice 转写全部由 ForegroundService 原生接管，锁屏 3 小时不掉线
+    // Android 原生壳：录音采集（麦克风 + 系统媒体内录）、WAV 写盘与 SenseVoice 转写全部由 ForegroundService 原生接管，锁屏 3 小时不掉线
     if (isAndroidPlatform() && getAndroidBridge()) {
       if (command.type === 'recording.start' || command.type === 'recording.resume') {
         if (connection.socket.readyState >= WebSocket.CLOSING) {
@@ -187,18 +188,69 @@ export class ClassroomSocketClient {
         }
         const activeConn = connection;
         activeConn.intent = command;
-        void requestAndroidRecordPermission().then((granted) => {
-          if (this.connection !== activeConn) return;
-          if (!granted) {
-            activeConn.intent = null;
-            this.report(activeConn, 'MIC_PERMISSION_DENIED', '请授予麦克风录音权限后再开始录课');
-            return;
+        const cfg = resolveRuntimeAudioSettings(useAppStore.getState().settings);
+        void (async () => {
+          let micAllowed = cfg.micEnabled;
+          if (cfg.micEnabled) {
+            const micGranted = await requestAndroidRecordPermission();
+            if (this.connection !== activeConn) return;
+            if (!micGranted) {
+              micAllowed = false;
+              if (!cfg.systemAudioEnabled) {
+                activeConn.intent = null;
+                this.report(activeConn, 'MIC_PERMISSION_DENIED', '请授予麦克风录音权限后再开始录课');
+                return;
+              }
+            }
           }
+
+          let sysAllowed = cfg.systemAudioEnabled;
+          if (cfg.systemAudioEnabled) {
+            // Android AudioPlaybackCapture 仍需要 RECORD_AUDIO 基础权限
+            const recordGranted = await requestAndroidRecordPermission();
+            if (this.connection !== activeConn) return;
+            if (!recordGranted) {
+              activeConn.intent = null;
+              this.report(activeConn, 'MIC_PERMISSION_DENIED', '系统内录需要录音基础权限，请先在弹窗中允许');
+              return;
+            }
+            const projGranted = await requestAndroidSystemAudioPermission();
+            if (this.connection !== activeConn) return;
+            if (!projGranted) {
+              sysAllowed = false;
+              if (!micAllowed) {
+                activeConn.intent = null;
+                this.report(
+                  activeConn,
+                  'SYS_AUDIO_PERMISSION_DENIED',
+                  '未授予系统声音内录权限，已取消录制；请在系统弹窗中点击「立即开始」以捕获手机系统声音'
+                );
+                return;
+              }
+              useAppStore
+                .getState()
+                .showNotice('info', '未授予系统内录权限，当前已自动仅使用麦克风继续录课');
+            }
+          }
+
           if (activeConn.socket.readyState === WebSocket.OPEN) {
+            activeConn.socket.send(
+              JSON.stringify({
+                type: 'audio.channels',
+                payload: {
+                  micEnabled: micAllowed,
+                  systemAudioEnabled: sysAllowed,
+                  micDeviceId: cfg.audioDeviceId,
+                  enableDualChannelSpeakerSplit: Boolean(
+                    useAppStore.getState().settings?.enableDualChannelSpeakerSplit
+                  ),
+                },
+              })
+            );
             activeConn.socket.send(JSON.stringify(command));
             activeConn.recording = true;
           }
-        });
+        })();
         return;
       }
       connection.intent = null;
@@ -307,19 +359,41 @@ export class ClassroomSocketClient {
     }
   }
 
-  applyAudioSettings(
+  async applyAudioSettings(
     settings: AppSettings,
     options?: { forceRepickSystem?: boolean }
   ): Promise<void> {
     if (isAndroidPlatform() && getAndroidBridge()) {
+      const conn = this.connection;
+      let sysAllowed = Boolean(settings.systemAudioEnabled);
+      if (sysAllowed && (conn?.recording || options?.forceRepickSystem)) {
+        const recordOk = await requestAndroidRecordPermission();
+        const projOk = recordOk ? await requestAndroidSystemAudioPermission() : false;
+        if (!projOk) {
+          sysAllowed = false;
+          useAppStore
+            .getState()
+            .showNotice('error', '未授予 Android 系统声音内录权限，系统内录暂未开启');
+        }
+      }
       const ws = this.connection?.socket;
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'mic.mute', payload: { muted: !settings.micEnabled } }));
+        ws.send(
+          JSON.stringify({
+            type: 'audio.channels',
+            payload: {
+              micEnabled: Boolean(settings.micEnabled),
+              systemAudioEnabled: sysAllowed,
+              micDeviceId: settings.audioDeviceId || 'default',
+              enableDualChannelSpeakerSplit: Boolean(settings.enableDualChannelSpeakerSplit),
+            },
+          })
+        );
       }
-      return Promise.resolve();
+      return;
     }
     const capture = this.connection?.capture;
-    if (!capture) return Promise.resolve();
+    if (!capture) return;
     return capture.reconfigure(resolveRuntimeAudioSettings(settings), options);
   }
 

@@ -777,8 +777,8 @@ export const api = {
   checkAppUpdates(force = false): Promise<UpdateCheckResult> {
     if (IS_MOCK_MODE) {
       return Promise.resolve({
-        currentVersion: '0.1.11',
-        latestVersion: '0.1.11',
+        currentVersion: '0.1.12',
+        latestVersion: '0.1.12',
         hasUpdate: false,
         releaseTitle: '',
         releaseNotes: '',

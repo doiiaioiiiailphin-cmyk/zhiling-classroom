@@ -27,15 +27,13 @@ export const API_PROTOCOL_OPTIONS: Array<{ value: ApiProtocol; label: string }> 
   { value: 'openai-compatible', label: 'OpenAI 通用兼容协议' },
 ];
 
-export const OPENCODE_FREE_PROVIDER_ID = 'opencode-free-bridge';
-
 export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
   {
-    id: OPENCODE_FREE_PROVIDER_ID,
-    name: 'OpenCode 免费模型',
+    id: 'deepseek',
+    name: 'DeepSeek',
     protocol: 'openai-compatible',
-    defaultBaseUrl: 'builtin://opencode-free-bridge',
-    defaultSampleModels: [],
+    defaultBaseUrl: 'https://api.deepseek.com/v1',
+    defaultSampleModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
   {
     id: 'openai',
@@ -65,13 +63,6 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
     ],
-  },
-  {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    protocol: 'openai-compatible',
-    defaultBaseUrl: 'https://api.deepseek.com/v1',
-    defaultSampleModels: ['deepseek-chat', 'deepseek-reasoner'],
   },
   {
     id: 'aliyun',

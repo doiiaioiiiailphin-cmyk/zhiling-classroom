@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlignLeft,
   AudioLines,
   Bookmark,
+  BookmarkCheck,
+  BookmarkPlus,
   Check,
   HelpCircle,
   MessageSquarePlus,
@@ -13,6 +16,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react';
+import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import {
@@ -20,7 +24,11 @@ import {
   savePanelScroll,
   type PanelScrollSnapshot,
 } from '../../utils/classroomScrollMemory';
-import { getPasteShortcutLabel } from '../../utils/desktopBridge';
+import {
+  getPasteShortcutLabel,
+  isAndroidPlatform,
+  useViewportLayout,
+} from '../../utils/desktopBridge';
 import {
   mapStickyAnchorsToUtterances,
   PAPER_THEMES,
@@ -32,6 +40,7 @@ import type {
   SessionAttachmentItem,
   UtterancePatch,
 } from '../../types/domain';
+import { DraggableBottomSheet } from '../ui/DraggableBottomSheet';
 import { Modal } from '../ui/Modal';
 import { Tooltip } from '../ui/Tooltip';
 import { AudioPlaybackBar } from './AudioPlaybackBar';
@@ -40,6 +49,15 @@ import { KnowledgeBubblePopover } from './KnowledgeBubblePopover';
 
 type TranscriptUtterance = KnowledgeSegment['utterances'][number];
 
+const LONG_PRESS_MS = 420;
+const LONG_PRESS_FEEDBACK_MS = 110;
+const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+
+function isUtteranceInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest('button, input, textarea, a, [role="button"]'));
+}
+
 interface UtteranceRowProps {
   utterance: TranscriptUtterance;
   highlights: HighlightedTerm[];
@@ -47,8 +65,13 @@ interface UtteranceRowProps {
   enableHighlight: boolean;
   showDiarization: boolean;
   deferOffscreen: boolean;
+  /** 仅在手机窄屏下隐藏桌面悬浮微操作栏；平板与桌面均保留悬浮微操作 */
+  hideDesktopHoverBar: boolean;
+  /** 手机与安卓平板均支持长按记录呼出快捷操作 */
+  enableLongPress: boolean;
   isActiveAudio: boolean;
   isFocusedTarget: boolean;
+  editRequestSeq: number;
   stickyAnchors?: UtteranceStickyAnchor[];
   onSeekAudio: (startTimeMs: number) => void;
   onRenameSpeaker: (speakerId: string, label: string) => Promise<void>;
@@ -56,6 +79,11 @@ interface UtteranceRowProps {
   onAskAboutText: (quoted: string, timeLabel: string) => void;
   onFocusStickyAnchor: (noteId: string, timestampSec: number, charOffset: number) => void;
   onQuickNoteUtterance: (utterance: { startTimeMs: number; timestampText: string }) => void;
+  onOpenMobileActions: (
+    utterance: TranscriptUtterance,
+    displayedText: string,
+    anchor: { x: number; y: number }
+  ) => void;
 }
 
 const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
@@ -66,8 +94,11 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     enableHighlight,
     showDiarization,
     deferOffscreen,
+    hideDesktopHoverBar,
+    enableLongPress,
     isActiveAudio,
     isFocusedTarget,
+    editRequestSeq,
     stickyAnchors,
     onSeekAudio,
     onRenameSpeaker,
@@ -75,6 +106,7 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     onAskAboutText,
     onFocusStickyAnchor,
     onQuickNoteUtterance,
+    onOpenMobileActions,
   }) => {
     const [isEditingSpk, setIsEditingSpk] = useState(false);
     const [speakerDraft, setSpeakerDraft] = useState('');
@@ -85,6 +117,13 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     const [isEditingNote, setIsEditingNote] = useState(false);
     const [noteDraft, setNoteDraft] = useState('');
     const [stickyPickerOpen, setStickyPickerOpen] = useState(false);
+    const [isLongPressing, setIsLongPressing] = useState(false);
+
+    const pressTimerRef = useRef<number | null>(null);
+    const feedbackTimerRef = useRef<number | null>(null);
+    const pressOriginRef = useRef<{ x: number; y: number } | null>(null);
+    const longPressTriggeredRef = useRef<boolean>(false);
+    const handledEditSeqRef = useRef<number>(editRequestSeq);
 
     const primarySticky = stickyAnchors && stickyAnchors.length > 0 ? stickyAnchors[0] : null;
     const stickyTheme = primarySticky
@@ -93,6 +132,79 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
 
     const displayedText =
       enableCorrection && utterance.isRefined ? utterance.refinedText : utterance.rawText;
+
+    const clearLongPressTimers = useCallback(() => {
+      if (pressTimerRef.current !== null) {
+        window.clearTimeout(pressTimerRef.current);
+        pressTimerRef.current = null;
+      }
+      if (feedbackTimerRef.current !== null) {
+        window.clearTimeout(feedbackTimerRef.current);
+        feedbackTimerRef.current = null;
+      }
+      pressOriginRef.current = null;
+      setIsLongPressing(false);
+    }, []);
+
+    useEffect(() => clearLongPressTimers, [clearLongPressTimers]);
+
+    useEffect(() => {
+      if (editRequestSeq > handledEditSeqRef.current) {
+        handledEditSeqRef.current = editRequestSeq;
+        setTextDraft(displayedText);
+        setIsEditingText(true);
+      }
+    }, [editRequestSeq, displayedText]);
+
+    const handleRowPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!enableLongPress || isEditingText || isEditingNote || isEditingSpk) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (isUtteranceInteractiveTarget(e.target)) return;
+
+      clearLongPressTimers();
+      longPressTriggeredRef.current = false;
+      const anchor = { x: e.clientX, y: e.clientY };
+      pressOriginRef.current = anchor;
+
+      feedbackTimerRef.current = window.setTimeout(() => {
+        setIsLongPressing(true);
+      }, LONG_PRESS_FEEDBACK_MS);
+
+      pressTimerRef.current = window.setTimeout(() => {
+        longPressTriggeredRef.current = true;
+        clearLongPressTimers();
+        try {
+          navigator.vibrate?.(16);
+        } catch {
+          // ignore unsupported vibration API
+        }
+        try {
+          window.getSelection()?.removeAllRanges();
+        } catch {
+          // ignore selection errors
+        }
+        onOpenMobileActions(utterance, displayedText, anchor);
+      }, LONG_PRESS_MS);
+    };
+
+    const handleRowPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+      const origin = pressOriginRef.current;
+      if (!origin) return;
+      const dist = Math.hypot(e.clientX - origin.x, e.clientY - origin.y);
+      if (dist > LONG_PRESS_MOVE_TOLERANCE_PX) {
+        clearLongPressTimers();
+      }
+    };
+
+    const handleRowContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!enableLongPress || isEditingText || isEditingNote || isEditingSpk) return;
+      if (isUtteranceInteractiveTarget(e.target)) return;
+      e.preventDefault();
+      if (!longPressTriggeredRef.current) {
+        clearLongPressTimers();
+        onOpenMobileActions(utterance, displayedText, { x: e.clientX, y: e.clientY });
+      }
+    };
 
     const commitRename = async () => {
       const trimmed = speakerDraft.trim();
@@ -140,12 +252,24 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
       <div
         data-utterance-id={utterance.id}
         data-has-sticky-anchor={primarySticky ? 'true' : undefined}
-        className={`relative group rounded-lg px-2.5 py-2 -mx-2.5 space-y-1.5 transition-colors ${
-          isFocusedTarget
-            ? 'bg-[#EBF2FF] ring-2 ring-[#1456F0]/30'
-            : isActiveAudio
-              ? 'bg-[#F0F4FF]/80 border-l-[3px] border-[#1456F0]'
-              : 'hover:bg-[#F8F9FA]'
+        onPointerDown={handleRowPointerDown}
+        onPointerMove={handleRowPointerMove}
+        onPointerUp={clearLongPressTimers}
+        onPointerCancel={clearLongPressTimers}
+        onPointerLeave={clearLongPressTimers}
+        onContextMenu={handleRowContextMenu}
+        className={`relative group rounded-lg px-2.5 py-2 -mx-2.5 space-y-1.5 transition-all duration-150 ${
+          enableLongPress && !isEditingText && !isEditingNote && !isEditingSpk
+            ? 'mobile-longpress-target'
+            : ''
+        } ${
+          isLongPressing
+            ? 'scale-[0.985] bg-[#EBF2FF]/85 ring-1 ring-[#1456F0]/30'
+            : isFocusedTarget
+              ? 'bg-[#EBF2FF] ring-2 ring-[#1456F0]/30'
+              : isActiveAudio
+                ? 'bg-[#F0F4FF]/80 border-l-[3px] border-[#1456F0]'
+                : 'hover:bg-[#F8F9FA]'
         }`}
         style={
           deferOffscreen
@@ -240,59 +364,61 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             )}
           </div>
 
-          {/* 右侧微操作栏 + 便签纸色直达角标 */}
+          {/* 右侧微操作栏（桌面与平板悬浮显示；手机窄屏改为长按呼出操作抽屉）+ 便签纸色直达角标 */}
           <div className="flex items-center gap-1 shrink-0">
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-              <Tooltip content="追问 AI 这句话" placement="top">
-                <button
-                  type="button"
-                  onClick={() => onAskAboutText(displayedText, utterance.timestampText)}
-                  className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
-                >
-                  <MessageSquarePlus className="w-4 h-4" />
-                </button>
-              </Tooltip>
+            {!hideDesktopHoverBar && (
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                <Tooltip content="追问 AI 这句话" placement="top">
+                  <button
+                    type="button"
+                    onClick={() => onAskAboutText(displayedText, utterance.timestampText)}
+                    className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
+                  >
+                    <MessageSquarePlus className="w-4 h-4" />
+                  </button>
+                </Tooltip>
 
-              <Tooltip content="把此句时间锚点记到便签" placement="top">
-                <button
-                  type="button"
-                  onClick={() => onQuickNoteUtterance(utterance)}
-                  className="w-7 h-7 rounded-md hover:bg-[#F7F0D6] text-[#646A73] hover:text-[#6F5414] flex items-center justify-center cursor-pointer"
-                >
-                  <StickyNote className="w-4 h-4" />
-                </button>
-              </Tooltip>
+                <Tooltip content="把此句时间锚点记到便签" placement="top">
+                  <button
+                    type="button"
+                    onClick={() => onQuickNoteUtterance(utterance)}
+                    className="w-7 h-7 rounded-md hover:bg-[#F7F0D6] text-[#646A73] hover:text-[#6F5414] flex items-center justify-center cursor-pointer"
+                  >
+                    <StickyNote className="w-4 h-4" />
+                  </button>
+                </Tooltip>
 
-              <Tooltip
-                content={utterance.isBookmarked ? '取消难点书签' : '标记为「没听懂」待复习'}
-                placement="top"
-              >
-                <button
-                  type="button"
-                  onClick={toggleConfusedBookmark}
-                  className={`w-7 h-7 rounded-md hover:bg-[#EBF2FF] flex items-center justify-center cursor-pointer ${
-                    utterance.isBookmarked
-                      ? 'text-[#1456F0]'
-                      : 'text-[#646A73] hover:text-[#1456F0]'
-                  }`}
+                <Tooltip
+                  content={utterance.isBookmarked ? '取消难点书签' : '标记为「没听懂」待复习'}
+                  placement="top"
                 >
-                  <Bookmark className="w-4 h-4" />
-                </button>
-              </Tooltip>
+                  <button
+                    type="button"
+                    onClick={toggleConfusedBookmark}
+                    className={`w-7 h-7 rounded-md hover:bg-[#EBF2FF] flex items-center justify-center cursor-pointer ${
+                      utterance.isBookmarked
+                        ? 'text-[#1456F0]'
+                        : 'text-[#646A73] hover:text-[#1456F0]'
+                    }`}
+                  >
+                    <Bookmark className="w-4 h-4" />
+                  </button>
+                </Tooltip>
 
-              <Tooltip content="手动编辑修正此句转写并添加批注" placement="top">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTextDraft(displayedText);
-                    setIsEditingText(true);
-                  }}
-                  className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
-                >
-                  <Pencil className="w-4 h-4" />
-                </button>
-              </Tooltip>
-            </div>
+                <Tooltip content="手动编辑修正此句转写并添加批注" placement="top">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTextDraft(displayedText);
+                      setIsEditingText(true);
+                    }}
+                    className="w-7 h-7 rounded-md hover:bg-[#EBF2FF] text-[#646A73] hover:text-[#1456F0] flex items-center justify-center cursor-pointer"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            )}
 
             {primarySticky && stickyTheme && (
               <div className="relative">
@@ -488,9 +614,12 @@ interface SegmentCardProps {
   enableHighlight: boolean;
   enableBubble: boolean;
   showDiarization: boolean;
+  hideDesktopHoverBar: boolean;
+  enableLongPress: boolean;
   activeAudioMs: number | null;
   focusedUtteranceId: string | null;
   isFocusedSegment: boolean;
+  editRequest: { utteranceId: string; seq: number } | null;
   utteranceStickyMap: Map<string, UtteranceStickyAnchor[]>;
   onSeekAudio: (ms: number) => void;
   onRenameSpeaker: (speakerId: string, label: string) => Promise<void>;
@@ -501,6 +630,11 @@ interface SegmentCardProps {
   onPreviewImage: (att: SessionAttachmentItem) => void;
   onFocusStickyAnchor: (noteId: string, timestampSec: number, charOffset: number) => void;
   onQuickNoteUtterance: (utterance: { startTimeMs: number; timestampText: string }) => void;
+  onOpenMobileActions: (
+    utterance: TranscriptUtterance,
+    displayedText: string,
+    anchor: { x: number; y: number }
+  ) => void;
 }
 
 const SegmentCard: React.FC<SegmentCardProps> = React.memo(
@@ -515,9 +649,12 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     enableHighlight,
     enableBubble,
     showDiarization,
+    hideDesktopHoverBar,
+    enableLongPress,
     activeAudioMs,
     focusedUtteranceId,
     isFocusedSegment,
+    editRequest,
     utteranceStickyMap,
     onSeekAudio,
     onRenameSpeaker,
@@ -528,6 +665,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     onPreviewImage,
     onFocusStickyAnchor,
     onQuickNoteUtterance,
+    onOpenMobileActions,
   }) => {
     const borderShapeClass =
       isFirstChunk && isLastChunk
@@ -579,8 +717,13 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   enableHighlight={enableHighlight}
                   showDiarization={showDiarization}
                   deferOffscreen={false}
+                  hideDesktopHoverBar={hideDesktopHoverBar}
+                  enableLongPress={enableLongPress}
                   isActiveAudio={isPlayingHere}
                   isFocusedTarget={focusedUtteranceId === utt.id}
+                  editRequestSeq={
+                    editRequest && editRequest.utteranceId === utt.id ? editRequest.seq : 0
+                  }
                   stickyAnchors={utteranceStickyMap.get(utt.id)}
                   onSeekAudio={onSeekAudio}
                   onRenameSpeaker={onRenameSpeaker}
@@ -588,6 +731,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   onAskAboutText={onAskAboutText}
                   onFocusStickyAnchor={onFocusStickyAnchor}
                   onQuickNoteUtterance={onQuickNoteUtterance}
+                  onOpenMobileActions={onOpenMobileActions}
                 />
               );
             })}
@@ -677,6 +821,84 @@ const LiveRecordingBanner: React.FC<{ enableBubble: boolean }> = React.memo(
 
 LiveRecordingBanner.displayName = 'LiveRecordingBanner';
 
+interface AnchoredUtteranceActionPopoverProps {
+  open: boolean;
+  anchor: { x: number; y: number } | null;
+  onClose: () => void;
+  children: React.ReactNode;
+}
+
+/**
+ * 平板与宽屏（>=768px）长按转写记录后，在按压位置附近弹出的锚定浮层菜单：
+ * 避免宽屏底部出现极窄的底部抽屉，同时支持进场与点击外侧平滑缩放淡出收回。
+ */
+const AnchoredUtteranceActionPopover: React.FC<AnchoredUtteranceActionPopoverProps> = ({
+  open,
+  anchor,
+  onClose,
+  children,
+}) => {
+  const { shouldRender, isVisible } = useAnimatedPresence(open, 200);
+  const cachedChildrenRef = useRef<React.ReactNode>(children);
+  const cachedAnchorRef = useRef<{ x: number; y: number }>(
+    anchor ?? { x: 400, y: 260 }
+  );
+  if (open) {
+    cachedChildrenRef.current = children;
+    if (anchor) cachedAnchorRef.current = anchor;
+  }
+
+  if (!shouldRender) return null;
+
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+  const popW = Math.min(368, vw - 32);
+  const estH = 388;
+  const pos = open && anchor ? anchor : cachedAnchorRef.current;
+
+  const left = Math.max(16, Math.min(pos.x - popW / 2, vw - popW - 16));
+  const preferBelow = pos.y + 14 + estH <= vh - 16;
+  const top = preferBelow
+    ? Math.max(16, pos.y + 14)
+    : Math.max(16, Math.min(pos.y - estH - 14, vh - estH - 16));
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="转写记录快捷操作"
+      data-tablet-utterance-popover="true"
+      className="fixed inset-0 z-[60]"
+    >
+      <div
+        data-popover-backdrop="true"
+        onClick={onClose}
+        className={`absolute inset-0 bg-[#1F2329]/18 backdrop-blur-[1px] transition-opacity duration-200 ease-out ${
+          isVisible ? 'opacity-100' : 'opacity-0'
+        }`}
+      />
+      <div
+        data-popover-panel="true"
+        style={{
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${popW}px`,
+          maxHeight: `${vh - 32}px`,
+          transformOrigin: preferBelow ? 'top center' : 'bottom center',
+        }}
+        className={`fixed z-10 rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_18px_48px_rgba(31,35,41,0.18),0_4px_12px_rgba(31,35,41,0.06)] overflow-y-auto p-3.5 space-y-3 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          isVisible
+            ? 'opacity-100 scale-100 translate-y-0'
+            : 'opacity-0 scale-95 translate-y-2'
+        }`}
+      >
+        {open ? children : cachedChildrenRef.current}
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 export const TranscriptPanel: React.FC = React.memo(() => {
   const sessionId = useAppStore((s) => s.activeSession?.id ?? null);
   const segments = useAppStore((s) => s.segments);
@@ -710,11 +932,27 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   const deleteSessionAttachment = useAppStore((s) => s.deleteSessionAttachment);
   const onlyBookmarks = useAppStore((s) => s.onlyBookmarksFilter);
   const setOnlyBookmarks = useAppStore((s) => s.setOnlyBookmarksFilter);
+  const showNotice = useAppStore((s) => s.showNotice);
+
+  const viewport = useViewportLayout();
+  const hideDesktopHoverBar = viewport.isCompactWidth;
+  const enableLongPress = viewport.isCompactPhoneLayout || isAndroidPlatform();
+  const useBottomSheetForActions = viewport.isCompactWidth;
 
   const [focusedIds, setFocusedIds] = useState<{
     segmentId: string | null;
     utteranceId: string | null;
   }>({ segmentId: null, utteranceId: null });
+  const [mobileActionTarget, setMobileActionTarget] = useState<{
+    utterance: TranscriptUtterance;
+    displayedText: string;
+    anchor: { x: number; y: number };
+  } | null>(null);
+  const [editRequest, setEditRequest] = useState<{
+    utteranceId: string;
+    seq: number;
+  } | null>(null);
+  const editSeqCounterRef = useRef<number>(0);
   const handledFocusSeqRef = useRef<number>(0);
   const focusTimerRef = useRef<number | null>(null);
   const utteranceRefineRafRef = useRef<number | null>(null);
@@ -754,6 +992,43 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     },
     [quickNoteAtUtterance]
   );
+
+  const handleOpenMobileActions = useCallback(
+    (
+      utterance: TranscriptUtterance,
+      displayedText: string,
+      anchor: { x: number; y: number }
+    ) => {
+      setMobileActionTarget({ utterance, displayedText, anchor });
+    },
+    []
+  );
+
+  // Android 返回键与 Esc 键优先关闭长按转写操作抽屉
+  useEffect(() => {
+    if (!mobileActionTarget) return;
+    const win = window as unknown as {
+      __zhilingHandleUtteranceSheetBack?: () => boolean;
+    };
+    const closeSheet = () => {
+      setMobileActionTarget(null);
+      return true;
+    };
+    win.__zhilingHandleUtteranceSheetBack = closeSheet;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMobileActionTarget(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      if (win.__zhilingHandleUtteranceSheetBack === closeSheet) {
+        delete win.__zhilingHandleUtteranceSheetBack;
+      }
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [mobileActionTarget]);
 
   const imagesBySegment = useMemo(() => {
     const map = new Map<string, SessionAttachmentItem[]>();
@@ -1217,6 +1492,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   );
 
   const handleMouseUpSelection = () => {
+    if (enableLongPress) return;
     const sel = window.getSelection();
     const text = sel?.toString().trim() ?? '';
     if (!text || text.length < 2 || !sel || sel.rangeCount === 0) {
@@ -1246,7 +1522,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   return (
     <section className="h-full flex flex-col bg-[#F5F6F7] relative">
       {/* 右侧栏顶栏：保持纯粹干净，工具均已收纳进顶栏 ··· 宫格 */}
-      <div className="h-12 px-5 bg-white border-b border-[#ECEEF2] flex items-center justify-between gap-3 shrink-0">
+      <div className="h-11 sm:h-12 px-3.5 sm:px-5 bg-white border-b border-[#ECEEF2] flex items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2 text-[15px] font-semibold text-[#1F2329] min-w-0">
           <AlignLeft className="w-[18px] h-[18px] text-[#1456F0] shrink-0" strokeWidth={1.85} />
           <span className="truncate">转写记录与知识点分段</span>
@@ -1308,7 +1584,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
           if (selectionBar) setSelectionBar(null);
         }}
         onMouseUp={handleMouseUpSelection}
-        className="flex-1 overflow-y-auto px-5 py-5"
+        className={`flex-1 overflow-y-auto ${
+          viewport.isCompactWidth ? 'px-3.5 pt-4 pb-24' : 'px-5 py-5'
+        }`}
       >
         {renderedSegments.length === 0 && !isRecording ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
@@ -1321,7 +1599,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
             <p className="max-w-sm text-[14px] leading-relaxed text-[#4E5969]">
               {onlyBookmarks
                 ? '点击上方按钮可切回全部课堂转写记录。'
-                : `点击右上角蓝色麦克风开启录音，或按 ${getPasteShortcutLabel()} 随时将板书截图锚定到时间轴中。点击任意句时间戳即可原声回听。`}
+                : enableLongPress
+                  ? '点击右上角蓝色麦克风开启录音。长按任意转写记录可标记「不懂」或直接以此时间戳创建便签，点击时间戳即可原声回听。'
+                  : `点击右上角蓝色麦克风开启录音，或按 ${getPasteShortcutLabel()} 随时将板书截图锚定到时间轴中。点击任意句时间戳即可原声回听。`}
             </p>
           </div>
         ) : (
@@ -1348,27 +1628,32 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                         segmentImages={segmentImages}
                         isFirstChunk={isFirstChunk}
                         isLastChunk={isLastChunk}
-                      enableCorrection={enableCorrection}
-                      enableResegment={enableResegment}
-                      enableHighlight={enableHighlight}
-                      enableBubble={enableBubble}
-                      showDiarization={showDiarization}
-                      activeAudioMs={activeAudioMs}
-                      focusedUtteranceId={focusedIds.utteranceId}
-                      isFocusedSegment={focusedIds.segmentId === segment.id}
-                      utteranceStickyMap={utteranceStickyMap}
-                      onSeekAudio={seekAudioPlayback}
-                      onRenameSpeaker={renameSpeaker}
-                      onUpdateUtterance={updateUtterance}
-                      onAskAboutText={handleAskAboutText}
-                      onAskWithImage={handleAskWithImage}
-                      onDeleteAttachment={(id) => void deleteSessionAttachment(id)}
-                      onPreviewImage={setPreviewImage}
-                      onFocusStickyAnchor={focusStickyNoteTimestamp}
-                      onQuickNoteUtterance={handleQuickNoteUtterance}
-                    />
-                  </div>
-                ))}
+                        enableCorrection={enableCorrection}
+                        enableResegment={enableResegment}
+                        enableHighlight={enableHighlight}
+                        enableBubble={enableBubble}
+                        showDiarization={showDiarization}
+                        hideDesktopHoverBar={hideDesktopHoverBar}
+                        enableLongPress={enableLongPress}
+                        activeAudioMs={activeAudioMs}
+                        focusedUtteranceId={focusedIds.utteranceId}
+                        isFocusedSegment={focusedIds.segmentId === segment.id}
+                        editRequest={editRequest}
+                        utteranceStickyMap={utteranceStickyMap}
+                        onSeekAudio={seekAudioPlayback}
+                        onRenameSpeaker={renameSpeaker}
+                        onUpdateUtterance={updateUtterance}
+                        onAskAboutText={handleAskAboutText}
+                        onAskWithImage={handleAskWithImage}
+                        onDeleteAttachment={(id) => void deleteSessionAttachment(id)}
+                        onPreviewImage={setPreviewImage}
+                        onFocusStickyAnchor={focusStickyNoteTimestamp}
+                        onQuickNoteUtterance={handleQuickNoteUtterance}
+                        onOpenMobileActions={handleOpenMobileActions}
+                      />
+                    </div>
+                  )
+                )}
               </div>
             )}
 
@@ -1379,6 +1664,200 @@ export const TranscriptPanel: React.FC = React.memo(() => {
 
       {/* 原声倍速点句回放条 */}
       <AudioPlaybackBar />
+
+      {/* 长按转写记录快捷操作：手机窄屏使用可拖拽底部抽屉，平板/宽屏使用按压点锚定浮层，均带平滑收回动效 */}
+      {(() => {
+        const actionContent = mobileActionTarget ? (
+          <>
+            {/* 被长按记录上下文摘要卡片 */}
+            <div className="rounded-xl border border-[#ECEEF2] bg-[#F7F8FA] px-3.5 py-2.5 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="inline-flex items-center gap-1 rounded-md bg-[#EBF2FF] px-2 py-0.5 text-[14px] font-medium text-[#1456F0] shrink-0">
+                    <UserRound className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate max-w-32">
+                      {mobileActionTarget.utterance.speakerLabel}
+                    </span>
+                  </span>
+                  <span className="text-[14px] font-mono text-[#646A73] tabular-nums shrink-0">
+                    [{mobileActionTarget.utterance.timestampText}]
+                  </span>
+                </div>
+                {mobileActionTarget.utterance.isBookmarked && (
+                  <span className="inline-flex items-center gap-1 rounded-md bg-[#FFF299] px-2 py-0.5 text-[14px] font-medium text-[#1F2329] shrink-0">
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    <span>待搞懂</span>
+                  </span>
+                )}
+              </div>
+              <p className="text-[14px] leading-relaxed text-[#4E5969] line-clamp-2">
+                {mobileActionTarget.displayedText}
+              </p>
+            </div>
+
+            {/* 核心双操作按钮：标不懂 + 直接以此时间戳创建便签 */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                data-utterance-action="toggle-confused"
+                onClick={() => {
+                  const u = mobileActionTarget.utterance;
+                  const nextBookmarked = !u.isBookmarked;
+                  setMobileActionTarget(null);
+                  void updateUtterance(u.id, {
+                    isBookmarked: nextBookmarked,
+                    bookmarkKind: nextBookmarked ? 'confused' : null,
+                  });
+                  showNotice(
+                    'info',
+                    nextBookmarked
+                      ? `已将 [${u.timestampText}] 标记为「待搞懂」`
+                      : `已取消 [${u.timestampText}] 的「待搞懂」标记`
+                  );
+                }}
+                className={`rounded-2xl border p-3.5 text-left transition-all active:scale-[0.97] cursor-pointer space-y-2 ${
+                  mobileActionTarget.utterance.isBookmarked
+                    ? 'border-[#BEDAFF] bg-[#EBF2FF] text-[#1456F0]'
+                    : 'border-[#F2DD89] bg-[#FFFBEB] text-[#1F2329]'
+                }`}
+              >
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    mobileActionTarget.utterance.isBookmarked
+                      ? 'bg-white text-[#1456F0]'
+                      : 'bg-[#FFF2B2] text-[#B45309]'
+                  }`}
+                >
+                  {mobileActionTarget.utterance.isBookmarked ? (
+                    <BookmarkCheck className="w-5 h-5" />
+                  ) : (
+                    <BookmarkPlus className="w-5 h-5" />
+                  )}
+                </div>
+                <div className="space-y-0.5">
+                  <div className="text-[15px] font-semibold">
+                    {mobileActionTarget.utterance.isBookmarked
+                      ? '取消标不懂'
+                      : '标记为「不懂」'}
+                  </div>
+                  <div className="text-[14px] text-[#646A73] truncate">
+                    {mobileActionTarget.utterance.isBookmarked
+                      ? '移出难点书签'
+                      : '加入难点书签复习'}
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                data-utterance-action="create-sticky"
+                onClick={() => {
+                  const u = mobileActionTarget.utterance;
+                  setMobileActionTarget(null);
+                  void quickNoteAtUtterance(
+                    { startTimeMs: u.startTimeMs, timestampText: u.timestampText },
+                    viewport.isCompactPhoneLayout ? { forceNew: true } : undefined
+                  );
+                }}
+                className="rounded-2xl border border-[#E7D8A2] bg-[#FCF7E3] text-[#1F2329] p-3.5 text-left transition-all active:scale-[0.97] cursor-pointer space-y-2"
+              >
+                <div className="w-9 h-9 rounded-xl bg-[#F4E7B6] text-[#7A5B14] flex items-center justify-center">
+                  <StickyNote className="w-5 h-5" />
+                </div>
+                <div className="space-y-0.5">
+                  <div className="text-[15px] font-semibold">创建时间戳便签</div>
+                  <div className="text-[14px] text-[#646A73] truncate">
+                    锚定 [{mobileActionTarget.utterance.timestampText}]
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {/* 辅助快捷操作组 */}
+            <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] divide-y divide-[#ECEEF2] overflow-hidden">
+              <button
+                type="button"
+                data-utterance-action="ask-ai"
+                onClick={() => {
+                  const target = mobileActionTarget;
+                  setMobileActionTarget(null);
+                  handleAskAboutText(target.displayedText, target.utterance.timestampText);
+                }}
+                className="w-full min-h-[46px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] hover:bg-[#EBF2FF]/60 active:bg-[#EBF2FF] transition-colors cursor-pointer"
+              >
+                <MessageSquarePlus className="w-4 h-4 text-[#1456F0] shrink-0" />
+                <span>追问 AI 这句话</span>
+              </button>
+
+              <button
+                type="button"
+                data-utterance-action="edit-text"
+                onClick={() => {
+                  const uid = mobileActionTarget.utterance.id;
+                  setMobileActionTarget(null);
+                  editSeqCounterRef.current += 1;
+                  setEditRequest({ utteranceId: uid, seq: editSeqCounterRef.current });
+                }}
+                className="w-full min-h-[46px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] hover:bg-[#EBF2FF]/60 active:bg-[#EBF2FF] transition-colors cursor-pointer"
+              >
+                <Pencil className="w-4 h-4 text-[#4E5969] shrink-0" />
+                <span>编辑文字或添加批注</span>
+              </button>
+
+              <button
+                type="button"
+                data-utterance-action="play-audio"
+                onClick={() => {
+                  const ms = mobileActionTarget.utterance.startTimeMs;
+                  setMobileActionTarget(null);
+                  seekAudioPlayback(ms);
+                }}
+                className="w-full min-h-[46px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] hover:bg-[#EBF2FF]/60 active:bg-[#EBF2FF] transition-colors cursor-pointer"
+              >
+                <Play className="w-4 h-4 text-[#4E5969] shrink-0" />
+                <span>从 [{mobileActionTarget.utterance.timestampText}] 回放原声</span>
+              </button>
+            </div>
+
+            {useBottomSheetForActions && (
+              <button
+                type="button"
+                onClick={() => setMobileActionTarget(null)}
+                className="w-full h-11 rounded-xl bg-[#F2F3F5] active:bg-[#E5E6EB] text-[15px] font-medium text-[#1F2329] transition-colors cursor-pointer"
+              >
+                取消
+              </button>
+            )}
+          </>
+        ) : null;
+
+        return (
+          <>
+            <DraggableBottomSheet
+              open={Boolean(mobileActionTarget) && useBottomSheetForActions}
+              onClose={() => setMobileActionTarget(null)}
+              ariaLabel="转写记录快捷操作"
+              zIndexClass="z-[60]"
+              maxWidthClass="w-full"
+              panelClassName="bg-white"
+              dataAttributes={{ 'data-mobile-utterance-sheet': 'true' }}
+              showHandle
+            >
+              <div className="px-4 pt-1 pb-[calc(16px+env(safe-area-inset-bottom,0px))] space-y-3.5">
+                {actionContent}
+              </div>
+            </DraggableBottomSheet>
+
+            <AnchoredUtteranceActionPopover
+              open={Boolean(mobileActionTarget) && !useBottomSheetForActions}
+              anchor={mobileActionTarget?.anchor ?? null}
+              onClose={() => setMobileActionTarget(null)}
+            >
+              {actionContent}
+            </AnchoredUtteranceActionPopover>
+          </>
+        );
+      })()}
 
       <Modal
         open={Boolean(previewImage)}

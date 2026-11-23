@@ -20,6 +20,7 @@ import {
   Tags,
   Trash2,
   Users,
+  Volume2,
 } from 'lucide-react';
 import { BrandLogoIcon } from '../icons/ProviderIcons';
 import { AudioSourceControl } from '../classroom/AudioSourceControl';
@@ -32,7 +33,12 @@ import { WindowControls } from '../ui/WindowControls';
 import { api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type { ClassSessionCard, FolderItem, SearchHitItem } from '../../types/domain';
-import { getDesktopBridge, isAndroidPlatform, isMacPlatform } from '../../utils/desktopBridge';
+import {
+  getDesktopBridge,
+  isAndroidPlatform,
+  isMacPlatform,
+  useViewportLayout,
+} from '../../utils/desktopBridge';
 import { formatDuration, formatShortDate } from '../../utils/format';
 
 const HIT_KIND_LABELS: Record<SearchHitItem['kind'], string> = {
@@ -310,6 +316,13 @@ export const HomeWorkspace: React.FC = () => {
 
   const isMac = isMacPlatform();
   const isAndroid = isAndroidPlatform();
+  const viewport = useViewportLayout();
+  const isShortLandscape = viewport.isShortLandscape;
+  // 平板大屏（>=768px 且非矮横屏）与电脑一致，音频设置直接展示在顶栏
+  const isCompactMobileChrome = viewport.isCompactPhoneLayout;
+  const micEnabled = useAppStore((s) => s.settings?.micEnabled ?? true);
+  const systemAudioEnabled = useAppStore((s) => s.settings?.systemAudioEnabled ?? false);
+  const previewFloatingOverlayOpen = useAppStore((s) => s.previewFloatingOverlayOpen);
 
   const homeGridItems = useMemo<GridMenuItem[]>(
     () => [
@@ -331,16 +344,31 @@ export const HomeWorkspace: React.FC = () => {
         icon: FolderPlus,
         onClick: () => void handleCreateFolderAndEdit(),
       },
-      ...(!isAndroid
+      ...(isCompactMobileChrome
         ? [
             {
-              id: 'grid-mini-sub',
-              label: '实时字幕',
-              icon: PictureInPicture2,
-              onClick: () => void toggleMiniOverlayWindow(),
+              id: 'grid-audio-settings',
+              label: '音频设置',
+              icon: Volume2,
+              badge:
+                !micEnabled && !systemAudioEnabled
+                  ? '静音'
+                  : micEnabled && systemAudioEnabled
+                    ? '双轨'
+                    : systemAudioEnabled
+                      ? '内录'
+                      : undefined,
+              onClick: () => setSettingsOpen(true, 'general'),
             },
           ]
         : []),
+      {
+        id: 'grid-mini-sub',
+        label: isAndroid ? '悬浮小窗' : '实时字幕',
+        icon: PictureInPicture2,
+        active: isAndroid ? previewFloatingOverlayOpen : undefined,
+        onClick: () => void toggleMiniOverlayWindow(),
+      },
       {
         id: 'grid-settings',
         label: '系统设置',
@@ -348,7 +376,17 @@ export const HomeWorkspace: React.FC = () => {
         onClick: () => setSettingsOpen(true),
       },
     ],
-    [isAndroid, startNewClassroom, setImportAudioModalOpen, toggleMiniOverlayWindow, setSettingsOpen]
+    [
+      isAndroid,
+      isCompactMobileChrome,
+      previewFloatingOverlayOpen,
+      micEnabled,
+      systemAudioEnabled,
+      startNewClassroom,
+      setImportAudioModalOpen,
+      toggleMiniOverlayWindow,
+      setSettingsOpen,
+    ]
   );
 
   const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
@@ -368,12 +406,14 @@ export const HomeWorkspace: React.FC = () => {
       className="h-full flex flex-col bg-[#F5F6F7] text-[#1F2329] select-none overflow-hidden"
       onContextMenu={openCanvasContextMenu}
     >
-      {/* 顶部导航栏：macOS 左置交通灯 / Windows 右置三键 / 移动端自动单行精简并下置搜索栏 */}
+      {/* 顶部导航栏：macOS 左置交通灯 / Windows 右置三键 / 手机横竖屏自适应紧凑高度 */}
       <header
         className={`border-b border-[#DEE0E3] flex items-center justify-between gap-2 shrink-0 pywebview-drag-region ${
-          isMac
-            ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
-            : 'h-14 md:h-16 bg-white px-4 md:pl-8 md:pr-4'
+          isShortLandscape
+            ? 'h-12 bg-white px-4'
+            : isMac
+              ? 'h-14 bg-white/95 backdrop-blur-md pl-4 pr-5'
+              : 'h-14 md:h-16 bg-white px-4 md:pl-8 md:pr-4'
         }`}
         onContextMenu={(e) => e.stopPropagation()}
         onDoubleClick={handleHeaderDoubleClick}
@@ -386,7 +426,7 @@ export const HomeWorkspace: React.FC = () => {
             className="flex items-center gap-2 md:gap-2.5 cursor-pointer focus:outline-none group shrink-0"
           >
             <BrandLogoIcon className="w-7 h-7" />
-            <span className="text-[17px] font-semibold tracking-tight text-[#1F2329] group-hover:text-[#1456F0] transition-colors">
+            <span className="text-[17px] font-semibold tracking-tight text-[#1F2329] group-hover:text-[#1456F0] transition-colors whitespace-nowrap">
               知聆课堂
             </span>
           </button>
@@ -419,7 +459,7 @@ export const HomeWorkspace: React.FC = () => {
             />
           </div>
 
-          <AudioSourceControl />
+          {!isCompactMobileChrome && <AudioSourceControl />}
 
           <MoreGridMenu
             items={homeGridItems}
@@ -431,8 +471,8 @@ export const HomeWorkspace: React.FC = () => {
         </div>
       </header>
 
-      {/* 移动端专属全局搜索条（桌面端 >= 768px 自动隐藏） */}
-      <div className="md:hidden border-b border-[#ECEEF2] bg-white px-4 py-2.5 shrink-0">
+      {/* 移动端竖屏专属全局搜索条（桌面端或手机横屏 >= 768px 自动隐藏，直接使用顶栏内嵌搜索） */}
+      <div className="md:hidden border-b border-[#ECEEF2] bg-white px-4 py-2 shrink-0">
         <div className="flex items-center gap-2 h-10 w-full rounded-lg border border-[#DEE0E3] bg-[#F5F6F7]/80 px-3 focus-within:bg-white focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all">
           <Search className="w-4 h-4 text-[#646A73] shrink-0" strokeWidth={1.8} />
           <input
@@ -679,7 +719,7 @@ export const HomeWorkspace: React.FC = () => {
         title={`配置学科专属热词 · ${hotwordFolder?.name ?? ''}`}
         widthClass="max-w-lg"
       >
-        <div className="p-6 space-y-4">
+        <div className="p-4 sm:p-6 space-y-4">
           <p className="text-[14px] text-[#4E5969] leading-relaxed">
             为该科目文件夹添加专业名词、算法名称或人名（每行或以逗号分隔一个词）。该文件夹下的课堂在语音转写、顺句纠错与重点词标注时将自动注入这些热词，避免同音误识。
           </p>
@@ -690,11 +730,11 @@ export const HomeWorkspace: React.FC = () => {
             placeholder={'例如：\nTarjan\n线段树懒标记\n斜率优化\n状态转移方程'}
             className="w-full rounded-xl border border-[#DEE0E3] bg-white p-3.5 text-[15px] text-[#1F2329] focus:outline-none focus:border-[#1456F0]"
           />
-          <div className="flex justify-end gap-3 pt-1">
+          <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-1">
             <button
               type="button"
               onClick={() => setHotwordFolder(null)}
-              className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] cursor-pointer"
+              className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] inline-flex items-center justify-center whitespace-nowrap cursor-pointer"
             >
               取消
             </button>
@@ -709,7 +749,7 @@ export const HomeWorkspace: React.FC = () => {
                 void updateFolderHotwords(hotwordFolder.id, parsed);
                 setHotwordFolder(null);
               }}
-              className="h-10 px-5 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] text-white text-[14px] font-medium cursor-pointer"
+              className="min-h-10 py-2 px-5 w-full sm:w-auto rounded-lg bg-[#1456F0] hover:bg-[#3370FF] text-white text-[14px] font-medium inline-flex items-center justify-center whitespace-nowrap cursor-pointer"
             >
               保存学科热词
             </button>

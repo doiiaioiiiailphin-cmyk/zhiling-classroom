@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   BookOpenCheck,
   Check,
@@ -22,6 +23,7 @@ import type {
   SessionExportRequest,
   SessionStudyNote,
 } from '../../types/domain';
+import { useViewportLayout } from '../../utils/desktopBridge';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { Modal } from '../ui/Modal';
 import { ThinkingDisclosure } from '../ui/ThinkingDisclosure';
@@ -215,25 +217,82 @@ export const SessionNotesExportModal: React.FC = () => {
 
   const currentCard = effectiveCards[cardIndex] ?? null;
   const masteredCount = Object.values(masteredIds).filter(Boolean).length;
+  const viewport = useViewportLayout();
+  // 手机窄屏/矮横屏使用全屏页面式；平板大屏与桌面端保持类电脑弹窗体验
+  const useMobilePageLayout = viewport.isCompactPhoneLayout;
+  const canClose = !isGeneratingNote && !isExporting;
 
-  return (
-    <Modal
-      open={modalState.open}
-      onClose={() => {
-        if (!isGeneratingNote && !isExporting) closeNotesExportModal();
-      }}
-      title={`全课精编笔记与导出 · ${sessionTitle}`}
-      widthClass="max-w-4xl"
-    >
-      <div className="flex flex-col h-[76vh] max-h-[740px]">
-        {/* 顶部三视图切换栏 */}
-        <div className="px-6 pt-4 pb-3 border-b border-[#ECEEF2] bg-[#F8F9FA] flex items-center justify-between gap-4 shrink-0">
-          <div className="inline-flex rounded-xl bg-[#EBEDF0] p-1 gap-1">
+  useEffect(() => {
+    if (!modalState.open || !useMobilePageLayout) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && canClose) {
+        e.preventDefault();
+        closeNotesExportModal();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [modalState.open, useMobilePageLayout, canClose, closeNotesExportModal]);
+
+  if (!modalState.open) return null;
+
+  const canExportAny =
+    includeStudyNote ||
+    includeHighlights ||
+    includeChat ||
+    includeTranscript ||
+    includeStickyNotes;
+
+  if (useMobilePageLayout) {
+    return createPortal(
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`课堂总结与导出 · ${sessionTitle}`}
+        data-mobile-notes-page="true"
+        className="fixed inset-0 z-50 bg-[#F5F6F7] flex flex-col overflow-hidden animate-mobile-page-in"
+      >
+        {/* 手机端原生页面顶部导航栏 */}
+        <header className="h-[52px] bg-white border-b border-[#ECEEF2] px-2 flex items-center justify-between gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={!canClose}
+            onClick={() => {
+              if (canClose) closeNotesExportModal();
+            }}
+            aria-label="返回课堂"
+            className="h-10 px-2 rounded-xl text-[#1F2329] active:bg-[#F2F3F5] disabled:opacity-40 inline-flex items-center gap-0.5 text-[15px] font-medium shrink-0 cursor-pointer"
+          >
+            <ChevronLeft className="w-5 h-5 shrink-0" />
+            <span>返回</span>
+          </button>
+
+          <div className="min-w-0 flex-1 text-center px-1">
+            <div className="text-[16px] font-semibold text-[#1F2329] truncate">
+              {sessionTitle}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={!canClose}
+            onClick={() => {
+              if (canClose) closeNotesExportModal();
+            }}
+            className="h-10 px-3 rounded-xl text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 text-[15px] font-medium shrink-0 cursor-pointer"
+          >
+            完成
+          </button>
+        </header>
+
+        {/* 三等分原生分段切换栏：窄屏绝无遮挡或裁切 */}
+        <div className="px-3.5 py-2.5 bg-white border-b border-[#ECEEF2] shrink-0">
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-[#EEF0F4] p-1">
             {(
               [
-                { key: 'notes', label: '全课精编笔记', icon: BookOpenCheck },
-                { key: 'flashcards', label: '巩固自测闪卡', icon: Layers },
-                { key: 'export', label: '导出课堂文档', icon: FileDown },
+                { key: 'notes', label: '精编笔记', icon: BookOpenCheck },
+                { key: 'flashcards', label: '自测闪卡', icon: Layers },
+                { key: 'export', label: '导出文档', icon: FileDown },
               ] as const
             ).map((item) => {
               const Icon = item.icon;
@@ -242,56 +301,324 @@ export const SessionNotesExportModal: React.FC = () => {
                 <button
                   key={item.key}
                   type="button"
+                  data-notes-tab={item.key}
                   onClick={() => setTab(item.key)}
-                  className={`h-9 px-3.5 rounded-lg text-[14px] font-medium inline-flex items-center gap-2 transition-all cursor-pointer ${
+                  className={`h-9 px-1.5 rounded-lg text-[14px] font-medium inline-flex items-center justify-center gap-1 min-w-0 whitespace-nowrap transition-all cursor-pointer ${
                     active
                       ? 'bg-white text-[#1456F0] shadow-xs'
-                      : 'text-[#4E5969] hover:text-[#1F2329]'
+                      : 'text-[#4E5969] active:text-[#1F2329]'
                   }`}
                 >
-                  <Icon className="w-4 h-4" />
-                  <span>{item.label}</span>
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="truncate">{item.label}</span>
                 </button>
               );
             })}
           </div>
+        </div>
 
+        {/* 主体全页滚动内容区 */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-3.5 py-4 space-y-4">
+          {loadingWorkspace ? (
+            <div className="h-full flex items-center justify-center gap-2.5 text-[15px] text-[#646A73]">
+              <Loader2 className="w-5 h-5 animate-spin text-[#1456F0]" />
+              <span>正在读取课堂内容...</span>
+            </div>
+          ) : tab === 'notes' ? (
+            isGeneratingNote || effectiveNote?.contentMarkdown ? (
+              <div className="rounded-2xl border border-[#EAEDF1] bg-white p-4 shadow-[0_1px_2px_rgba(31,35,41,0.03)] space-y-3.5">
+                {(isGeneratingNote ? streamThinking : effectiveNote?.thinking) && (
+                  <ThinkingDisclosure
+                    thinking={isGeneratingNote ? streamThinking : effectiveNote?.thinking}
+                    isThinking={isGeneratingNote && isThinkingPhase}
+                  />
+                )}
+                {animatedNoteContent ? (
+                  <MarkdownRenderer
+                    content={animatedNoteContent}
+                    isStreaming={isGeneratingNote || isAnimating}
+                  />
+                ) : isGeneratingNote ? (
+                  <div className="py-2 text-[14px] font-medium thinking-shimmer inline-block">
+                    正在梳理全课知识脉络与公式推导...
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-center px-4 space-y-4">
+                <div className="w-14 h-14 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
+                  <BookOpenCheck className="w-7 h-7" />
+                </div>
+                <div className="space-y-1.5 max-w-sm">
+                  <h3 className="text-[16px] font-semibold text-[#1F2329]">
+                    尚未生成全课精编笔记
+                  </h3>
+                  <p className="text-[14px] text-[#646A73] leading-relaxed">
+                    点击下方「一键生成全课笔记」，AI 将综合整堂课的知识分段、重点词、不懂点书签与讲义，生成完整的复习总结文档。
+                  </p>
+                </div>
+              </div>
+            )
+          ) : tab === 'flashcards' ? (
+            currentCard ? (
+              <div className="h-full flex flex-col justify-between gap-4">
+                <div className="flex items-center justify-between gap-2 text-[14px] text-[#646A73]">
+                  <span className="px-2.5 py-1 rounded-lg bg-[#EBF2FF] text-[#1456F0] font-medium truncate">
+                    {currentCard.tag || '课堂核心'}
+                  </span>
+                  <span className="tabular-nums shrink-0">
+                    {cardIndex + 1} / {effectiveCards.length} · 已掌握 {masteredCount}
+                  </span>
+                </div>
+
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setFlipped((f) => !f)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setFlipped((f) => !f);
+                    }
+                  }}
+                  className="flex-1 min-h-[240px] rounded-2xl border border-[#BEDAFF] bg-gradient-to-b from-[#F8FAFF] to-white p-5 flex flex-col justify-between shadow-xs active:scale-[0.99] transition-transform cursor-pointer select-none"
+                >
+                  <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
+                    <span>{flipped ? '参考解析与答案' : '自测提问（点击翻转）'}</span>
+                    <RotateCcw className="w-4 h-4 shrink-0" />
+                  </div>
+
+                  <div className="my-auto py-4">
+                    {flipped ? (
+                      <MarkdownRenderer content={currentCard.back} />
+                    ) : (
+                      <p className="text-[17px] font-semibold text-[#1F2329] leading-relaxed">
+                        {currentCard.front}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="text-[14px] text-[#646A73]">
+                    {flipped ? '再次点击卡片切回题目面' : '先思考作答，再点击卡片核对'}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    disabled={cardIndex === 0}
+                    onClick={() => {
+                      setCardIndex((i) => Math.max(0, i - 1));
+                      setFlipped(false);
+                    }}
+                    className="min-h-10 py-2 px-2 rounded-xl border border-[#DEE0E3] bg-white active:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
+                  >
+                    <ChevronLeft className="w-4 h-4 shrink-0" />
+                    <span>上一张</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setMasteredIds((prev) => ({
+                        ...prev,
+                        [currentCard.id]: !prev[currentCard.id],
+                      }))
+                    }
+                    className={`min-h-10 py-2 px-2 rounded-xl border text-[14px] font-medium inline-flex items-center justify-center gap-1 whitespace-nowrap transition-colors cursor-pointer ${
+                      masteredIds[currentCard.id]
+                        ? 'border-[#1456F0] bg-[#EBF2FF] text-[#1456F0]'
+                        : 'border-[#DEE0E3] bg-white text-[#4E5969] active:bg-[#F2F3F5]'
+                    }`}
+                  >
+                    <Check className="w-4 h-4 shrink-0" />
+                    <span>{masteredIds[currentCard.id] ? '已掌握' : '标记掌握'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={cardIndex >= effectiveCards.length - 1}
+                    onClick={() => {
+                      setCardIndex((i) => Math.min(effectiveCards.length - 1, i + 1));
+                      setFlipped(false);
+                    }}
+                    className="min-h-10 py-2 px-2 rounded-xl border border-[#DEE0E3] bg-white active:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
+                  >
+                    <span>下一张</span>
+                    <ChevronRight className="w-4 h-4 shrink-0" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-center px-4 space-y-4">
+                <div className="w-14 h-14 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
+                  <Layers className="w-7 h-7" />
+                </div>
+                <div className="space-y-1.5 max-w-sm">
+                  <h3 className="text-[16px] font-semibold text-[#1F2329]">
+                    一键生成课堂巩固自测闪卡
+                  </h3>
+                  <p className="text-[14px] text-[#646A73] leading-relaxed">
+                    基于本节课提取的重点术语与关键推导生成 5 至 8 张互动问答卡，支持翻转自测或直接导出为 Anki 记忆卡包（.tsv）。
+                  </p>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="space-y-4 pb-2">
+              <section className="space-y-2">
+                <h3 className="text-[14px] font-medium text-[#646A73] px-1">
+                  选择导出文件格式
+                </h3>
+                <div className="space-y-2.5">
+                  {(
+                    [
+                      {
+                        value: 'markdown',
+                        title: 'Markdown (.md)',
+                        desc: '适配 Obsidian / Notion / Typora，保留公式与表格',
+                      },
+                      {
+                        value: 'docx',
+                        title: 'Word 文档 (.docx)',
+                        desc: '办公蓝标题与双栏术语表排版，适合打印与提交',
+                      },
+                      {
+                        value: 'txt',
+                        title: '纯文本 (.txt)',
+                        desc: '清爽无格式纯文本归档，兼容任意阅读器',
+                      },
+                    ] as const
+                  ).map((opt) => {
+                    const selected = exportFormat === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setExportFormat(opt.value)}
+                        className={`w-full rounded-2xl border p-3.5 text-left space-y-1 transition-all cursor-pointer ${
+                          selected
+                            ? 'border-[#1456F0] bg-[#EBF2FF]/70 ring-2 ring-[#1456F0]/15'
+                            : 'border-[#EAEDF1] bg-white active:bg-[#F8F9FA]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[15px] font-semibold text-[#1F2329]">
+                            {opt.title}
+                          </span>
+                          <FileText
+                            className={`w-4 h-4 shrink-0 ${
+                              selected ? 'text-[#1456F0]' : 'text-[#8F959E]'
+                            }`}
+                          />
+                        </div>
+                        <p className="text-[14px] text-[#646A73] leading-snug">{opt.desc}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <h3 className="text-[14px] font-medium text-[#646A73] px-1">
+                  勾选导出包含的内容模块
+                </h3>
+                <div className="rounded-2xl border border-[#EAEDF1] bg-white shadow-[0_1px_2px_rgba(31,35,41,0.03)] divide-y divide-[#F0F2F5] overflow-hidden">
+                  {(
+                    [
+                      {
+                        checked: includeStudyNote,
+                        set: setIncludeStudyNote,
+                        label: '一、全课精编笔记',
+                        hint: effectiveNote
+                          ? '已生成，将包含在文档首部'
+                          : '尚未生成（可切到「精编笔记」一键生成）',
+                      },
+                      {
+                        checked: includeHighlights,
+                        set: setIncludeHighlights,
+                        label: '二、核心术语与概念速查表',
+                        hint: '自动汇总各段落荧光笔标注的专业词汇与语境释义',
+                      },
+                      {
+                        checked: includeChat,
+                        set: setIncludeChat,
+                        label: '三、课堂问答精选记录',
+                        hint: '包含您向随堂助手提出的全部问题与解答',
+                      },
+                      {
+                        checked: includeTranscript,
+                        set: setIncludeTranscript,
+                        label: '四、分段精修逐字稿（含书签与批注）',
+                        hint: '按知识分段整理时间戳、讲话人、不懂点标记及批注',
+                      },
+                      {
+                        checked: includeStickyNotes,
+                        set: setIncludeStickyNotes,
+                        label: '五、课堂便签速记',
+                        hint: '汇总本堂课保存的纸色便签与时间锚点',
+                      },
+                    ] as const
+                  ).map((row) => (
+                    <label
+                      key={row.label}
+                      className="flex items-center justify-between gap-3 px-4 py-3.5 cursor-pointer active:bg-[#F8F9FA] transition-colors"
+                    >
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="text-[15px] font-medium text-[#1F2329]">{row.label}</div>
+                        <div className="text-[14px] text-[#646A73] leading-snug">{row.hint}</div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={row.checked}
+                        onChange={(e) => row.set(e.target.checked)}
+                        className="w-5 h-5 accent-[#1456F0] rounded shrink-0 cursor-pointer"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+
+        {/* 手机端固定底部主操作栏 */}
+        <footer className="border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md px-3.5 pt-3 pb-[calc(12px+env(safe-area-inset-bottom,0px))] shrink-0">
           {tab === 'notes' && (
             <div className="flex items-center gap-2.5">
               {effectiveNote?.contentMarkdown && !isGeneratingNote && (
                 <button
                   type="button"
                   onClick={() => void handleCopyNote()}
-                  className="h-9 px-3.5 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="h-11 px-4 rounded-xl border border-[#DEE0E3] bg-white active:bg-[#F2F3F5] text-[15px] font-medium text-[#1F2329] inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   {copiedNote ? (
                     <>
-                      <Check className="w-4 h-4 text-[#1456F0]" />
+                      <Check className="w-4 h-4 text-[#1456F0] shrink-0" />
                       <span>已复制</span>
                     </>
                   ) : (
                     <>
-                      <Copy className="w-4 h-4 text-[#4E5969]" />
-                      <span>复制 Markdown</span>
+                      <Copy className="w-4 h-4 text-[#4E5969] shrink-0" />
+                      <span>复制</span>
                     </>
                   )}
                 </button>
               )}
-
               <button
                 type="button"
                 disabled={isGeneratingNote || loadingWorkspace}
                 onClick={() => void handleGenerateNote()}
-                className="h-9 px-4 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[14px] font-medium inline-flex items-center gap-2 transition-colors cursor-pointer"
+                className="flex-1 h-11 px-4 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
               >
                 {isGeneratingNote ? (
                   <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
                     <span>正在流式编撰...</span>
                   </>
                 ) : (
                   <>
-                    <RefreshCw className="w-4 h-4" />
+                    <RefreshCw className="w-4 h-4 shrink-0" />
                     <span>{effectiveNote ? '重新生成笔记' : '一键生成全课笔记'}</span>
                   </>
                 )}
@@ -306,9 +633,152 @@ export const SessionNotesExportModal: React.FC = () => {
                   type="button"
                   disabled={isExporting}
                   onClick={() => void handleExport('anki')}
-                  className="h-9 px-3.5 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="h-11 px-3.5 rounded-xl border border-[#DEE0E3] bg-white active:bg-[#F2F3F5] text-[15px] font-medium text-[#1F2329] inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  <FileSpreadsheet className="w-4 h-4 text-[#1456F0]" />
+                  <FileSpreadsheet className="w-4 h-4 text-[#1456F0] shrink-0" />
+                  <span>Anki 卡包</span>
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={isGeneratingCards || loadingWorkspace}
+                onClick={() => void handleGenerateCards()}
+                className="flex-1 h-11 px-4 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
+              >
+                {isGeneratingCards ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>正在出题...</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4 shrink-0" />
+                    <span>{effectiveCards.length > 0 ? '重新生成闪卡' : '生成巩固闪卡'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {tab === 'export' && (
+            <button
+              type="button"
+              disabled={isExporting || !canExportAny}
+              onClick={() => void handleExport()}
+              className="w-full h-11 px-5 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
+            >
+              {isExporting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                  <span>正在打包导出...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4 shrink-0" />
+                  <span>立即导出文档</span>
+                </>
+              )}
+            </button>
+          )}
+        </footer>
+      </div>,
+      document.body
+    );
+  }
+
+  return (
+    <Modal
+      open={modalState.open}
+      onClose={() => {
+        if (canClose) closeNotesExportModal();
+      }}
+      title={`全课精编笔记与导出 · ${sessionTitle}`}
+      widthClass="max-w-4xl"
+    >
+      <div className="flex flex-col h-[76vh] max-h-[740px]">
+        {/* 顶部三视图切换栏（平板与桌面自适应换行防拥挤） */}
+        <div className="px-4 sm:px-6 pt-3 sm:pt-4 pb-3 border-b border-[#ECEEF2] bg-[#F8F9FA] flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 shrink-0">
+          <div className="flex w-full sm:w-auto overflow-x-auto no-scrollbar rounded-xl bg-[#EBEDF0] p-1 gap-1">
+            {(
+              [
+                { key: 'notes', label: '全课精编笔记', icon: BookOpenCheck },
+                { key: 'flashcards', label: '巩固自测闪卡', icon: Layers },
+                { key: 'export', label: '导出课堂文档', icon: FileDown },
+              ] as const
+            ).map((item) => {
+              const Icon = item.icon;
+              const active = tab === item.key;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setTab(item.key)}
+                  className={`h-9 px-3 sm:px-3.5 rounded-lg text-[14px] font-medium inline-flex items-center justify-center gap-1.5 sm:gap-2 shrink-0 whitespace-nowrap transition-all cursor-pointer ${
+                    active
+                      ? 'bg-white text-[#1456F0] shadow-xs'
+                      : 'text-[#4E5969] hover:text-[#1F2329]'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {tab === 'notes' && (
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-2.5">
+              {effectiveNote?.contentMarkdown && !isGeneratingNote && (
+                <button
+                  type="button"
+                  onClick={() => void handleCopyNote()}
+                  className="h-9 px-3.5 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
+                >
+                  {copiedNote ? (
+                    <>
+                      <Check className="w-4 h-4 text-[#1456F0] shrink-0" />
+                      <span>已复制</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4 text-[#4E5969] shrink-0" />
+                      <span>复制 Markdown</span>
+                    </>
+                  )}
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={isGeneratingNote || loadingWorkspace}
+                onClick={() => void handleGenerateNote()}
+                className="h-9 px-4 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[14px] font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
+              >
+                {isGeneratingNote ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    <span>正在流式编撰...</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4 shrink-0" />
+                    <span>{effectiveNote ? '重新生成笔记' : '一键生成全课笔记'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {tab === 'flashcards' && (
+            <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-2.5">
+              {effectiveCards.length > 0 && (
+                <button
+                  type="button"
+                  disabled={isExporting}
+                  onClick={() => void handleExport('anki')}
+                  className="h-9 px-3.5 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-[#1456F0] shrink-0" />
                   <span>导出 Anki 卡包 (.tsv)</span>
                 </button>
               )}
@@ -316,16 +786,16 @@ export const SessionNotesExportModal: React.FC = () => {
                 type="button"
                 disabled={isGeneratingCards || loadingWorkspace}
                 onClick={() => void handleGenerateCards()}
-                className="h-9 px-4 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[14px] font-medium inline-flex items-center gap-2 transition-colors cursor-pointer"
+                className="h-9 px-4 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-60 text-white text-[14px] font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
               >
                 {isGeneratingCards ? (
                   <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
                     <span>正在出题...</span>
                   </>
                 ) : (
                   <>
-                    <RefreshCw className="w-4 h-4" />
+                    <RefreshCw className="w-4 h-4 shrink-0" />
                     <span>{effectiveCards.length > 0 ? '重新生成闪卡' : '生成巩固闪卡'}</span>
                   </>
                 )}
@@ -335,7 +805,7 @@ export const SessionNotesExportModal: React.FC = () => {
         </div>
 
         {/* 主体内容区 */}
-        <div className="flex-1 overflow-y-auto p-6 bg-white">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-white">
           {loadingWorkspace ? (
             <div className="h-full flex items-center justify-center gap-2.5 text-[15px] text-[#646A73]">
               <Loader2 className="w-5 h-5 animate-spin text-[#1456F0]" />
@@ -420,7 +890,7 @@ export const SessionNotesExportModal: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center justify-between gap-2 sm:gap-3">
                   <button
                     type="button"
                     disabled={cardIndex === 0}
@@ -428,9 +898,9 @@ export const SessionNotesExportModal: React.FC = () => {
                       setCardIndex((i) => Math.max(0, i - 1));
                       setFlipped(false);
                     }}
-                    className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 cursor-pointer"
+                    className="min-h-10 py-2 px-2.5 sm:px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap cursor-pointer"
                   >
-                    <ChevronLeft className="w-4 h-4" />
+                    <ChevronLeft className="w-4 h-4 shrink-0" />
                     <span>上一张</span>
                   </button>
 
@@ -442,14 +912,14 @@ export const SessionNotesExportModal: React.FC = () => {
                         [currentCard.id]: !prev[currentCard.id],
                       }))
                     }
-                    className={`h-10 px-4 rounded-lg border text-[14px] font-medium inline-flex items-center gap-2 transition-colors cursor-pointer ${
+                    className={`min-h-10 py-2 px-3 sm:px-4 rounded-lg border text-[14px] font-medium inline-flex items-center gap-1.5 sm:gap-2 whitespace-nowrap transition-colors cursor-pointer ${
                       masteredIds[currentCard.id]
                         ? 'border-[#1456F0] bg-[#EBF2FF] text-[#1456F0]'
                         : 'border-[#DEE0E3] bg-white text-[#4E5969] hover:bg-[#F2F3F5]'
                     }`}
                   >
-                    <Check className="w-4 h-4" />
-                    <span>{masteredIds[currentCard.id] ? '已标记掌握' : '标记为已掌握'}</span>
+                    <Check className="w-4 h-4 shrink-0" />
+                    <span>{masteredIds[currentCard.id] ? '已掌握' : '标记掌握'}</span>
                   </button>
 
                   <button
@@ -459,10 +929,10 @@ export const SessionNotesExportModal: React.FC = () => {
                       setCardIndex((i) => Math.min(effectiveCards.length - 1, i + 1));
                       setFlipped(false);
                     }}
-                    className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1.5 cursor-pointer"
+                    className="min-h-10 py-2 px-2.5 sm:px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-40 text-[14px] font-medium text-[#1F2329] inline-flex items-center gap-1 sm:gap-1.5 whitespace-nowrap cursor-pointer"
                   >
                     <span>下一张</span>
-                    <ChevronRight className="w-4 h-4" />
+                    <ChevronRight className="w-4 h-4 shrink-0" />
                   </button>
                 </div>
               </div>
@@ -604,7 +1074,7 @@ export const SessionNotesExportModal: React.FC = () => {
                       !includeStickyNotes)
                   }
                   onClick={() => void handleExport()}
-                  className="h-11 px-6 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[15px] font-medium inline-flex items-center gap-2 transition-colors cursor-pointer"
+                  className="min-h-11 py-2 px-6 w-full sm:w-auto rounded-xl bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
                 >
                   {isExporting ? (
                     <>

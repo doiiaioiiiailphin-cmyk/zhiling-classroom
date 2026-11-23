@@ -47,8 +47,8 @@ export const Aec3DownloadModal: React.FC = () => {
       title="启用 WebRTC AEC3 双讲回声消除"
       widthClass="max-w-lg"
     >
-      <div className="p-6 space-y-5">
-        <div className="flex items-start gap-3.5 rounded-xl border border-[#BEDAFF] bg-[#EBF2FF]/70 p-4">
+      <div className="p-4 sm:p-6 space-y-4 sm:space-y-5">
+        <div className="flex items-start gap-3 sm:gap-3.5 rounded-xl border border-[#BEDAFF] bg-[#EBF2FF]/70 p-3.5 sm:p-4">
           <div className="w-10 h-10 rounded-lg bg-[#1456F0] text-white flex items-center justify-center shrink-0 mt-0.5">
             <AudioWaveform className="w-5 h-5" />
           </div>
@@ -64,18 +64,22 @@ export const Aec3DownloadModal: React.FC = () => {
           </div>
         </div>
 
-        <div className="rounded-xl border border-[#DEE0E3] bg-[#F8F9FA] px-4 py-3.5 space-y-2">
-          <div className="flex items-center justify-between text-[14px]">
-            <span className="font-medium text-[#1F2329]">组件名称</span>
-            <span className="text-[#4E5969]">WebRTC AudioProcessing AEC3 (WASM v0.3.0)</span>
+        <div className="rounded-xl border border-[#DEE0E3] bg-[#F8F9FA] px-4 py-3.5 space-y-2.5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-0.5 sm:gap-4 text-[14px]">
+            <span className="font-medium text-[#1F2329] shrink-0 whitespace-nowrap">组件名称</span>
+            <span className="text-[#4E5969] sm:text-right break-words">
+              WebRTC AudioProcessing AEC3 (WASM v0.3.0)
+            </span>
           </div>
-          <div className="flex items-center justify-between text-[14px]">
-            <span className="font-medium text-[#1F2329]">下载体积</span>
-            <span className="text-[#4E5969] tabular-nums">约 302 KB（本地持久化保存，仅需下载一次）</span>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-0.5 sm:gap-4 text-[14px]">
+            <span className="font-medium text-[#1F2329] shrink-0 whitespace-nowrap">下载体积</span>
+            <span className="text-[#4E5969] tabular-nums sm:text-right break-words">
+              约 302 KB（本地持久化保存，仅需下载一次）
+            </span>
           </div>
           {isDualTalkStart && (
-            <div className="flex items-center gap-2 pt-1 text-[14px] text-[#646A73]">
-              <CheckCircle2 className="w-4 h-4 text-[#1456F0] shrink-0" />
+            <div className="flex items-start sm:items-center gap-2 pt-1 text-[14px] text-[#646A73]">
+              <CheckCircle2 className="w-4 h-4 text-[#1456F0] shrink-0 mt-0.5 sm:mt-0" />
               <span>若暂不下载也可直接开启双讲模式，后续随时可在设置中启用回声消除。</span>
             </div>
           )}
@@ -83,12 +87,12 @@ export const Aec3DownloadModal: React.FC = () => {
 
         {aec3Downloading && (
           <div className="space-y-2 rounded-xl border border-[#BEDAFF] bg-white p-4">
-            <div className="flex items-center justify-between text-[14px]">
-              <span className="font-medium text-[#1456F0] flex items-center gap-2">
+            <div className="flex items-center justify-between gap-2 text-[14px]">
+              <span className="font-medium text-[#1456F0] flex items-center gap-2 min-w-0">
                 <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                <span>{getStageDescription(progress?.stage)}</span>
+                <span className="truncate">{getStageDescription(progress?.stage)}</span>
               </span>
-              <span className="font-semibold text-[#1F2329] tabular-nums">{percent}%</span>
+              <span className="font-semibold text-[#1F2329] tabular-nums shrink-0">{percent}%</span>
             </div>
             <div className="h-2 w-full rounded-full bg-[#EBEDF0] overflow-hidden">
               <div
@@ -104,13 +108,13 @@ export const Aec3DownloadModal: React.FC = () => {
           </div>
         )}
 
-        <div className="flex items-center justify-end gap-3 pt-1">
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-1">
           {isDualTalkStart ? (
             <button
               type="button"
               disabled={aec3Downloading}
               onClick={() => void skipAec3ModalAndProceed()}
-              className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white text-[14px] font-medium text-[#1F2329] hover:bg-[#F2F3F5] disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg border border-[#DEE0E3] bg-white text-[14px] font-medium text-[#1F2329] hover:bg-[#F2F3F5] disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center whitespace-nowrap transition-colors cursor-pointer"
             >
               暂不下载，直接开启
             </button>
@@ -119,7 +123,7 @@ export const Aec3DownloadModal: React.FC = () => {
               type="button"
               disabled={aec3Downloading}
               onClick={closeAec3Modal}
-              className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white text-[14px] font-medium text-[#1F2329] hover:bg-[#F2F3F5] disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg border border-[#DEE0E3] bg-white text-[14px] font-medium text-[#1F2329] hover:bg-[#F2F3F5] disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center whitespace-nowrap transition-colors cursor-pointer"
             >
               取消
             </button>
@@ -129,16 +133,16 @@ export const Aec3DownloadModal: React.FC = () => {
             type="button"
             disabled={aec3Downloading}
             onClick={() => void confirmDownloadAec3Modal()}
-            className="h-10 px-4 rounded-lg bg-[#1456F0] text-white text-[14px] font-medium hover:bg-[#3370FF] disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2 transition-colors cursor-pointer"
+            className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg bg-[#1456F0] text-white text-[14px] font-medium hover:bg-[#3370FF] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors cursor-pointer"
           >
             {aec3Downloading ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
                 <span>正在下载...</span>
               </>
             ) : (
               <>
-                <Download className="w-4 h-4" />
+                <Download className="w-4 h-4 shrink-0" />
                 <span>{isDualTalkStart ? '下载并启用双讲' : '下载并启用'}</span>
               </>
             )}

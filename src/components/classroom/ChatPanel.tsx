@@ -123,9 +123,12 @@ ChatMessageRow.displayName = 'ChatMessageRow';
 interface ChatComposerProps {
   isSendingChat: boolean;
   onSend: (text: string, attachments?: SessionAttachmentItem[]) => Promise<void>;
+  mobileDockMode?: boolean;
+  mobileDockVisible?: boolean;
 }
 
-const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, onSend }) => {
+const ChatComposer: React.FC<ChatComposerProps> = React.memo(
+  ({ isSendingChat, onSend, mobileDockMode = false, mobileDockVisible = true }) => {
   const prefill = useAppStore((s) => s.chatDraftPrefill);
   const clearChatDraftPrefill = useAppStore((s) => s.clearChatDraftPrefill);
   const uploadSessionAttachment = useAppStore((s) => s.uploadSessionAttachment);
@@ -162,9 +165,14 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!input) {
+      el.style.height = '36px';
+      return;
+    }
+    const maxH = mobileDockMode ? 112 : 144;
     el.style.height = '36px';
-    el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
-  }, [input]);
+    el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
+  }, [input, mobileDockMode]);
 
   const handleFilesUpload = async (files: FileList | File[]) => {
     const list = Array.from(files).slice(0, 4);
@@ -213,7 +221,15 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
 
   return (
     <div
-      className="px-4 pt-2.5 pb-4 border-t border-[#ECEEF2] bg-white shrink-0 space-y-2.5"
+      className={
+        mobileDockMode
+          ? `@container px-3 pt-2 pb-[calc(12px+env(safe-area-inset-bottom,0px))] border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md shadow-[0_-6px_22px_rgba(31,35,41,0.05)] shrink-0 space-y-2 origin-bottom-right transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              mobileDockVisible
+                ? 'translate-y-0 opacity-100 scale-100'
+                : 'translate-y-[108%] opacity-0 scale-[0.94] pointer-events-none'
+            }`
+          : '@container px-4 pt-2.5 pb-4 border-t border-[#ECEEF2] bg-white shrink-0 space-y-2.5'
+      }
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -222,8 +238,8 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
         }
       }}
     >
-      {/* 防走神快捷指令胶囊栏 */}
-      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
+      {/* 防走神快捷指令胶囊栏：容器宽度 < 460px（手机/平板竖屏左栏/窄分栏）自动三等分无裁切，宽栏展示完整文案 */}
+      <div className="grid grid-cols-3 gap-1.5 @[460px]:flex @[460px]:items-center @[460px]:gap-2 @[460px]:overflow-x-auto no-scrollbar @[460px]:pb-0.5">
         <button
           type="button"
           disabled={isSendingChat || segments.length === 0}
@@ -232,10 +248,11 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
               '我刚才走神了几分钟，请结合最近几分钟的最新课堂转写，用精炼要点帮我快速补上刚才讲的核心逻辑与结论，并附带 `[MM:SS]` 时间戳。'
             )
           }
-          className="h-8 px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+          className="h-8 px-1.5 @[460px]:px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] active:border-[#BEDAFF] active:bg-[#EBF2FF] active:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center justify-center gap-1 @[460px]:gap-1.5 min-w-0 @[460px]:shrink-0 whitespace-nowrap transition-colors cursor-pointer"
         >
-          <Clock className="w-3.5 h-3.5 text-[#1456F0]" />
-          <span>速览最近 3 分钟</span>
+          <Clock className="w-3.5 h-3.5 text-[#1456F0] shrink-0" />
+          <span className="truncate @[460px]:hidden">速览3分钟</span>
+          <span className="hidden @[460px]:inline">速览最近 3 分钟</span>
         </button>
 
         <button
@@ -248,10 +265,13 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
                 : '请帮我排查本堂课目前已讲内容中最容易混淆或出错的难点，并结合 `[MM:SS]` 时间点做通俗拆解。'
             )
           }
-          className="h-8 px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+          className="h-8 px-1.5 @[460px]:px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] active:border-[#BEDAFF] active:bg-[#EBF2FF] active:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center justify-center gap-1 @[460px]:gap-1.5 min-w-0 @[460px]:shrink-0 whitespace-nowrap transition-colors cursor-pointer"
         >
-          <BookmarkCheck className="w-3.5 h-3.5 text-[#1456F0]" />
-          <span>
+          <BookmarkCheck className="w-3.5 h-3.5 text-[#1456F0] shrink-0" />
+          <span className="truncate @[460px]:hidden">
+            {confusedCount > 0 ? `不懂点(${confusedCount})` : '易错难点'}
+          </span>
+          <span className="hidden @[460px]:inline">
             {confusedCount > 0 ? `串讲我的不懂点 (${confusedCount})` : '拆解本课易错难点'}
           </span>
         </button>
@@ -264,10 +284,11 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
               '请完整提炼并规范排版最近讲解涉及的核心数学公式、状态转移方程或算法伪代码，说明每个符号的含义。'
             )
           }
-          className="h-8 px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+          className="h-8 px-1.5 @[460px]:px-3 rounded-lg border border-[#DEE0E3] bg-[#F8F9FA] hover:border-[#BEDAFF] hover:bg-[#EBF2FF] hover:text-[#1456F0] active:border-[#BEDAFF] active:bg-[#EBF2FF] active:text-[#1456F0] disabled:opacity-45 text-[14px] text-[#4E5969] inline-flex items-center justify-center gap-1 @[460px]:gap-1.5 min-w-0 @[460px]:shrink-0 whitespace-nowrap transition-colors cursor-pointer"
         >
-          <Code2 className="w-3.5 h-3.5 text-[#1456F0]" />
-          <span>提炼公式与代码</span>
+          <Code2 className="w-3.5 h-3.5 text-[#1456F0] shrink-0" />
+          <span className="truncate @[460px]:hidden">公式代码</span>
+          <span className="hidden @[460px]:inline">提炼公式与代码</span>
         </button>
       </div>
 
@@ -323,58 +344,88 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
         }}
       />
 
-      <div className="rounded-xl border border-[#DEE0E3] bg-white px-3 py-2 focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all flex items-end gap-2">
-        <IconButton
-          icon={Paperclip}
-          variant="ghost"
-          tooltip={`上传截图或参考讲义（支持直接 ${getPasteShortcutLabel()} 粘贴截图）`}
-          onClick={() => fileInputRef.current?.click()}
-        />
-
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={input}
-          onChange={(e) => {
-            setInput(e.target.value);
-            const el = e.currentTarget;
-            el.style.height = '36px';
-            el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
-          }}
-          onPaste={(e) => {
-            const files: File[] = [];
-            for (const item of Array.from(e.clipboardData.items)) {
-              if (item.kind === 'file') {
-                const f = item.getAsFile();
-                if (f) files.push(f);
-              }
-            }
-            if (files.length > 0) {
-              e.preventDefault();
-              void handleFilesUpload(files);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void handleSubmit();
-            }
-          }}
-          placeholder={
-            isAndroidPlatform()
-              ? '询问本堂课要点，或点顶栏相机拍板书提问...'
-              : `询问本堂课要点、直接 ${getPasteShortcutLabel()} 粘贴板书截图提问...`
+      <div className={mobileDockMode ? 'flex items-end gap-2' : ''}>
+        <div
+          className={
+            mobileDockMode
+              ? 'flex-1 min-w-0 min-h-[46px] rounded-2xl border border-[#DEE0E3] bg-[#F7F8FA] focus-within:bg-white px-1.5 py-1 focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all flex items-end gap-1'
+              : 'rounded-xl border border-[#DEE0E3] bg-white px-3 py-2 focus-within:border-[#1456F0] focus-within:ring-2 focus-within:ring-[#1456F0]/15 transition-all flex items-end gap-2'
           }
-          className="flex-1 min-h-[36px] max-h-36 py-[6px] resize-none bg-transparent text-[15px] leading-[24px] text-[#1F2329] placeholder-[#646A73] focus:outline-none"
-        />
+        >
+          <IconButton
+            icon={Paperclip}
+            size="md"
+            variant="ghost"
+            tooltip={
+              mobileDockMode
+                ? '添加图片或讲义'
+                : `上传截图或参考讲义（支持直接 ${getPasteShortcutLabel()} 粘贴截图）`
+            }
+            onClick={() => fileInputRef.current?.click()}
+          />
 
-        <IconButton
-          icon={ArrowUp}
-          variant="primary"
-          tooltip="发送提问"
-          disabled={!input.trim() || isSendingChat || uploadingCount > 0}
-          onClick={() => void handleSubmit()}
-        />
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={input}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              setInput(nextVal);
+              const el = e.currentTarget;
+              if (!nextVal) {
+                el.style.height = '36px';
+                return;
+              }
+              const maxH = mobileDockMode ? 112 : 144;
+              el.style.height = '36px';
+              el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
+            }}
+            onPaste={(e) => {
+              const files: File[] = [];
+              for (const item of Array.from(e.clipboardData.items)) {
+                if (item.kind === 'file') {
+                  const f = item.getAsFile();
+                  if (f) files.push(f);
+                }
+              }
+              if (files.length > 0) {
+                e.preventDefault();
+                void handleFilesUpload(files);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void handleSubmit();
+              }
+            }}
+            placeholder={
+              mobileDockMode || isAndroidPlatform()
+                ? '询问本堂课要点...'
+                : `询问本堂课要点、直接 ${getPasteShortcutLabel()} 粘贴板书截图提问...`
+            }
+            className={
+              mobileDockMode
+                ? 'flex-1 min-w-0 min-h-[36px] max-h-28 py-[6px] resize-none bg-transparent text-[15px] leading-[24px] text-[#1F2329] placeholder-[#646A73] focus:outline-none overflow-y-auto'
+                : 'flex-1 min-h-[36px] max-h-36 py-[6px] resize-none bg-transparent text-[15px] leading-[24px] text-[#1F2329] placeholder-[#646A73] focus:outline-none'
+            }
+          />
+
+          <IconButton
+            icon={ArrowUp}
+            size="md"
+            variant="primary"
+            className={mobileDockMode ? 'rounded-xl' : ''}
+            tooltip="发送提问"
+            disabled={!input.trim() || isSendingChat || uploadingCount > 0}
+            onClick={() => void handleSubmit()}
+          />
+        </div>
+
+        {/* 移动端底栏右下角预留与持久变形切换按钮像素对齐的槽位 */}
+        {mobileDockMode && (
+          <div className="w-[46px] h-[46px] shrink-0 pointer-events-none" aria-hidden="true" />
+        )}
       </div>
     </div>
   );
@@ -382,7 +433,13 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(({ isSendingChat, o
 
 ChatComposer.displayName = 'ChatComposer';
 
-export const ChatPanel: React.FC = React.memo(() => {
+export interface ChatPanelProps {
+  mobileDockMode?: boolean;
+  mobileDockVisible?: boolean;
+}
+
+export const ChatPanel: React.FC<ChatPanelProps> = React.memo(
+  ({ mobileDockMode = false, mobileDockVisible = true }) => {
   const sessionId = useAppStore((s) => s.activeSession?.id ?? null);
   const messages = useAppStore((s) => s.messages);
   const segmentCount = useAppStore((s) => s.segments.length);
@@ -727,18 +784,20 @@ export const ChatPanel: React.FC = React.memo(() => {
 
   return (
     <section className="h-full flex flex-col bg-white">
-      <div className="h-12 px-5 border-b border-[#ECEEF2] flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#1F2329]">
+      <div className="h-11 sm:h-12 px-3.5 sm:px-5 border-b border-[#ECEEF2] flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#1F2329] shrink-0">
           <MessageSquareText
-            className="w-[18px] h-[18px] text-[#1456F0]"
+            className="w-[18px] h-[18px] text-[#1456F0] shrink-0"
             strokeWidth={1.85}
           />
           <span>课堂实时问答</span>
         </div>
 
-        <div className="flex items-center gap-1.5 text-[14px] text-[#4E5969]">
-          <Radio className="w-4 h-4 text-[#1456F0]" strokeWidth={1.9} />
-          <span>已注入 {segmentCount} 段实时转写上下文</span>
+        <div className="flex items-center gap-1.5 text-[14px] text-[#4E5969] min-w-0">
+          <Radio className="w-4 h-4 text-[#1456F0] shrink-0" strokeWidth={1.9} />
+          <span className="truncate">
+            已注入 {segmentCount} 段上下文
+          </span>
         </div>
       </div>
 
@@ -749,7 +808,7 @@ export const ChatPanel: React.FC = React.memo(() => {
         onPointerDown={cancelPendingRestore}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
-        className="flex-1 overflow-y-auto px-6 py-5"
+        className={`flex-1 overflow-y-auto ${mobileDockMode ? 'px-4 py-4' : 'px-6 py-5'}`}
       >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
@@ -760,7 +819,9 @@ export const ChatPanel: React.FC = React.memo(() => {
               基于本堂课实时内容的多模态 AI 助教
             </div>
             <p className="max-w-sm text-[14px] leading-relaxed text-[#4E5969]">
-              右侧课堂转写与讲义会自动作为上下文。您可随时粘贴板书截图、点击下方快捷胶囊追回走神内容，或点击回答中的时间戳直达原话。
+              {mobileDockMode
+                ? '课堂转写与讲义会自动作为上下文。您可随时发送文字或图片提问、点击下方快捷胶囊追回走神内容，或点右下角按钮切回转写记录。'
+                : '右侧课堂转写与讲义会自动作为上下文。您可随时粘贴板书截图、点击下方快捷胶囊追回走神内容，或点击回答中的时间戳直达原话。'}
             </p>
           </div>
         ) : (
@@ -790,7 +851,12 @@ export const ChatPanel: React.FC = React.memo(() => {
         )}
       </div>
 
-      <ChatComposer isSendingChat={isSendingChat} onSend={handleSend} />
+      <ChatComposer
+        isSendingChat={isSendingChat}
+        onSend={handleSend}
+        mobileDockMode={mobileDockMode}
+        mobileDockVisible={mobileDockVisible}
+      />
 
       <Modal
         open={Boolean(previewAttachment)}

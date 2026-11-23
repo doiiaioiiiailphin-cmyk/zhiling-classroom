@@ -1,5 +1,7 @@
+import java.io.File
 import java.net.URI
 import java.security.MessageDigest
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -61,9 +63,54 @@ val abiMode = (project.findProperty("zhilingAbis") as String?)
     ?.filter { it.isNotEmpty() }
     ?: listOf("arm64-v8a", "x86_64")
 
+val releaseSigningProps: Properties? = run {
+    val envPath = System.getenv("ZHILING_KEYSTORE_PATH")?.trim().orEmpty()
+    val envStorePass = System.getenv("ZHILING_KEYSTORE_PASSWORD")?.trim().orEmpty()
+    val envAlias = System.getenv("ZHILING_KEY_ALIAS")?.trim().orEmpty()
+    val envKeyPass = System.getenv("ZHILING_KEY_PASSWORD")?.trim().orEmpty()
+    if (envPath.isNotEmpty() && envStorePass.isNotEmpty() && envAlias.isNotEmpty() && File(envPath).isFile) {
+        Properties().apply {
+            setProperty("storeFile", envPath)
+            setProperty("storePassword", envStorePass)
+            setProperty("keyAlias", envAlias)
+            setProperty("keyPassword", envKeyPass.ifEmpty { envStorePass })
+        }
+    } else {
+        val localPropFile = File(System.getProperty("user.home"), ".config/zhiling-classroom/android-signing.properties")
+        if (localPropFile.isFile) {
+            Properties().apply {
+                val cleaned = localPropFile.readText(Charsets.UTF_8).removePrefix("\uFEFF")
+                cleaned.reader().use { load(it) }
+            }.takeIf { props ->
+                val sf = props.getProperty("storeFile")?.trim().orEmpty()
+                sf.isNotEmpty() && File(sf).isFile &&
+                    !props.getProperty("storePassword").isNullOrBlank() &&
+                    !props.getProperty("keyAlias").isNullOrBlank()
+            }
+        } else {
+            null
+        }
+    }
+}
+
 android {
     namespace = "com.zhiling.classroom"
     compileSdk = 36
+
+    signingConfigs {
+        if (releaseSigningProps != null) {
+            create("release") {
+                storeFile = File(releaseSigningProps.getProperty("storeFile").trim())
+                storePassword = releaseSigningProps.getProperty("storePassword").trim()
+                keyAlias = releaseSigningProps.getProperty("keyAlias").trim()
+                keyPassword = releaseSigningProps.getProperty("keyPassword")?.trim()
+                    ?.ifEmpty { storePassword } ?: storePassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.zhiling.classroom"
@@ -86,7 +133,13 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseSigningProps != null) {
+                logger.lifecycle("Using release signing keystore: ${releaseSigningProps.getProperty("storeFile")}")
+                signingConfigs.getByName("release")
+            } else {
+                logger.lifecycle("No release keystore found; falling back to debug signing config.")
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false

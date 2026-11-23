@@ -56,9 +56,11 @@ export const Select: React.FC<SelectProps> = ({
       offset(6),
       flip({ padding: 12 }),
       size({
-        apply({ rects, elements }) {
+        apply({ rects, availableWidth, elements }) {
+          const maxAllowed = Math.max(200, Math.floor(availableWidth));
           Object.assign(elements.floating.style, {
-            minWidth: `${Math.max(rects.reference.width, 220)}px`,
+            minWidth: `${Math.min(Math.max(rects.reference.width, 220), maxAllowed)}px`,
+            maxWidth: `${maxAllowed}px`,
           });
         },
         padding: 12,

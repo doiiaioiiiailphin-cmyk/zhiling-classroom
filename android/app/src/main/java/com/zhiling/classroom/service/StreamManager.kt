@@ -1,7 +1,11 @@
 package com.zhiling.classroom.service
 
+import android.media.AudioDeviceInfo
+import android.media.projection.MediaProjection
 import com.zhiling.classroom.ai.ClassroomAiService
 import com.zhiling.classroom.audio.AndroidAudioRecorder
+import com.zhiling.classroom.audio.AndroidSystemAudioRecorder
+import com.zhiling.classroom.audio.AudioChannelMixer
 import com.zhiling.classroom.audio.CloudAsrClient
 import com.zhiling.classroom.audio.SenseVoiceEngine
 import com.zhiling.classroom.audio.WavAppendWriter
@@ -27,11 +31,13 @@ data class ActiveRecordingSnapshot(
     val sessionTitle: String,
     val isRecording: Boolean,
     val durationSeconds: Int,
+    val micActive: Boolean = true,
+    val systemAudioActive: Boolean = false,
 )
 
 /**
  * 课堂实时流调度中心：
- * - 录音采集、WAV 持久化、能量切句与 SenseVoice/云端 ASR 全部驻留于 ForegroundService 作用域内；
+ * - 录音采集（麦克风 + Android 10+ 系统媒体内录双轨混音）、WAV 持久化、能量切句与 SenseVoice/云端 ASR 全部驻留于 ForegroundService 作用域内；
  * - 即使手机锁屏导致 WebView WebSocket 休眠断开，录音与转写依然 100% 持续运行；
  * - 亮屏后 WebView 重新连接 WebSocket，立即收到最新分段与实时录制状态。
  */
@@ -44,6 +50,8 @@ class StreamManager(
     private val cloudAsr: CloudAsrClient,
     private val aiService: ClassroomAiService,
     private val onRecordingStateChanged: (ActiveRecordingSnapshot?) -> Unit,
+    private val mediaProjectionProvider: () -> MediaProjection? = { null },
+    private val preferredMicDeviceResolver: (String) -> AudioDeviceInfo? = { null },
 ) {
     private val sockets = ConcurrentHashMap<String, MutableSet<DefaultWebSocketSession>>()
     private val desktopSockets = ConcurrentHashMap.newKeySet<DefaultWebSocketSession>()
@@ -51,8 +59,22 @@ class StreamManager(
     private val recordingLock = Any()
     @Volatile
     private var activeRun: ActiveRecordingRun? = null
+    @Volatile
+    private var pendingMicOverride: Boolean? = null
+    @Volatile
+    private var pendingSysOverride: Boolean? = null
+    @Volatile
+    private var pendingMicDeviceOverride: String? = null
+    @Volatile
+    private var pendingDualSplitOverride: Boolean? = null
 
     fun activeSnapshot(): ActiveRecordingSnapshot? = activeRun?.snapshot()
+
+    fun onMediaProjectionRevoked() {
+        val cur = activeRun ?: return
+        cur.onSystemAudioRevoked()
+        onRecordingStateChanged(cur.snapshot())
+    }
 
     suspend fun publish(sessionId: String, type: String, payload: JsonObject) {
         val frameText = buildJsonObject {
@@ -87,13 +109,100 @@ class StreamManager(
         dead.forEach { desktopSockets.remove(it) }
     }
 
+    private fun buildNativeOverlaySnapshotJson(): JsonObject? {
+        val run = activeRun
+        val targetSessionId = run?.sessionId ?: return null
+        val snap = run.snapshot()
+        val segs = runCatching { repo.listSegments(targetSessionId) }.getOrDefault(emptyList())
+        val lines = mutableListOf<JsonObject>()
+        for (seg in segs) {
+            for (u in seg.utterances) {
+                val txt = (u.refinedText ?: u.rawText).trim()
+                if (txt.isNotEmpty()) {
+                    lines.add(
+                        buildJsonObject {
+                            put("id", u.id)
+                            put("speaker", u.speakerLabel)
+                            put("text", txt)
+                            put("time", u.timestampText)
+                        }
+                    )
+                }
+            }
+        }
+        val msgs = runCatching { repo.listMessages(targetSessionId, emptyMap()) }
+            .getOrDefault(emptyList())
+            .takeLast(24)
+            .map { m ->
+                buildJsonObject {
+                    put("id", m.id)
+                    put("role", m.role)
+                    put("content", m.content)
+                    if (!m.thinking.isNullOrBlank()) put("thinking", m.thinking)
+                }
+            }
+        return buildJsonObject {
+            put("sessionId", targetSessionId)
+            put("sessionTitle", snap.sessionTitle)
+            put("isRecording", snap.isRecording)
+            put("durationSeconds", snap.durationSeconds)
+            put("micEnabled", settingsManager.get().micEnabled)
+            put("recentLines", JsonArray(lines.takeLast(80)))
+            put("partialLine", JsonNull)
+            put("recentMessages", JsonArray(msgs))
+        }
+    }
+
+    private fun scheduleNativeOverlaySnapshotBroadcast() {
+        if (desktopSockets.isEmpty()) return
+        scope.launch(Dispatchers.IO) {
+            val snap = buildNativeOverlaySnapshotJson() ?: return@launch
+            publishDesktopEvent("overlay.snapshot", snap)
+        }
+    }
+
     suspend fun handleDesktopSocket(ws: DefaultWebSocketSession) {
         desktopSockets.add(ws)
         try {
+            // 新连入的 Android 悬浮窗立即收到当前后台录音快照（即使主界面在后台挂起也能实时显示字幕）
+            buildNativeOverlaySnapshotJson()?.let { snap ->
+                val frameText = buildJsonObject {
+                    put("type", "overlay.snapshot")
+                    put("payload", snap)
+                }.toString()
+                runCatching { ws.send(Frame.Text(frameText)) }
+            }
             for (frame in ws.incoming) {
                 if (frame is Frame.Text) {
                     val txt = frame.readText()
-                    // Relay overlay snapshots/commands if needed
+                    val parsed = runCatching { WireJson.parseToJsonElement(txt).jsonObject }.getOrNull()
+                    val evType = parsed?.get("type")?.jsonPrimitive?.contentOrNull
+                    val cmdType = parsed?.get("payload")?.jsonObject?.get("type")?.jsonPrimitive?.contentOrNull
+                    if (evType == "overlay.command" && cmdType != null) {
+                        if (cmdType == "request-snapshot") {
+                            buildNativeOverlaySnapshotJson()?.let { snap ->
+                                val frameText = buildJsonObject {
+                                    put("type", "overlay.snapshot")
+                                    put("payload", snap)
+                                }.toString()
+                                runCatching { ws.send(Frame.Text(frameText)) }
+                            }
+                        } else if (desktopSockets.size <= 1) {
+                            // 若主界面 WebView 已在后台断开，由 ForegroundService 原生直接响应悬浮窗快捷控制
+                            when (cmdType) {
+                                "toggle-recording" -> toggleRecordingFromNotification()
+                                "bookmark-confused" -> bookmarkConfusedFromNotification()
+                                "toggle-mic" -> {
+                                    val curCfg = settingsManager.get()
+                                    val nextMic = !curCfg.micEnabled
+                                    settingsManager.put(curCfg.copy(micEnabled = nextMic))
+                                    activeRun?.setMicMuted(!nextMic)
+                                    scheduleNativeOverlaySnapshotBroadcast()
+                                }
+                            }
+                        }
+                    }
+                    // Relay overlay snapshots/commands between peers
                     for (peer in desktopSockets) {
                         if (peer !== ws) runCatching { peer.send(Frame.Text(txt)) }
                     }
@@ -156,7 +265,27 @@ class StreamManager(
             "recording.stop" -> stopRecording(sessionId)
             "mic.mute" -> {
                 val muted = obj["payload"]?.jsonObject?.get("muted")?.jsonPrimitive?.booleanOrNull ?: false
-                activeRun?.setMuted(muted)
+                activeRun?.setMicMuted(muted)
+            }
+            "audio.channels" -> {
+                val payload = obj["payload"]?.jsonObject ?: return
+                val micEnabled = payload["micEnabled"]?.jsonPrimitive?.booleanOrNull
+                val sysEnabled = payload["systemAudioEnabled"]?.jsonPrimitive?.booleanOrNull
+                val micDeviceId = payload["micDeviceId"]?.jsonPrimitive?.contentOrNull
+                val dualSplit = payload["enableDualChannelSpeakerSplit"]?.jsonPrimitive?.booleanOrNull
+                pendingMicOverride = micEnabled
+                pendingSysOverride = sysEnabled
+                pendingMicDeviceOverride = micDeviceId
+                pendingDualSplitOverride = dualSplit
+                val cur = activeRun
+                if (cur != null && cur.sessionId == sessionId && cur.isRunning()) {
+                    cur.updateChannels(
+                        micEnabled = micEnabled,
+                        systemAudioEnabled = sysEnabled,
+                        dualSplitEnabled = dualSplit,
+                    )
+                    onRecordingStateChanged(cur.snapshot())
+                }
             }
         }
     }
@@ -175,6 +304,15 @@ class StreamManager(
         if (provider.protocol == "builtin-free-asr") {
             senseVoice.requireReady()
         }
+        val effectiveMicEnabled = pendingMicOverride ?: settings.micEnabled
+        val effectiveSysEnabled = pendingSysOverride ?: settings.systemAudioEnabled
+        val effectiveMicDeviceId = pendingMicDeviceOverride ?: settings.audioDeviceId
+        val effectiveDualSplit = pendingDualSplitOverride ?: settings.enableDualChannelSpeakerSplit
+        pendingMicOverride = null
+        pendingSysOverride = null
+        pendingMicDeviceOverride = null
+        pendingDualSplitOverride = null
+
         val card = repo.getSessionCard(sessionId)
         val run = ActiveRecordingRun(
             sessionId = sessionId,
@@ -182,7 +320,10 @@ class StreamManager(
             asrProvider = provider,
             language = settings.recognitionLanguage,
             hotwords = (repo.folderHotwordsForSession(sessionId) + settings.globalHotwords).distinct(),
-            mutedInitially = !settings.micEnabled,
+            initialMicEnabled = effectiveMicEnabled,
+            initialSysEnabled = effectiveSysEnabled,
+            micDeviceId = effectiveMicDeviceId,
+            initialDualSplit = effectiveDualSplit,
         )
         activeRun = run
         run.start()
@@ -385,7 +526,12 @@ class StreamManager(
         }
     }
 
-    private data class UtteranceChunk(val pcm: ByteArray, val startMs: Long, val endMs: Long)
+    private data class UtteranceChunk(
+        val pcm: ByteArray,
+        val startMs: Long,
+        val endMs: Long,
+        val speakerChannel: String = "default",
+    )
 
     private inner class ActiveRecordingRun(
         val sessionId: String,
@@ -393,13 +539,23 @@ class StreamManager(
         val asrProvider: AsrProviderConfig,
         val language: String,
         val hotwords: List<String>,
-        mutedInitially: Boolean,
+        initialMicEnabled: Boolean,
+        initialSysEnabled: Boolean,
+        private val micDeviceId: String,
+        initialDualSplit: Boolean,
     ) {
         private val running = AtomicBoolean(false)
         private val wavWriter: WavAppendWriter = wavStorage.openWriter(sessionId)
         private val baseOffsetMs: Long = maxOf(repo.sessionDurationMs(sessionId), wavWriter.durationMs())
         @Volatile
         private var recordedPcmBytes: Long = 0L
+
+        @Volatile
+        private var micEnabled = initialMicEnabled
+        @Volatile
+        private var sysEnabled = initialSysEnabled
+        @Volatile
+        private var dualSplitEnabled = initialDualSplit
 
         private val asrQueue = Channel<UtteranceChunk>(capacity = 64)
         private var asrWorkerJob: Job? = null
@@ -409,27 +565,60 @@ class StreamManager(
         private var segStartMs: Long = baseOffsetMs
         private var speechDetectedInSeg = false
         private var consecutiveSilenceMs = 0
+        private var segMicEnergy = 0.0
+        private var segSysEnergy = 0.0
         private var lastTelemetryAtMs = 0L
 
-        private val recorder = AndroidAudioRecorder(
-            onPcmFrame = { pcm, len, rms -> onAudioFrame(pcm, len, rms) },
-            onError = { msg ->
-                scope.launch {
-                    publish(
-                        sessionId,
-                        "error",
-                        buildJsonObject {
-                            put("code", "ANDROID_AUDIO_ERROR")
-                            put("message", msg)
-                        },
-                    )
-                }
-            },
-        ).apply { setMuted(mutedInitially) }
+        private val sysQueueLock = Any()
+        private val sysQueue = ArrayDeque<Pair<ByteArray, Double>>(8)
+
+        private var micRecorder: AndroidAudioRecorder? = null
+        private var sysRecorder: AndroidSystemAudioRecorder? = null
 
         fun isRunning(): Boolean = running.get()
 
-        fun setMuted(muted: Boolean) = recorder.setMuted(muted)
+        fun setMicMuted(muted: Boolean) {
+            micEnabled = !muted
+            micRecorder?.setMuted(muted)
+        }
+
+        @Synchronized
+        fun updateChannels(
+            micEnabled: Boolean? = null,
+            systemAudioEnabled: Boolean? = null,
+            dualSplitEnabled: Boolean? = null,
+        ) {
+            if (dualSplitEnabled != null) {
+                this.dualSplitEnabled = dualSplitEnabled
+            }
+            if (micEnabled != null) {
+                this.micEnabled = micEnabled
+                val currentMic = micRecorder
+                if (micEnabled && running.get() && (currentMic == null || !currentMic.isRunning())) {
+                    startMicTrack()
+                } else {
+                    currentMic?.setMuted(!micEnabled)
+                }
+            }
+            if (systemAudioEnabled != null) {
+                this.sysEnabled = systemAudioEnabled
+                if (systemAudioEnabled) {
+                    if (running.get() && sysRecorder?.isRunning() != true) {
+                        startSystemTrack()
+                    } else {
+                        sysRecorder?.setMuted(false)
+                    }
+                } else {
+                    stopSystemTrack()
+                }
+            }
+        }
+
+        @Synchronized
+        fun onSystemAudioRevoked() {
+            sysEnabled = false
+            stopSystemTrack()
+        }
 
         fun currentOffsetMs(): Long = baseOffsetMs + (recordedPcmBytes / WavStorage.BYTES_PER_MS)
 
@@ -438,7 +627,78 @@ class StreamManager(
             sessionTitle = sessionTitle,
             isRecording = running.get(),
             durationSeconds = (currentOffsetMs() / 1000L).toInt(),
+            micActive = micRecorder?.isRunning() == true && micEnabled,
+            systemAudioActive = sysRecorder?.isRunning() == true && sysEnabled,
         )
+
+        private fun startMicTrack() {
+            val preferred = preferredMicDeviceResolver(micDeviceId)
+            val rec = AndroidAudioRecorder(
+                onPcmFrame = { pcm, len, rms -> onMicFrame(pcm, len, rms) },
+                onError = { msg ->
+                    scope.launch {
+                        publish(
+                            sessionId,
+                            "error",
+                            buildJsonObject {
+                                put("code", "ANDROID_AUDIO_ERROR")
+                                put("message", msg)
+                            },
+                        )
+                    }
+                },
+                preferredDevice = preferred,
+            ).apply { setMuted(!micEnabled) }
+            micRecorder = rec
+            rec.start()
+        }
+
+        private fun startSystemTrack() {
+            val projection = mediaProjectionProvider()
+            if (projection == null) {
+                sysEnabled = false
+                if (!micEnabled) {
+                    scope.launch {
+                        publish(
+                            sessionId,
+                            "error",
+                            buildJsonObject {
+                                put("code", "SYS_AUDIO_NOT_AUTHORIZED")
+                                put("message", "尚未获取系统声音内录权限，请重新点击开始录音并在弹窗中授权")
+                            },
+                        )
+                    }
+                }
+                return
+            }
+            val rec = AndroidSystemAudioRecorder(
+                mediaProjection = projection,
+                onPcmFrame = { pcm, len, rms -> onSysFrame(pcm, len, rms) },
+                onError = { msg ->
+                    scope.launch {
+                        publish(
+                            sessionId,
+                            "error",
+                            buildJsonObject {
+                                put("code", "ANDROID_SYS_AUDIO_ERROR")
+                                put("message", msg)
+                            },
+                        )
+                    }
+                },
+            )
+            if (rec.start()) {
+                sysRecorder = rec
+            } else {
+                sysEnabled = false
+            }
+        }
+
+        private fun stopSystemTrack() {
+            sysRecorder?.stop()
+            sysRecorder = null
+            synchronized(sysQueueLock) { sysQueue.clear() }
+        }
 
         fun start() {
             if (!running.compareAndSet(false, true)) return
@@ -453,7 +713,13 @@ class StreamManager(
                     runCatching {
                         val text = runAsrOnChunk(asrProvider, chunk.pcm, language, hotwords).trim()
                         if (text.isNotEmpty() && !ClassroomAiService.isTrivialFiller(text)) {
-                            val saved = repo.saveFinalUtterance(sessionId, "default", text, chunk.startMs, chunk.endMs)
+                            val saved = repo.saveFinalUtterance(
+                                sessionId,
+                                chunk.speakerChannel,
+                                text,
+                                chunk.startMs,
+                                chunk.endMs,
+                            )
                             if (saved.createdInitialSegment != null) {
                                 publish(
                                     sessionId,
@@ -471,6 +737,7 @@ class StreamManager(
                                     put("utterance", WireJson.encodeToJsonElement(saved.utterance))
                                 },
                             )
+                            scheduleNativeOverlaySnapshotBroadcast()
                             // Fire-and-forget AI refinement / resegmentation / highlight
                             scope.launch(Dispatchers.IO) {
                                 aiService.runBackgroundPostProcess(sessionId, saved.segmentId, saved.utterance, ::publish)
@@ -495,18 +762,59 @@ class StreamManager(
                     val nowMs = currentOffsetMs()
                     repo.checkpointSession(sessionId, nowMs, status = "recording")
                     onRecordingStateChanged(snapshot())
+                    scheduleNativeOverlaySnapshotBroadcast()
                 }
             }
-            recorder.start()
+            if (sysEnabled) {
+                startSystemTrack()
+            }
+            // 若开启麦克风，或系统内录未能启动则回退麦克风，保证始终有有效时钟源
+            if (micEnabled || sysRecorder?.isRunning() != true) {
+                startMicTrack()
+            }
         }
 
         fun feedExternalPcm(pcm: ByteArray) {
             if (!running.get() || pcm.isEmpty()) return
-            onAudioFrame(pcm, pcm.size, SenseVoiceEngine.computeRms(pcm, pcm.size))
+            onAudioFrame(pcm, pcm.size, SenseVoiceEngine.computeRms(pcm, pcm.size), 0.0)
+        }
+
+        private fun onMicFrame(pcm: ByteArray, length: Int, micRms: Double) {
+            if (!running.get() || length <= 0) return
+            val sysPair = synchronized(sysQueueLock) {
+                if (sysQueue.isNotEmpty()) sysQueue.removeFirst() else null
+            }
+            val effectiveMicPcm = if (micEnabled) pcm else null
+            val effectiveMicRms = if (micEnabled) micRms else 0.0
+            val effectiveSysPcm = if (sysEnabled) sysPair?.first else null
+            val effectiveSysRms = if (sysEnabled) (sysPair?.second ?: 0.0) else 0.0
+            val mixed = if (effectiveSysPcm != null) {
+                AudioChannelMixer.mixPcm16Mono(effectiveMicPcm, effectiveSysPcm, length)
+            } else if (effectiveMicPcm != null) {
+                effectiveMicPcm
+            } else {
+                ByteArray(length)
+            }
+            onAudioFrame(mixed, mixed.size, effectiveMicRms, effectiveSysRms)
+        }
+
+        private fun onSysFrame(pcm: ByteArray, length: Int, sysRms: Double) {
+            if (!running.get() || length <= 0 || !sysEnabled) return
+            // 纯系统内录模式（麦克风轨未运行）：由系统内录线程直接驱动混音与转写时钟
+            if (micRecorder?.isRunning() != true) {
+                onAudioFrame(pcm, length, 0.0, sysRms)
+                return
+            }
+            synchronized(sysQueueLock) {
+                while (sysQueue.size >= 8) {
+                    sysQueue.removeFirst()
+                }
+                sysQueue.addLast(pcm.copyOf(length) to sysRms)
+            }
         }
 
         @Synchronized
-        private fun onAudioFrame(pcm: ByteArray, length: Int, rms: Double) {
+        private fun onAudioFrame(pcm: ByteArray, length: Int, micRms: Double, sysRms: Double) {
             if (!running.get() || length <= 0) return
             val frameStartMs = currentOffsetMs()
             wavWriter.append(pcm, 0, length)
@@ -517,24 +825,30 @@ class StreamManager(
             val now = System.currentTimeMillis()
             if (now - lastTelemetryAtMs >= 120L) {
                 lastTelemetryAtMs = now
-                val level = (rms * 4.2).coerceIn(0.0, 1.0)
+                val micLevel = (micRms * 4.2).coerceIn(0.0, 1.0)
+                val sysLevel = (sysRms * 4.2).coerceIn(0.0, 1.0)
                 scope.launch {
                     publish(
                         sessionId,
                         "audio.telemetry",
                         buildJsonObject {
-                            put("micLevel", level)
-                            put("sysLevel", 0.0)
+                            put("micLevel", micLevel)
+                            put("sysLevel", sysLevel)
                         },
                     )
                 }
             }
 
-            val isSpeech = rms >= SPEECH_RMS_THRESHOLD
+            val combinedRms = maxOf(micRms, sysRms)
+            val isSpeech = combinedRms >= SPEECH_RMS_THRESHOLD
             if (segBuffer.size() == 0) {
                 segStartMs = frameStartMs
+                segMicEnergy = 0.0
+                segSysEnergy = 0.0
             }
             segBuffer.write(pcm, 0, length)
+            segMicEnergy += micRms * micRms
+            segSysEnergy += sysRms * sysRms
             if (isSpeech) {
                 speechDetectedInSeg = true
                 consecutiveSilenceMs = 0
@@ -551,6 +865,8 @@ class StreamManager(
             } else if (!speechDetectedInSeg && segDurationMs >= 3000) {
                 // Drop pure long silence from RAM buffer (still archived in WAV!)
                 segBuffer.reset()
+                segMicEnergy = 0.0
+                segSysEnergy = 0.0
                 consecutiveSilenceMs = 0
             }
         }
@@ -558,21 +874,34 @@ class StreamManager(
         private fun flushSegmentLocked(endMs: Long) {
             if (segBuffer.size() <= 0 || !speechDetectedInSeg) {
                 segBuffer.reset()
+                segMicEnergy = 0.0
+                segSysEnergy = 0.0
                 speechDetectedInSeg = false
                 consecutiveSilenceMs = 0
                 return
             }
             val bytes = segBuffer.toByteArray()
             val start = segStartMs
+            val speakerChannel = AudioChannelMixer.resolveSpeakerChannel(
+                micEnergy = segMicEnergy,
+                sysEnergy = segSysEnergy,
+                splitEnabled = dualSplitEnabled,
+                micActive = micEnabled && micRecorder?.isRunning() == true,
+                sysActive = sysEnabled && sysRecorder?.isRunning() == true,
+            )
             segBuffer.reset()
+            segMicEnergy = 0.0
+            segSysEnergy = 0.0
             speechDetectedInSeg = false
             consecutiveSilenceMs = 0
-            asrQueue.trySend(UtteranceChunk(bytes, start, endMs))
+            asrQueue.trySend(UtteranceChunk(bytes, start, endMs, speakerChannel))
         }
 
         fun stop(finalStatus: String) {
             if (!running.compareAndSet(true, false)) return
-            recorder.stop()
+            micRecorder?.stop()
+            micRecorder = null
+            stopSystemTrack()
             synchronized(this) {
                 flushSegmentLocked(currentOffsetMs())
             }

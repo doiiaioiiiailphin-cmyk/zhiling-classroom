@@ -8,8 +8,24 @@ export interface AndroidBridgeRaw {
   getAppVersion?: () => string;
   hasRecordPermission?: () => boolean;
   requestRecordPermission?: (callbackId: string) => void;
+  hasSystemAudioPermission?: () => boolean;
+  requestSystemAudioPermission?: (callbackId: string) => void;
+  hasOverlayPermission?: () => boolean;
+  requestOverlayPermission?: (callbackId: string) => void;
+  toggleFloatingOverlay?: () => boolean;
+  isFloatingOverlayShowing?: () => boolean;
   captureBlackboardPhoto?: (callbackId: string) => void;
   shareExportedFile?: (fileName: string, mimeType: string, contentBase64: string) => boolean;
+}
+
+export interface AndroidOverlayBridgeRaw {
+  moveBy?: (dxCssPx: number, dyCssPx: number) => void;
+  resizeBy?: (dwCssPx: number, dhCssPx: number) => void;
+  setCollapsed?: (collapsed: boolean) => void;
+  setFocusable?: (focusable: boolean) => void;
+  setAiExpanded?: (expanded: boolean) => void;
+  closeOverlay?: () => void;
+  openMainApp?: () => void;
 }
 
 export interface AndroidCameraResult {
@@ -94,6 +110,7 @@ export interface DesktopBridgeApi {
   toggle_mini_overlay?: () => Promise<boolean>;
   minimize_mini_overlay?: () => Promise<void>;
   close_mini_overlay?: () => Promise<void>;
+  resize_mini_overlay?: (width: number, height: number) => Promise<boolean>;
   start_native_drag?: (target: DesktopWindowTarget) => Promise<boolean>;
   start_native_resize?: (
     target: DesktopWindowTarget,
@@ -149,6 +166,12 @@ export function getAndroidBridge(): AndroidBridgeRaw | null {
   return win.ZhilingAndroid ?? null;
 }
 
+export function getAndroidOverlayBridge(): AndroidOverlayBridgeRaw | null {
+  if (typeof window === 'undefined') return null;
+  const win = window as unknown as { ZhilingOverlay?: AndroidOverlayBridgeRaw };
+  return win.ZhilingOverlay ?? null;
+}
+
 export async function requestAndroidRecordPermission(): Promise<boolean> {
   const bridge = getAndroidBridge();
   if (!bridge) return true;
@@ -156,6 +179,29 @@ export async function requestAndroidRecordPermission(): Promise<boolean> {
   if (!bridge.requestRecordPermission) return true;
   const res = await invokeAndroidCallback<{ granted?: boolean }>((cbId) =>
     bridge.requestRecordPermission?.(cbId)
+  );
+  return Boolean(res?.granted);
+}
+
+export async function requestAndroidSystemAudioPermission(): Promise<boolean> {
+  const bridge = getAndroidBridge();
+  if (!bridge) return true;
+  if (bridge.hasSystemAudioPermission?.()) return true;
+  if (!bridge.requestSystemAudioPermission) return false;
+  const res = await invokeAndroidCallback<{ granted?: boolean }>((cbId) =>
+    bridge.requestSystemAudioPermission?.(cbId)
+  );
+  return Boolean(res?.granted);
+}
+
+export async function requestAndroidOverlayPermission(): Promise<boolean> {
+  const bridge = getAndroidBridge();
+  if (!bridge) return true;
+  if (bridge.hasOverlayPermission?.()) return true;
+  if (!bridge.requestOverlayPermission) return false;
+  const res = await invokeAndroidCallback<{ granted?: boolean }>(
+    (cbId) => bridge.requestOverlayPermission?.(cbId),
+    120_000
   );
   return Boolean(res?.granted);
 }
@@ -169,22 +215,93 @@ export async function captureAndroidBlackboardPhoto(): Promise<AndroidCameraResu
   );
 }
 
-export function useIsMobileViewport(): boolean {
-  const [isMobile, setIsMobile] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return window.innerWidth < 768;
-  });
+export interface ViewportLayoutState {
+  width: number;
+  height: number;
+  isCompactWidth: boolean;
+  isLandscape: boolean;
+  isShortLandscape: boolean;
+  /** 仅针对手机/窄屏/矮横屏的紧凑布局（平板 >=768px 且高度 >520px 按类桌面端体验处理） */
+  isCompactPhoneLayout: boolean;
+  /** Android 平板大屏（>=768px 且非矮横屏） */
+  isTabletLayout: boolean;
+  isMobileTouchLayout: boolean;
+}
+
+function readViewportLayout(): ViewportLayoutState {
+  if (typeof window === 'undefined') {
+    return {
+      width: 1280,
+      height: 800,
+      isCompactWidth: false,
+      isLandscape: true,
+      isShortLandscape: false,
+      isCompactPhoneLayout: false,
+      isTabletLayout: false,
+      isMobileTouchLayout: false,
+    };
+  }
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const isCompactWidth = width < 768;
+  const isLandscape = width > height;
+  const isShortLandscape = isLandscape && height <= 520;
+  const isCompactPhoneLayout = isCompactWidth || isShortLandscape;
+  const isTabletLayout = !isCompactPhoneLayout && isAndroidPlatform();
+  const isMobileTouchLayout = isCompactPhoneLayout || isAndroidPlatform();
+  return {
+    width,
+    height,
+    isCompactWidth,
+    isLandscape,
+    isShortLandscape,
+    isCompactPhoneLayout,
+    isTabletLayout,
+    isMobileTouchLayout,
+  };
+}
+
+export function useViewportLayout(): ViewportLayoutState {
+  const [layout, setLayout] = useState<ViewportLayoutState>(readViewportLayout);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(max-width: 767px)');
-    const sync = () => setIsMobile(mq.matches);
+    if (typeof window === 'undefined') return;
+    let rafId: number | null = null;
+    const sync = () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        const next = readViewportLayout();
+        setLayout((prev) =>
+          prev.width === next.width &&
+          prev.height === next.height &&
+          prev.isCompactWidth === next.isCompactWidth &&
+          prev.isLandscape === next.isLandscape &&
+          prev.isShortLandscape === next.isShortLandscape &&
+          prev.isMobileTouchLayout === next.isMobileTouchLayout
+            ? prev
+            : next
+        );
+      });
+    };
     sync();
-    mq.addEventListener('change', sync);
-    return () => mq.removeEventListener('change', sync);
+    window.addEventListener('resize', sync);
+    window.addEventListener('orientationchange', sync);
+    window.addEventListener('zhiling:orientation-change', sync);
+    return () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('orientationchange', sync);
+      window.removeEventListener('zhiling:orientation-change', sync);
+    };
   }, []);
 
-  return isMobile;
+  return layout;
+}
+
+export function useIsMobileViewport(): boolean {
+  const { isCompactWidth } = useViewportLayout();
+  return isCompactWidth;
 }
 
 export function getPasteShortcutLabel(): string {

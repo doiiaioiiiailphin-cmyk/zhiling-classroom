@@ -20,6 +20,13 @@ class ClassroomAiService(
     private val settingsManager: SettingsManager,
     private val llm: LlmClient,
 ) {
+    private fun isProviderConfigured(provider: LLMProviderConfig?, modelId: String): Boolean {
+        if (provider == null) return false
+        if (modelId.isBlank() || provider.baseUrl.isBlank()) return false
+        if (provider.isCustom != true && provider.apiKey.isBlank()) return false
+        return true
+    }
+
     private fun resolveFeature(feature: String): Pair<LLMProviderConfig, String> {
         val settings = settingsManager.get()
         val binding = settings.featureRouting.binding(feature)
@@ -27,11 +34,10 @@ class ClassroomAiService(
             throw AppException(400, "FEATURE_DISABLED", "该 AI 功能已在设置中关闭")
         }
         val provider = settings.llmProviders[binding.providerId]
-            ?: throw AppException(400, "MODEL_NOT_CONFIGURED", "请先在设置中为该 AI 功能选择供应商与模型")
-        if (binding.modelId.isBlank() || provider.baseUrl.isBlank()) {
-            throw AppException(400, "MODEL_NOT_CONFIGURED", "请先在设置中配置大模型的 API Key 与模型")
+        if (!isProviderConfigured(provider, binding.modelId)) {
+            throw AppException(400, "MODEL_NOT_CONFIGURED", "请先在「设置 → 模型供应商」中填写 API Key 并选择模型")
         }
-        return Pair(provider, binding.modelId.trim())
+        return Pair(provider!!, binding.modelId.trim())
     }
 
     private fun buildClassroomContext(sessionId: String, maxChars: Int = 24_000): Pair<String, Int> {
@@ -294,10 +300,10 @@ class ClassroomAiService(
         val corrBinding = settings.featureRouting.sentenceCorrection
         val corrProv = settings.llmProviders[corrBinding.providerId]
         var effectiveText = utterance.rawText
-        if (corrBinding.enabled && corrProv != null && corrBinding.modelId.isNotBlank() && corrProv.apiKey.isNotBlank()) {
+        if (corrBinding.enabled && isProviderConfigured(corrProv, corrBinding.modelId)) {
             runCatching {
                 val (rawOut, _) = llm.completeText(
-                    corrProv,
+                    corrProv!!,
                     corrBinding.modelId,
                     FILLER_ONLY_CORRECTION_PROMPT,
                     """{"rawText":${JsonPrimitive(utterance.rawText)}}""",
@@ -326,7 +332,7 @@ class ClassroomAiService(
         // 2. Resegmentation (periodic / on topic shift)
         val segBinding = settings.featureRouting.resegmentation
         val segProv = settings.llmProviders[segBinding.providerId]
-        if (segBinding.enabled && segProv != null && segBinding.modelId.isNotBlank() && segProv.apiKey.isNotBlank()) {
+        if (segBinding.enabled && isProviderConfigured(segProv, segBinding.modelId)) {
             val allSegs = repo.listSegments(sessionId)
             val lastSeg = allSegs.lastOrNull()
             if (lastSeg != null && (lastSeg.utterances.size == 1 || lastSeg.utterances.size % 4 == 0)) {
@@ -335,7 +341,7 @@ class ClassroomAiService(
                         "段[${s.topicTitle}]: " + s.utterances.takeLast(4).joinToString(" ") { it.refinedText }
                     }
                     val (rawOut, _) = llm.completeText(
-                        segProv,
+                        segProv!!,
                         segBinding.modelId,
                         RESEGMENT_PROMPT,
                         "已有分段：\n$recent\n\n最新句子：$effectiveText",
@@ -360,14 +366,14 @@ class ClassroomAiService(
         // 3. Key Term Highlight
         val hlBinding = settings.featureRouting.keyTermHighlight
         val hlProv = settings.llmProviders[hlBinding.providerId]
-        if (hlBinding.enabled && hlProv != null && hlBinding.modelId.isNotBlank() && hlProv.apiKey.isNotBlank()) {
+        if (hlBinding.enabled && isProviderConfigured(hlProv, hlBinding.modelId)) {
             val latestSeg = repo.listSegments(sessionId).lastOrNull()
             if (latestSeg != null && latestSeg.utterances.size % 3 == 0) {
                 runCatching {
                     val already = latestSeg.highlights.map { it.term }
                     val texts = latestSeg.utterances.takeLast(5).map { it.refinedText }
                     val (rawOut, _) = llm.completeText(
-                        hlProv,
+                        hlProv!!,
                         hlBinding.modelId,
                         KEY_TERM_PROMPT,
                         "已标注：$already\n句子：$texts",

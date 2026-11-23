@@ -206,8 +206,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
         </Tooltip>
       </div>
 
-      {/* ==================== 2. 系统内录源控制（桌面端专享；Android 端以原生麦克风+硬件降噪为主） ==================== */}
-      {!isAndroidPlatform() && (
+      {/* ==================== 2. 系统内录源控制（Windows WASAPI / macOS SCK / Android AudioPlaybackCapture） ==================== */}
       <div
         ref={sysFloating.refs.setReference}
         className={`h-10 rounded-lg border flex items-center overflow-hidden transition-colors ${
@@ -244,7 +243,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
 
         <span className="w-px h-5 bg-[#ECEEF2]" />
 
-        <Tooltip content={sysOpen ? null : '选择系统音频源与双讲回声消除'}>
+        <Tooltip content={sysOpen ? null : '选择系统音频源'}>
           <button
             type="button"
             aria-label="选择系统音频源"
@@ -266,7 +265,6 @@ export const AudioSourceControl: React.FC = React.memo(() => {
           </button>
         </Tooltip>
       </div>
-      )}
 
       {/* ==================== 麦克风下拉面板（FloatingPortal 防裁切） ==================== */}
       {micPresence.shouldRender && (
@@ -281,7 +279,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
             className="z-[75] focus:outline-none app-no-drag"
           >
             <div
-              className={`w-88 origin-top-right rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_14px_36px_rgba(31,35,41,0.16)] p-3.5 space-y-3 transition-all duration-160 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+              className={`w-[min(22rem,calc(100vw-24px))] origin-top-right rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_14px_36px_rgba(31,35,41,0.16)] p-3.5 space-y-3 transition-all duration-160 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                 micPresence.isVisible && micFloating.isPositioned
                   ? 'opacity-100 scale-100 translate-y-0'
                   : 'opacity-0 scale-[0.95] -translate-y-1.5 pointer-events-none'
@@ -369,7 +367,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
             className="z-[75] focus:outline-none app-no-drag"
           >
             <div
-              className={`w-96 origin-top-right rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_14px_36px_rgba(31,35,41,0.16)] p-3.5 space-y-3 transition-all duration-160 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+              className={`w-[min(24rem,calc(100vw-24px))] origin-top-right rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_14px_36px_rgba(31,35,41,0.16)] p-3.5 space-y-3 transition-all duration-160 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                 sysPresence.isVisible && sysFloating.isPositioned
                   ? 'opacity-100 scale-100 translate-y-0'
                   : 'opacity-0 scale-[0.95] -translate-y-1.5 pointer-events-none'
@@ -464,6 +462,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
                 </button>
               )}
 
+              {!isAndroidPlatform() && (
               <div className="border-t border-[#ECEEF2] pt-3 flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 text-[14px] font-medium text-[#1F2329]">
@@ -488,6 +487,7 @@ export const AudioSourceControl: React.FC = React.memo(() => {
                   onChange={(checked) => void requestToggleWebrtcAec3(checked)}
                 />
               </div>
+              )}
             </div>
           </div>
         </FloatingPortal>

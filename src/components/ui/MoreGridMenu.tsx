@@ -91,7 +91,7 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
             className="z-[70] focus:outline-none app-no-drag"
           >
             <div
-              className={`w-[356px] origin-top-right rounded-2xl border border-[#DEE0E3] bg-white/98 backdrop-blur-md p-3.5 shadow-[0_18px_44px_rgba(31,35,41,0.16)] transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+              className={`w-[min(356px,calc(100vw-24px))] max-h-[calc(100vh-72px)] overflow-y-auto origin-top-right rounded-2xl border border-[#DEE0E3] bg-white/98 backdrop-blur-md p-3.5 shadow-[0_18px_44px_rgba(31,35,41,0.16)] transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                 isVisible && isPositioned
                   ? 'opacity-100 scale-100 translate-y-0'
                   : 'opacity-0 scale-[0.93] -translate-y-1.5 pointer-events-none'

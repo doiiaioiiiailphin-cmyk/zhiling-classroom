@@ -46,6 +46,30 @@ class LocalApiServer(
     private val streams: StreamManager,
     private val updater: AndroidUpdater,
     private val onRequestCameraCapture: ((String, Long?, String?) -> Unit)? = null,
+    private val audioDevicesProvider: () -> NativeAudioDevices = {
+        NativeAudioDevices(
+            platform = "android",
+            wasapiSupported = true,
+            inputs = listOf(
+                NativeAudioEndpoint(
+                    id = "default",
+                    rawId = "default",
+                    name = "手机内置麦克风（含硬件降噪）",
+                    isDefault = true,
+                    isCommunicationsDefault = true,
+                )
+            ),
+            loopbacks = listOf(
+                NativeAudioEndpoint(
+                    id = "default",
+                    rawId = "android-playback-capture",
+                    name = "手机系统媒体声音内录（支持耳机/网课）",
+                    isDefault = true,
+                    isCommunicationsDefault = true,
+                )
+            ),
+        )
+    },
 ) {
     private var engine: ApplicationEngine? = null
     @Volatile
@@ -379,22 +403,7 @@ class LocalApiServer(
                     get("/audio/devices") {
                         call.response.header(HttpHeaders.CacheControl, "no-store")
                         call.respondApi {
-                            DataEnvelope(
-                                NativeAudioDevices(
-                                    platform = "android",
-                                    wasapiSupported = false,
-                                    inputs = listOf(
-                                        NativeAudioEndpoint(
-                                            id = "default",
-                                            rawId = "default",
-                                            name = "手机内置麦克风（含硬件降噪）",
-                                            isDefault = true,
-                                            isCommunicationsDefault = true,
-                                        )
-                                    ),
-                                    loopbacks = emptyList(),
-                                )
-                            )
+                            DataEnvelope(audioDevicesProvider())
                         }
                     }
 

@@ -177,16 +177,34 @@ class ClassroomAI:
         folder_words = await self.repo.folder_hotwords_for_session(session_id)
         return list(dict.fromkeys([*folder_words, *settings.global_hotwords]))
 
+    def is_feature_ready(self, settings: AppSettings, feature: Feature) -> bool:
+        binding = settings.feature_routing.binding(feature)
+        if not binding.enabled:
+            return False
+        provider = settings.llm_providers.get(binding.provider_id)
+        if provider is None:
+            return False
+        if provider.provider_id == OPENCODE_FREE_PROVIDER_ID:
+            return False
+        if not binding.model_id.strip() or not provider.base_url.strip():
+            return False
+        if not provider.is_custom and not provider.api_key.strip():
+            return False
+        return True
+
     def adapter(self, settings: AppSettings, feature: Feature) -> tuple[LLMClientAdapter, ModelBinding]:
         binding = settings.feature_routing.binding(feature)
         if not binding.enabled:
             raise AppError(400, "FEATURE_DISABLED", "该 AI 功能已关闭")
         provider = settings.llm_providers.get(binding.provider_id)
-        if provider is None or (
-            provider.provider_id != OPENCODE_FREE_PROVIDER_ID
-            and (not binding.model_id.strip() or not provider.base_url.strip())
+        if (
+            provider is None
+            or provider.provider_id == OPENCODE_FREE_PROVIDER_ID
+            or not binding.model_id.strip()
+            or not provider.base_url.strip()
+            or (not provider.is_custom and not provider.api_key.strip())
         ):
-            raise AppError(400, "MODEL_NOT_CONFIGURED", "请在设置中为该 AI 功能选择供应商与模型")
+            raise AppError(400, "MODEL_NOT_CONFIGURED", "请先在「设置 → 模型供应商」中填写 API Key 并选择模型")
         return llm_adapter(self.client, provider, opencode=self.opencode), binding
 
     async def structured_with_thinking(
@@ -592,29 +610,17 @@ class TranscriptPipeline:
         ]
 
     def should_prompt_for_opencode(self, settings: AppSettings) -> bool:
-        bridge = self.ai.opencode
-        return bool(
-            bridge and not bridge.automatic_download_decision.is_set()
-            and self._open_code_features(settings) and bridge.needs_download()
-        )
+        _ = settings
+        return False
 
     async def automatic_settings(
         self, session_id: str, settings: AppSettings, *, download_prompt_sent: bool = False,
     ) -> AppSettings:
-        bridge = self.ai.opencode
-        features = self._open_code_features(settings)
-        if not bridge or not features or not bridge.needs_download():
-            return settings
-        if not bridge.automatic_download_decision.is_set():
-            if download_prompt_sent or await self.publish(session_id, "error", {
-                "code": OPENCODE_CLI_REQUIRED, "message": "请先下载 OpenCode 组件",
-            }):
-                await bridge.await_automatic_download()
-        if not bridge.needs_download():
-            return settings
+        _ = (session_id, download_prompt_sent)
         available = settings.model_copy(deep=True)
-        for feature in features:
-            available.feature_routing.binding(feature).enabled = False
+        for feature in AUTOMATIC_FEATURES:
+            if not self.ai.is_feature_ready(available, feature):
+                available.feature_routing.binding(feature).enabled = False
         return available
 
     def submit(self, session_id: str, utterance_id: str) -> bool:
@@ -641,7 +647,7 @@ class TranscriptPipeline:
         session_id: str | None = None,
         settings: AppSettings | None = None,
     ) -> list[str]:
-        clear_text = True if settings is None else settings.feature_routing.sentence_correction.enabled
+        clear_text = True if settings is None else self.ai.is_feature_ready(settings, "sentenceCorrection")
         substantive: list[str] = []
         for uid in batch_ids:
             info = await self.repo.utterance_raw_and_segment(uid)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../services/api';
 import type { NativeAudioDevices } from '../types/domain';
-import { isDesktopShell, isMacPlatform } from '../utils/desktopBridge';
+import { isAndroidPlatform, isDesktopShell, isMacPlatform } from '../utils/desktopBridge';
 
 export interface AudioSourceOption {
   value: string;
@@ -99,7 +99,26 @@ export function useAudioDevices(active = true) {
 
       // 2. Build System Audio / Loopback Options
       const nextSys: AudioSourceOption[] = [];
-      if (nativeInfo.wasapiSupported) {
+      const isAndroid = isAndroidPlatform();
+      if (isAndroid) {
+        if (nativeInfo.platform === 'android' && nativeInfo.loopbacks.length > 0) {
+          const defaultLoop = nativeInfo.loopbacks.find((d) => d.isDefault) ?? nativeInfo.loopbacks[0];
+          nextSys.push({
+            value: 'default',
+            label: defaultLoop.name,
+          });
+          for (const ep of nativeInfo.loopbacks) {
+            if (ep.id !== defaultLoop.id) {
+              nextSys.push({ value: ep.id, label: ep.name });
+            }
+          }
+        } else {
+          nextSys.push({
+            value: 'default',
+            label: '手机系统媒体声音内录（支持耳机/网课）',
+          });
+        }
+      } else if (nativeInfo.wasapiSupported) {
         const defaultLoop = nativeInfo.loopbacks.find((d) => d.isDefault);
         const commLoop = nativeInfo.loopbacks.find((d) => d.isCommunicationsDefault);
 
@@ -130,27 +149,29 @@ export function useAudioDevices(active = true) {
         });
       }
 
-      // Include virtual audio cables / Stereo Mix inputs if available in browser
-      for (const dev of rawBrowserMics) {
-        const cleanLabel = dev.label.trim();
-        if (cleanLabel && VIRTUAL_CABLE_PATTERN.test(cleanLabel)) {
+      if (!isAndroid) {
+        // Include virtual audio cables / Stereo Mix inputs if available in browser
+        for (const dev of rawBrowserMics) {
+          const cleanLabel = dev.label.trim();
+          if (cleanLabel && VIRTUAL_CABLE_PATTERN.test(cleanLabel)) {
+            nextSys.push({
+              value: `input:${dev.deviceId}`,
+              label: `虚拟声卡输入：${cleanLabel}`,
+            });
+          }
+        }
+
+        const supportsDisplayShare =
+          typeof navigator !== 'undefined' &&
+          typeof navigator.mediaDevices?.getDisplayMedia === 'function' &&
+          !(isMacPlatform() && isDesktopShell() && nativeInfo.wasapiSupported);
+
+        if (supportsDisplayShare) {
           nextSys.push({
-            value: `input:${dev.deviceId}`,
-            label: `虚拟声卡输入：${cleanLabel}`,
+            value: 'display-share',
+            label: '窗口或标签页共享音频',
           });
         }
-      }
-
-      const supportsDisplayShare =
-        typeof navigator !== 'undefined' &&
-        typeof navigator.mediaDevices?.getDisplayMedia === 'function' &&
-        !(isMacPlatform() && isDesktopShell() && nativeInfo.wasapiSupported);
-
-      if (supportsDisplayShare) {
-        nextSys.push({
-          value: 'display-share',
-          label: '窗口或标签页共享音频',
-        });
       }
 
       setSystemOptions(nextSys);

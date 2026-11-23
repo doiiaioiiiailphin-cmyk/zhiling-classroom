@@ -413,7 +413,7 @@ export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
         }
         className={
           mobileSheet
-            ? 'w-full h-[68vh] pointer-events-auto rounded-t-2xl border-t border-x shadow-[0_-12px_36px_rgba(31,35,41,0.18)] flex flex-col overflow-hidden select-none'
+            ? 'w-full h-[64vh] pointer-events-auto flex flex-col overflow-hidden select-none'
             : `fixed pointer-events-auto rounded-2xl border shadow-[0_14px_36px_rgba(31,35,41,0.16),0_2px_8px_rgba(111,84,20,0.08)] flex flex-col overflow-hidden select-none ${
                 note.isTranslucent ? 'backdrop-blur-md' : ''
               }`
@@ -427,7 +427,7 @@ export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
             borderColor: theme.border,
           }}
           className={`h-11 md:h-10 px-2.5 border-b flex items-center justify-between gap-1.5 shrink-0 ${
-            mobileSheet ? '' : 'cursor-grab active:cursor-grabbing'
+            mobileSheet ? '' : 'touch-none cursor-grab active:cursor-grabbing'
           }`}
         >
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -775,33 +775,33 @@ export const StickyNoteWindow: React.FC<StickyNoteWindowProps> = React.memo(
           </span>
         </div>
 
-        {/* 边缘与四角缩放句柄（桌面浮窗模式） */}
+        {/* 边缘与四角缩放句柄（桌面与平板独立浮窗模式，支持触控与鼠标拖拽缩放） */}
         {!mobileSheet && (
           <>
             <div
               onPointerDown={startResize('e')}
-              className="absolute top-2 bottom-3 right-0 w-1.5 cursor-ew-resize"
+              className="absolute top-2 bottom-4 right-0 w-2 touch-none cursor-ew-resize"
             />
             <div
               onPointerDown={startResize('w')}
-              className="absolute top-2 bottom-3 left-0 w-1.5 cursor-ew-resize"
+              className="absolute top-2 bottom-4 left-0 w-2 touch-none cursor-ew-resize"
             />
             <div
               onPointerDown={startResize('s')}
-              className="absolute left-3 right-3 bottom-0 h-1.5 cursor-ns-resize"
+              className="absolute left-4 right-4 bottom-0 h-2 touch-none cursor-ns-resize"
             />
             <div
               onPointerDown={startResize('n')}
-              className="absolute left-3 right-3 top-0 h-1 cursor-ns-resize"
+              className="absolute left-4 right-4 top-0 h-1.5 touch-none cursor-ns-resize"
             />
             <div
               onPointerDown={startResize('sw')}
-              className="absolute left-0 bottom-0 w-3 h-3 cursor-nesw-resize"
+              className="absolute left-0 bottom-0 w-5 h-5 touch-none cursor-nesw-resize"
             />
             <div
               onPointerDown={startResize('se')}
               title="拖拽调整便签大小"
-              className="absolute right-0 bottom-0 w-4 h-4 cursor-nwse-resize flex items-end justify-end p-1"
+              className="absolute right-0 bottom-0 w-5 h-5 touch-none cursor-nwse-resize flex items-end justify-end p-1"
             >
               <span
                 style={{ borderColor: theme.borderStrong }}

@@ -45,8 +45,20 @@ jobs:
           npm run typecheck
           npm run build
 
+      - name: Decode Release Keystore (when configured)
+        if: ${{ secrets.ZHILING_KEYSTORE_BASE64 != '' }}
+        env:
+          ZHILING_KEYSTORE_BASE64: ${{ secrets.ZHILING_KEYSTORE_BASE64 }}
+        run: |
+          echo "$ZHILING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/zhiling-android-release.jks"
+          echo "ZHILING_KEYSTORE_PATH=$RUNNER_TEMP/zhiling-android-release.jks" >> "$GITHUB_ENV"
+
       - name: Run Android unit tests & assemble Release APK
         working-directory: android
+        env:
+          ZHILING_KEYSTORE_PASSWORD: ${{ secrets.ZHILING_KEYSTORE_PASSWORD }}
+          ZHILING_KEY_ALIAS: ${{ secrets.ZHILING_KEY_ALIAS }}
+          ZHILING_KEY_PASSWORD: ${{ secrets.ZHILING_KEY_PASSWORD }}
         run: |
           sed -i 's/\r$//' gradlew
           chmod +x gradlew
@@ -63,8 +75,8 @@ jobs:
           path: release/ZhilingClassroom-Android-arm64.apk
           if-no-files-found: error
 
-      - name: Sync Android APK to CNB Release (when CNB_TOKEN is configured)
-        if: env.CNB_TOKEN != ''
+      - name: Sync Android APK to CNB Release (only when release keystore & CNB_TOKEN are configured)
+        if: ${{ secrets.CNB_TOKEN != '' && secrets.ZHILING_KEYSTORE_BASE64 != '' }}
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CNB_REPO: ${{ vars.CNB_REPO }}

@@ -82,24 +82,47 @@ class SettingsManager(
     private fun mergeMissingPresets(current: AppSettings): AppSettings {
         val defaults = defaultSettings()
         val llm = LinkedHashMap<String, LLMProviderConfig>(defaults.llmProviders)
-        current.llmProviders.forEach { (k, v) -> llm[k] = v }
+        current.llmProviders.forEach { (k, v) ->
+            if (k != "opencode-free-bridge") llm[k] = v
+        }
 
         val asr = LinkedHashMap<String, AsrProviderConfig>(defaults.asrProviders)
         current.asrProviders.forEach { (k, v) -> asr[k] = v }
 
-        val selectedLlm = if (llm.containsKey(current.selectedLlmProviderId)) {
+        val fallbackLlm = llm.entries.firstOrNull { (_, cfg) ->
+            cfg.apiKey.isNotBlank() || (cfg.isCustom == true && cfg.baseUrl.isNotBlank())
+        }?.key ?: defaults.selectedLlmProviderId
+
+        val selectedLlm = if (current.selectedLlmProviderId != "opencode-free-bridge" && llm.containsKey(current.selectedLlmProviderId)) {
             current.selectedLlmProviderId
         } else {
-            defaults.selectedLlmProviderId
+            fallbackLlm
         }
         val selectedAsr = if (asr.containsKey(current.selectedAsrProviderId)) {
             current.selectedAsrProviderId
         } else {
             defaults.selectedAsrProviderId
         }
+        fun sanitizeBinding(b: FeatureModelBinding, disableOnMigrate: Boolean): FeatureModelBinding {
+            return if (b.providerId == "opencode-free-bridge" || !llm.containsKey(b.providerId)) {
+                b.copy(
+                    enabled = if (disableOnMigrate) false else b.enabled,
+                    providerId = fallbackLlm,
+                    modelId = "",
+                )
+            } else b
+        }
+        val cleanRouting = FeatureRouting(
+            chat = sanitizeBinding(current.featureRouting.chat, disableOnMigrate = false),
+            sentenceCorrection = sanitizeBinding(current.featureRouting.sentenceCorrection, disableOnMigrate = true),
+            resegmentation = sanitizeBinding(current.featureRouting.resegmentation, disableOnMigrate = true),
+            keyTermHighlight = sanitizeBinding(current.featureRouting.keyTermHighlight, disableOnMigrate = true),
+            bubbleExplanation = sanitizeBinding(current.featureRouting.bubbleExplanation, disableOnMigrate = true),
+        )
         return current.copy(
             selectedLlmProviderId = selectedLlm,
             llmProviders = llm,
+            featureRouting = cleanRouting,
             selectedAsrProviderId = selectedAsr,
             asrProviders = asr,
         )
@@ -205,8 +228,13 @@ class SettingsManager(
             val asrMap = LinkedHashMap<String, AsrProviderConfig>()
             for (p in ASR_PRESETS) asrMap[p.providerId] = p
 
-            val defaultBinding = FeatureModelBinding(
+            val chatBinding = FeatureModelBinding(
                 enabled = true,
+                providerId = "deepseek",
+                modelId = "",
+            )
+            val disabledAutoBinding = FeatureModelBinding(
+                enabled = false,
                 providerId = "deepseek",
                 modelId = "",
             )
@@ -214,11 +242,11 @@ class SettingsManager(
                 selectedLlmProviderId = "deepseek",
                 llmProviders = llmMap,
                 featureRouting = FeatureRouting(
-                    chat = defaultBinding,
-                    sentenceCorrection = defaultBinding,
-                    resegmentation = defaultBinding,
-                    keyTermHighlight = defaultBinding,
-                    bubbleExplanation = defaultBinding,
+                    chat = chatBinding,
+                    sentenceCorrection = disabledAutoBinding,
+                    resegmentation = disabledAutoBinding,
+                    keyTermHighlight = disabledAutoBinding,
+                    bubbleExplanation = disabledAutoBinding,
                 ),
                 selectedAsrProviderId = "builtin-free-asr",
                 asrProviders = asrMap,

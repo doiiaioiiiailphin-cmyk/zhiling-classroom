@@ -144,7 +144,7 @@ export const ImportAudioModal: React.FC = () => {
       title="导入本地音视频创建课堂"
       widthClass="max-w-lg"
     >
-      <div className="p-6 space-y-5">
+      <div className="p-4 sm:p-6 space-y-4 sm:space-y-5">
         <input
           ref={inputRef}
           type="file"
@@ -236,12 +236,12 @@ export const ImportAudioModal: React.FC = () => {
           </div>
         )}
 
-        <div className="flex items-center justify-end gap-3 pt-1">
+        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 sm:gap-3 pt-1">
           <button
             type="button"
             disabled={importing}
             onClick={() => setImportAudioModalOpen(false)}
-            className="h-10 px-4 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-50 text-[14px] font-medium text-[#1F2329] cursor-pointer"
+            className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] disabled:opacity-50 text-[14px] font-medium text-[#1F2329] inline-flex items-center justify-center whitespace-nowrap cursor-pointer"
           >
             取消
           </button>
@@ -249,11 +249,11 @@ export const ImportAudioModal: React.FC = () => {
             type="button"
             disabled={!selectedFile || importing}
             onClick={() => void handleStartImport()}
-            className="h-10 px-5 rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[14px] font-medium inline-flex items-center gap-2 cursor-pointer"
+            className="min-h-10 py-2 px-5 w-full sm:w-auto rounded-lg bg-[#1456F0] hover:bg-[#3370FF] disabled:opacity-50 text-white text-[14px] font-medium inline-flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
           >
             {importing ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
                 <span>正在转写导入...</span>
               </>
             ) : (

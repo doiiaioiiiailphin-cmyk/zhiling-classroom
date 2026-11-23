@@ -2,13 +2,16 @@ package com.zhiling.classroom
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -48,6 +51,35 @@ class MainActivity : AppCompatActivity() {
     private var pendingCameraFile: File? = null
     private var pendingCameraCallbackId: String? = null
     private var pendingPermissionCallbackId: String? = null
+    private var pendingProjectionCallbackId: String? = null
+    private var pendingOverlayCallbackId: String? = null
+
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val cbId = pendingOverlayCallbackId
+        pendingOverlayCallbackId = null
+        val granted = Settings.canDrawOverlays(this)
+        if (cbId != null) {
+            resolveJsCallback(cbId, buildJsonObject { put("granted", granted) }.toString())
+        }
+    }
+
+    private val mediaProjectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { res ->
+        val cbId = pendingProjectionCallbackId
+        pendingProjectionCallbackId = null
+        val data = res.data
+        val granted = if (res.resultCode == Activity.RESULT_OK && data != null) {
+            engineService?.attachMediaProjection(res.resultCode, data) ?: false
+        } else {
+            false
+        }
+        if (cbId != null) {
+            resolveJsCallback(cbId, buildJsonObject { put("granted", granted) }.toString())
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -246,6 +278,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applySafeAreaInsetsToCss()
+        runOnUiThread {
+            if (::webView.isInitialized) {
+                webView.evaluateJavascript(
+                    "window.dispatchEvent(new Event('zhiling:orientation-change'));",
+                    null,
+                )
+            }
+        }
+    }
+
     private var safeTopDp: Float = 0f
     private var safeBottomDp: Float = 0f
 
@@ -348,6 +393,64 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        @JavascriptInterface
+        fun hasSystemAudioPermission(): Boolean =
+            engineService?.hasActiveMediaProjection() == true
+
+        @JavascriptInterface
+        fun requestSystemAudioPermission(callbackId: String) {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    resolveJsCallback(callbackId, buildJsonObject { put("granted", false) }.toString())
+                    return@runOnUiThread
+                }
+                if (engineService?.hasActiveMediaProjection() == true) {
+                    resolveJsCallback(callbackId, buildJsonObject { put("granted", true) }.toString())
+                    return@runOnUiThread
+                }
+                try {
+                    val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    pendingProjectionCallbackId = callbackId
+                    mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+                } catch (_: Throwable) {
+                    pendingProjectionCallbackId = null
+                    resolveJsCallback(callbackId, buildJsonObject { put("granted", false) }.toString())
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun hasOverlayPermission(): Boolean = Settings.canDrawOverlays(this@MainActivity)
+
+        @JavascriptInterface
+        fun requestOverlayPermission(callbackId: String) {
+            runOnUiThread {
+                if (Settings.canDrawOverlays(this@MainActivity)) {
+                    resolveJsCallback(callbackId, buildJsonObject { put("granted", true) }.toString())
+                    return@runOnUiThread
+                }
+                try {
+                    pendingOverlayCallbackId = callbackId
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    )
+                    overlayPermissionLauncher.launch(intent)
+                } catch (_: Throwable) {
+                    pendingOverlayCallbackId = null
+                    resolveJsCallback(callbackId, buildJsonObject { put("granted", false) }.toString())
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun toggleFloatingOverlay(): Boolean =
+            engineService?.toggleFloatingOverlay() == true
+
+        @JavascriptInterface
+        fun isFloatingOverlayShowing(): Boolean =
+            engineService?.isFloatingOverlayShowing() == true
 
         @JavascriptInterface
         fun captureBlackboardPhoto(callbackId: String) {

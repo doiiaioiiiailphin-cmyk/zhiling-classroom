@@ -90,4 +90,13 @@ Copy-Item -Force $SourceApk $DestApk
 $SizeMb = [math]::Round((Get-Item $DestApk).Length / 1MB, 2)
 $Sha256 = (Get-FileHash $DestApk -Algorithm SHA256).Hash.ToLowerInvariant()
 
+$apksigner = Get-ChildItem -Path "$SdkDir\build-tools\*\apksigner.bat" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+if ($apksigner) {
+    Write-Host "[校验签名] 使用 $($apksigner.FullName) 核验 APK 签名..." -ForegroundColor Cyan
+    & $apksigner.FullName verify --verbose --print-certs $DestApk
+    if ($LASTEXITCODE -ne 0) {
+        throw "APK 签名校验失败"
+    }
+}
+
 Write-Host "打包完成：$DestApk ($SizeMb MB, sha256=$Sha256)" -ForegroundColor Green

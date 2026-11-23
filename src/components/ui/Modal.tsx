@@ -52,7 +52,7 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div
-      className={`fixed inset-0 ${layerClass} flex items-center justify-center p-4 transition-all duration-160 ${
+      className={`fixed inset-0 ${layerClass} flex items-center justify-center p-3 sm:p-4 transition-all duration-160 ${
         isVisible
           ? 'bg-[#1F2329]/35 backdrop-blur-[1.5px] opacity-100'
           : 'bg-[#1F2329]/0 opacity-0 pointer-events-none'
@@ -62,14 +62,16 @@ export const Modal: React.FC<ModalProps> = ({
       }}
     >
       <div
-        className={`w-full ${widthClass} rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_20px_48px_rgba(31,35,41,0.18)] overflow-hidden flex flex-col max-h-[88vh] transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`w-full ${widthClass} rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_20px_48px_rgba(31,35,41,0.18)] overflow-hidden flex flex-col max-h-[92vh] transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           isVisible
             ? 'opacity-100 scale-100 translate-y-0'
             : 'opacity-0 scale-[0.96] translate-y-2'
         }`}
       >
-        <div className="flex items-center justify-between border-b border-[#ECEEF2] px-6 py-4 shrink-0">
-          <h2 className="text-[17px] font-semibold text-[#1F2329]">{title}</h2>
+        <div className="flex items-center justify-between gap-3 border-b border-[#ECEEF2] px-4 sm:px-6 py-3.5 sm:py-4 shrink-0">
+          <h2 className="text-[16px] sm:text-[17px] font-semibold text-[#1F2329] truncate min-w-0">
+            {title}
+          </h2>
           <IconButton
             icon={X}
             tooltip={closable ? '关闭' : undefined}

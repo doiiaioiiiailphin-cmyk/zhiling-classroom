@@ -1190,6 +1190,18 @@ def main() -> None:
             except Exception:
                 pass
 
+        def resize_mini_overlay(self, width: int, height: int) -> bool:
+            mini_win = windows.get("mini")
+            if mini_win is None:
+                return False
+            try:
+                safe_w = max(360, min(920, int(width)))
+                safe_h = max(130, min(760, int(height)))
+                mini_win.resize(safe_w, safe_h)  # type: ignore[attr-defined]
+                return True
+            except Exception:
+                return False
+
         def begin_window_op(self, target: str, mode: str) -> bool:
             if mode == "move":
                 return self.start_native_drag(target)

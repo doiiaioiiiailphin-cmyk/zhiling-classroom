@@ -3,10 +3,13 @@ package com.zhiling.classroom
 import com.zhiling.classroom.ai.ClassroomAiService
 import com.zhiling.classroom.ai.InlineThinkSplitter
 import com.zhiling.classroom.ai.LlmStreamEvent
+import com.zhiling.classroom.audio.AudioChannelMixer
 import com.zhiling.classroom.audio.SenseVoiceEngine
 import com.zhiling.classroom.audio.WavStorage
 import com.zhiling.classroom.export.SessionExporter
 import com.zhiling.classroom.model.*
+import com.zhiling.classroom.service.OverlayBoundsMath
+import com.zhiling.classroom.settings.SettingsManager
 import com.zhiling.classroom.update.AndroidUpdater
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.*
@@ -164,5 +167,125 @@ class ZhilingCoreTests {
         }
         assertTrue(entries.contains("word/document.xml"))
         assertTrue(entries.contains("[Content_Types].xml"))
+    }
+
+    @Test
+    fun testAudioChannelMixerSumsAndClampsPcm16() {
+        fun le16(vararg samples: Int): ByteArray {
+            val out = ByteArray(samples.size * 2)
+            samples.forEachIndexed { idx, v ->
+                out[idx * 2] = (v and 0xFF).toByte()
+                out[idx * 2 + 1] = ((v ushr 8) and 0xFF).toByte()
+            }
+            return out
+        }
+        fun readLe16(buf: ByteArray, idx: Int): Int =
+            ((buf[idx * 2 + 1].toInt() shl 8) or (buf[idx * 2].toInt() and 0xFF)).toShort().toInt()
+
+        val mic = le16(1000, 30000, -30000)
+        val sys = le16(2500, 15000, -15000)
+        val mixed = AudioChannelMixer.mixPcm16Mono(mic, sys, mic.size)
+        assertEquals(6, mixed.size)
+        assertEquals(3500, readLe16(mixed, 0))
+        assertEquals(Short.MAX_VALUE.toInt(), readLe16(mixed, 1))
+        assertEquals(Short.MIN_VALUE.toInt(), readLe16(mixed, 2))
+
+        val sysOnly = AudioChannelMixer.mixPcm16Mono(null, sys, sys.size)
+        assertArrayEquals(sys, sysOnly)
+    }
+
+    @Test
+    fun testDualChannelSpeakerResolution() {
+        assertEquals(
+            "remote",
+            AudioChannelMixer.resolveSpeakerChannel(0.0, 0.5, splitEnabled = false, micActive = false, sysActive = true),
+        )
+        assertEquals(
+            "self",
+            AudioChannelMixer.resolveSpeakerChannel(0.8, 0.2, splitEnabled = true, micActive = true, sysActive = true),
+        )
+        assertEquals(
+            "remote",
+            AudioChannelMixer.resolveSpeakerChannel(0.1, 0.9, splitEnabled = true, micActive = true, sysActive = true),
+        )
+        assertEquals(
+            "default",
+            AudioChannelMixer.resolveSpeakerChannel(0.8, 0.2, splitEnabled = false, micActive = true, sysActive = true),
+        )
+    }
+
+    @Test
+    fun testOverlayBoundsClampAcrossPortraitAndLandscape() {
+        // Rotating from portrait (1080x2400) where window was at y=1600 into landscape (2400x1080)
+        val clamped = OverlayBoundsMath.clampExpanded(
+            x = 200,
+            y = 1600,
+            width = 960,
+            height = 1200,
+            screenW = 2400,
+            screenH = 1080,
+            minW = 520,
+            minH = 340,
+            marginPx = 20,
+        )
+        assertEquals(960, clamped.width)
+        assertEquals(1040, clamped.height)
+        assertEquals(20, clamped.y)
+        assertTrue(clamped.x >= 20 && clamped.x + clamped.width <= 2380)
+
+        // Bubble edge snap left vs right
+        assertEquals(20, OverlayBoundsMath.snapBubbleX(centerX = 300, screenW = 1080, bubbleW = 200, marginPx = 20))
+        assertEquals(860, OverlayBoundsMath.snapBubbleX(centerX = 800, screenW = 1080, bubbleW = 200, marginPx = 20))
+
+        // Expanding after moving collapsed bubble to bottom-right follows new bubble location instead of old top coords
+        val expandedBottomRight = OverlayBoundsMath.expandFromBubble(
+            bubbleX = 860,
+            bubbleY = 2050,
+            bubbleW = 200,
+            targetW = 900,
+            targetH = 600,
+            screenW = 1080,
+            screenH = 2400,
+            minW = 520,
+            minH = 340,
+            marginPx = 20,
+        )
+        assertEquals(160, expandedBottomRight.x)
+        assertEquals(1780, expandedBottomRight.y)
+        assertEquals(900, expandedBottomRight.width)
+        assertEquals(600, expandedBottomRight.height)
+
+        // Expanding after moving collapsed bubble to mid-left anchors flush to left at new y
+        val expandedMidLeft = OverlayBoundsMath.expandFromBubble(
+            bubbleX = 20,
+            bubbleY = 920,
+            bubbleW = 200,
+            targetW = 900,
+            targetH = 600,
+            screenW = 1080,
+            screenH = 2400,
+            minW = 520,
+            minH = 340,
+            marginPx = 20,
+        )
+        assertEquals(20, expandedMidLeft.x)
+        assertEquals(920, expandedMidLeft.y)
+    }
+
+    @Test
+    fun testDefaultSettingsRequireUserModelConfigAndDisableAutoAi() {
+        val defaults = SettingsManager.defaultSettings()
+        assertFalse(defaults.llmProviders.containsKey("opencode-free-bridge"))
+        assertEquals(12, defaults.llmProviders.size)
+        assertEquals("deepseek", defaults.selectedLlmProviderId)
+        assertEquals("", defaults.llmProviders["deepseek"]?.apiKey)
+        assertTrue(defaults.llmProviders["deepseek"]?.availableModels.orEmpty().isEmpty())
+
+        assertTrue(defaults.featureRouting.chat.enabled)
+        assertEquals("", defaults.featureRouting.chat.modelId)
+        assertFalse(defaults.featureRouting.sentenceCorrection.enabled)
+        assertFalse(defaults.featureRouting.resegmentation.enabled)
+        assertFalse(defaults.featureRouting.keyTermHighlight.enabled)
+        assertFalse(defaults.featureRouting.bubbleExplanation.enabled)
     }
 }

@@ -75,16 +75,6 @@ export const ProviderIcon: React.FC<{ providerId: string; className?: string }> 
 }) => {
   const logoSrc = PROVIDER_LOGO_MAP[providerId];
 
-  if (providerId === 'opencode-free-bridge') {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-        <rect x="2.5" y="2.5" width="19" height="19" rx="5.5" fill="#1F2329" />
-        <rect x="6.5" y="6.5" width="11" height="11" rx="2" stroke="#FFFFFF" strokeWidth="1.9" />
-        <rect x="9.75" y="9.75" width="4.5" height="4.5" rx="0.8" fill="#3370FF" />
-      </svg>
-    );
-  }
-
   if (providerId === 'builtin-free-asr') {
     return (
       <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">

@@ -1,7 +1,6 @@
 import {
   ASR_PROVIDER_PRESETS,
   LLM_PROVIDER_PRESETS,
-  OPENCODE_FREE_PROVIDER_ID,
 } from '../constants/providers';
 import type {
   Aec3AddonStatus,
@@ -817,9 +816,6 @@ export const mockAdapter = {
   },
 
   async fetchLlmModels(providerId: string): Promise<string[]> {
-    if (providerId === OPENCODE_FREE_PROVIDER_ID) {
-      throw new Error('OpenCode 免费模型需要连接本机后端才能拉取');
-    }
     const preset = LLM_PROVIDER_PRESETS.find((p) => p.id === providerId);
     return preset ? [...preset.defaultSampleModels] : ['custom-model-v1', 'custom-model-pro'];
   },

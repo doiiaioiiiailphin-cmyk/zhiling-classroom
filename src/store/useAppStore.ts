@@ -4,7 +4,6 @@ let nextTranscriptFocusSeq = 0;
 let nextChatDraftPrefillSeq = 0;
 let nextAudioSeekSeq = 0;
 let nextStickyNoteJumpSeq = 0;
-import { OPENCODE_FREE_PROVIDER_ID } from '../constants/providers';
 import { AddonDownloadCancelled, api, ApiRequestError, IS_MOCK_MODE } from '../services/api';
 import { classroomSocket } from '../services/classroomSocket';
 import {
@@ -13,6 +12,7 @@ import {
   getDefaultDesktopHotkeys,
   getDesktopBridge,
   isAndroidPlatform,
+  requestAndroidOverlayPermission,
 } from '../utils/desktopBridge';
 import type {
   Aec3AddonStatus,
@@ -97,8 +97,7 @@ export interface AppNotice {
   message: string;
 }
 
-type DownloadAddon = 'asr' | 'opencode';
-const OPENCODE_CLI_REQUIRED = 'OPENCODE_CLI_REQUIRED';
+type DownloadAddon = 'asr';
 
 export function deriveAudioInputSource(
   micEnabled: boolean,
@@ -226,7 +225,8 @@ interface AppStoreState {
   activeView: 'home' | 'classroom';
   currentFolderId: string | null;
   settingsOpen: boolean;
-  settingsDefaultTab: 'llm' | 'routing' | 'asr' | 'general';
+  settingsDefaultTab: 'llm' | 'routing' | 'asr' | 'general' | null;
+  previewFloatingOverlayOpen: boolean;
   notice: AppNotice | null;
 
   // 主菜单列表数据
@@ -415,8 +415,13 @@ interface AppStoreState {
   deleteStickyNote: (noteId: string) => Promise<void>;
   focusStickyNoteTimestamp: (noteId: string, timestampSec?: number, charOffset?: number) => void;
   clearStickyNoteJumpRequest: () => void;
-  quickNoteAtUtterance: (utterance: { startTimeMs: number; timestampText: string }) => Promise<void>;
+  quickNoteAtUtterance: (
+    utterance: { startTimeMs: number; timestampText: string },
+    options?: { forceNew?: boolean }
+  ) => Promise<void>;
   toggleMiniOverlayWindow: () => Promise<void>;
+  setPreviewFloatingOverlayOpen: (open: boolean) => void;
+  syncSessionMessagesFromRemote: (sessionId: string) => Promise<void>;
 
   updateSettings: (updater: (prev: AppSettings) => AppSettings) => Promise<void>;
   fetchModelsForLlmProvider: (providerId: string) => Promise<string[]>;
@@ -475,16 +480,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     pending?.settle(ready);
   };
 
-  const withOpenCodeDownload = async <T,>(request: () => Promise<T>): Promise<T> => {
-    try {
-      return await request();
-    } catch (err) {
-      if (!(err instanceof ApiRequestError) || err.code !== OPENCODE_CLI_REQUIRED) throw err;
-      if (!(await askToDownload('opencode'))) throw new AddonDownloadCancelled();
-      return request();
-    }
-  };
-
   const showNotice = (kind: 'info' | 'error', message: string) => {
     set({ notice: { id: Date.now(), kind, message } });
   };
@@ -493,6 +488,11 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     willBeDualTalk: boolean,
     continuation: () => Promise<void>
   ): Promise<void> => {
+    // Android 端使用原生单轨麦克风 + 硬件回声消除，不弹出桌面端 WebRTC AEC3 双讲组件下载弹窗
+    if (isAndroidPlatform()) {
+      await continuation();
+      return;
+    }
     const { settings, aec3Addon } = get();
     if (willBeDualTalk && settings && !aec3Addon?.installed && !settings.aec3PromptDismissed) {
       try {
@@ -637,10 +637,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         break;
 
       case 'error': {
-        if (event.payload.code === OPENCODE_CLI_REQUIRED) {
-          void askToDownload('opencode', true);
-          break;
-        }
         showNotice('error', event.payload.message);
         const isLlmStageWarning = LLM_STAGE_PREFIXES.some((prefix) =>
           event.payload.message.startsWith(prefix)
@@ -694,7 +690,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     activeView: 'home',
     currentFolderId: null,
     settingsOpen: false,
-    settingsDefaultTab: 'llm',
+    settingsDefaultTab: null,
+    previewFloatingOverlayOpen: false,
     notice: null,
 
     folders: [],
@@ -782,7 +779,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     setSettingsOpen: (open, tab) =>
       set((state) => ({
         settingsOpen: open,
-        settingsDefaultTab: tab ?? (open ? 'llm' : state.settingsDefaultTab),
+        settingsDefaultTab: open ? (tab ?? null) : state.settingsDefaultTab,
       })),
     setCurrentFolderId: (folderId) => set({ currentFolderId: folderId }),
     showNotice,
@@ -847,15 +844,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         addonDownloadProgress: null,
       });
       try {
-        if (addon === 'opencode') {
-          await api.streamDownloadOpenCode((progress) => {
-            set({ addonDownloadProgress: progress });
-          });
-        } else {
-          await api.streamDownloadBuiltinAsr((progress) => {
-            set({ addonDownloadProgress: progress });
-          });
-        }
+        await api.streamDownloadBuiltinAsr((progress) => {
+          set({ addonDownloadProgress: progress });
+        });
         finishDownloadPrompt(true);
       } catch (err) {
         set({
@@ -864,24 +855,14 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         });
         showNotice(
           'error',
-          err instanceof Error
-            ? err.message
-            : addon === 'opencode'
-              ? '组件下载失败，请重试'
-              : '本地语音模型下载失败，请重试'
+          err instanceof Error ? err.message : '本地语音模型下载失败，请重试'
         );
       }
     },
 
     closeAddonDownload: () => {
-      const { addon, stage } = get().addonDownload;
+      const { stage } = get().addonDownload;
       if (stage !== 'confirm') return;
-      const shouldNotifyBackend = Boolean(
-        addon === 'opencode' && pendingDownload?.notifyBackendOnCancel
-      );
-      if (shouldNotifyBackend) {
-        void api.decideOpenCodeDownload(false).catch(() => undefined);
-      }
       finishDownloadPrompt(false);
     },
 
@@ -1332,7 +1313,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       if (!session) throw new Error('无活动课堂');
       const startedAt = performance.now();
       let thinkingFinishedAt: number | null = null;
-      const detail = await withOpenCodeDownload(() => api.streamExplainSegment(session.id, segmentId, {
+      const detail = await api.streamExplainSegment(session.id, segmentId, {
         onThinkingDelta: (delta) => {
           callbacks?.onThinkingDelta?.(delta);
         },
@@ -1342,7 +1323,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           }
           callbacks?.onStageChange?.(stage);
         },
-      }));
+      });
       const enrichedDetail: SegmentDetailedExplanation = detail.thinking
         ? {
             ...detail,
@@ -1403,7 +1384,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       let streamedThinking = '';
 
       try {
-        const aiReply = await withOpenCodeDownload(() => api.streamChatMessage(session.id, trimmed, {
+        const aiReply = await api.streamChatMessage(session.id, trimmed, {
           attachmentIds,
           onThinkingDelta: (delta) => {
             streamedThinking += delta;
@@ -1447,7 +1428,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               };
             });
           },
-        }));
+        });
 
         const finalThinking = aiReply.thinking ?? (streamedThinking.trim() || undefined);
         const finalThinkingSec = finalThinking
@@ -1508,41 +1489,12 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       const cfg = settings?.llmProviders[providerId];
       if (!settings || !cfg) return [];
       try {
-        const models = await withOpenCodeDownload(() => api.fetchProviderModels({
+        const models = await api.fetchProviderModels({
           providerId,
           protocol: cfg.protocol,
           baseUrl: cfg.baseUrl,
           apiKey: cfg.apiKey,
-        }));
-        if (providerId === OPENCODE_FREE_PROVIDER_ID) {
-          set((state) => {
-            if (!state.settings) return state;
-            const current = state.settings;
-            const routing = { ...current.featureRouting };
-            for (const key of Object.keys(routing) as Array<keyof typeof routing>) {
-              const binding = routing[key];
-              if (binding.providerId === providerId && !models.includes(binding.modelId)) {
-                routing[key] = { ...binding, modelId: '' };
-              }
-            }
-            return {
-              settings: {
-                ...current,
-                featureRouting: routing,
-                llmProviders: {
-                  ...current.llmProviders,
-                  [providerId]: {
-                    ...current.llmProviders[providerId],
-                    availableModels: models,
-                    lastFetchedAt: new Date().toISOString(),
-                  },
-                },
-              },
-            };
-          });
-          showNotice('info', `已获取 ${models.length} 个 OpenCode 免费模型`);
-          return models;
-        }
+        });
         await get().updateSettings((prev) => {
           const firstModel = models[0] ?? '';
           const nextRouting = { ...prev.featureRouting };
@@ -1551,7 +1503,6 @@ export const useAppStore = create<AppStoreState>((set, get) => {
               const binding = nextRouting[key];
               const assignedProvider = prev.llmProviders[binding.providerId];
               const assignedUnconfigured =
-                binding.providerId !== OPENCODE_FREE_PROVIDER_ID &&
                 !binding.modelId &&
                 !assignedProvider?.apiKey.trim() &&
                 (assignedProvider?.availableModels.length ?? 0) === 0;
@@ -1645,7 +1596,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     streamGenerateStudyNote: async (sessionId, callbacks) => {
-      const note = await withOpenCodeDownload(() => api.streamSessionNotes(sessionId, callbacks));
+      const note = await api.streamSessionNotes(sessionId, callbacks);
       if (get().activeSession?.id === sessionId) {
         set({ studyNote: note });
       }
@@ -1653,7 +1604,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     generateSessionFlashcards: async (sessionId) => {
-      const cards = await withOpenCodeDownload(() => api.generateFlashcards(sessionId));
+      const cards = await api.generateFlashcards(sessionId);
       if (get().activeSession?.id === sessionId) {
         set({ flashcards: cards });
       }
@@ -1798,8 +1749,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           title: options.title,
           folderId: get().currentFolderId,
         },
-        onProgress,
-        () => { void askToDownload('opencode', true); }
+        onProgress
       );
       classroomSocket.connect(payload.session.id, handleServerEvent);
       set((state) => ({
@@ -2202,7 +2152,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       set((state) => (state.stickyNoteJumpRequest ? { stickyNoteJumpRequest: null } : state));
     },
 
-    quickNoteAtUtterance: async (utterance) => {
+    quickNoteAtUtterance: async (utterance, options) => {
       const session = get().activeSession;
       if (!session) return;
       const sec = Math.max(0, Math.floor(utterance.startTimeMs / 1000));
@@ -2220,7 +2170,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
       const token = `${formatStickyBracket(sec)} `;
       const openNotes = existingNotes.filter((n) => n.isOpen);
-      if (openNotes.length === 0) {
+      if (options?.forceNew || openNotes.length === 0) {
         const created = await get().createStickyNote({ content: token });
         if (created) {
           get().focusStickyNoteTimestamp(created.id, sec, 0);
@@ -2238,7 +2188,41 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       await get().persistStickyNote(topNote.id, { content: nextContent });
     },
 
+    setPreviewFloatingOverlayOpen: (open) => set({ previewFloatingOverlayOpen: open }),
+
+    syncSessionMessagesFromRemote: async (sessionId) => {
+      const active = get().activeSession;
+      if (!active || active.id !== sessionId) return;
+      try {
+        const ws = await api.getSessionWorkspace(sessionId);
+        if (get().activeSession?.id !== sessionId) return;
+        set({ messages: ws.messages });
+      } catch {
+        // Ignore silent background sync errors
+      }
+    },
+
     toggleMiniOverlayWindow: async () => {
+      const androidBridge = getAndroidBridge();
+      if (androidBridge?.toggleFloatingOverlay) {
+        if (!androidBridge.isFloatingOverlayShowing?.()) {
+          const granted = await requestAndroidOverlayPermission();
+          if (!granted) {
+            showNotice('error', '请在系统设置中开启「显示在其他应用上层」权限后再启用悬浮小窗');
+            return;
+          }
+        }
+        const nowOpen = androidBridge.toggleFloatingOverlay();
+        showNotice('info', nowOpen ? '已开启全局悬浮小窗，切至网课应用时可随时查看与提问' : '已关闭全局悬浮小窗');
+        return;
+      }
+
+      if (isAndroidPlatform()) {
+        const next = !get().previewFloatingOverlayOpen;
+        set({ previewFloatingOverlayOpen: next });
+        return;
+      }
+
       const winAny = window as unknown as {
         pywebview?: { api?: { toggle_mini_overlay?: () => Promise<boolean> } };
       };
@@ -2249,7 +2233,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
       const popup = window.open(
         `${window.location.origin}${window.location.pathname}?mode=mini`,
         'zhiling-mini-overlay',
-        'popup=yes,width=580,height=260,left=80,top=80'
+        'popup=yes,width=580,height=280,left=80,top=80'
       );
       if (!popup) {
         showNotice('error', '浏览器拦截了悬浮小窗，请允许当前站点弹出窗口');

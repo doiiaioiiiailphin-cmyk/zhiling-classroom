@@ -11,6 +11,7 @@ import {
   type OverlayRemoteCommand,
   type OverlaySyncSnapshot,
 } from './components/overlay/MiniOverlayView';
+import { MobilePreviewFloatingOverlay } from './components/overlay/MobilePreviewFloatingOverlay';
 import { SettingsModal } from './components/settings/SettingsModal';
 import { AddonDownloadModal } from './components/ui/AddonDownloadModal';
 import { NoticeToast } from './components/ui/NoticeToast';
@@ -63,6 +64,12 @@ function buildOverlaySnapshot(): OverlaySyncSnapshot {
           text: state.livePartialUtterance.text,
         }
       : null,
+    recentMessages: state.messages.slice(-24).map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      thinking: m.thinking,
+    })),
   };
 }
 
@@ -71,6 +78,8 @@ export const App: React.FC = () => {
   const isLoadingHome = useAppStore((s) => s.isLoadingHome);
   const windowMaximized = useAppStore((s) => s.windowMaximized);
   const windowMotion = useAppStore((s) => s.windowMotion);
+  const previewFloatingOverlayOpen = useAppStore((s) => s.previewFloatingOverlayOpen);
+  const setPreviewFloatingOverlayOpen = useAppStore((s) => s.setPreviewFloatingOverlayOpen);
   const setWindowMaximized = useAppStore((s) => s.setWindowMaximized);
   const setWindowMotion = useAppStore((s) => s.setWindowMotion);
   const initialize = useAppStore((s) => s.initialize);
@@ -78,6 +87,9 @@ export const App: React.FC = () => {
 
   const [inDesktopShell, setInDesktopShell] = useState<boolean>(() => isDesktopShell());
   const [isFlipping, setIsFlipping] = useState(false);
+  const [previewOverlaySnap, setPreviewOverlaySnap] = useState<OverlaySyncSnapshot>(() =>
+    buildOverlaySnapshot()
+  );
   const shellRef = useRef<HTMLDivElement | null>(null);
   const flipBusyRef = useRef(false);
   const flipTimerRef = useRef<number | null>(null);
@@ -193,6 +205,11 @@ export const App: React.FC = () => {
         case 'bookmark-confused':
           void st.markConfusedNow();
           break;
+        case 'chat-updated':
+          if (cmd.sessionId) {
+            void st.syncSessionMessagesFromRemote(cmd.sessionId);
+          }
+          break;
       }
     };
 
@@ -208,6 +225,7 @@ export const App: React.FC = () => {
       const lastUtt = lastSeg && lastSeg.utterances.length > 0
         ? lastSeg.utterances[lastSeg.utterances.length - 1]
         : null;
+      const lastMsg = s.messages.length > 0 ? s.messages[s.messages.length - 1] : null;
       return [
         s.activeSession?.id ?? '',
         s.activeSession?.status ?? '',
@@ -217,6 +235,9 @@ export const App: React.FC = () => {
         lastUtt?.id ?? '',
         lastUtt?.refinedText?.length ?? 0,
         s.livePartialUtterance?.text ?? '',
+        s.messages.length,
+        lastMsg?.id ?? '',
+        lastMsg?.content?.length ?? 0,
       ].join('|');
     };
 
@@ -229,6 +250,7 @@ export const App: React.FC = () => {
         lastSnapSig = getSnapshotSig();
         lastSnapSentAt = Date.now();
         const snap = buildOverlaySnapshot();
+        setPreviewOverlaySnap(snap);
         bc?.postMessage({ type: 'snapshot', snapshot: snap });
         classroomSocket.sendOverlaySnapshot(snap);
       };
@@ -294,7 +316,12 @@ export const App: React.FC = () => {
         void st.toggleRecording();
       }
     };
+    const handlePreviewOverlayCmd = (evt: Event) => {
+      const detail = (evt as CustomEvent<OverlayRemoteCommand>).detail;
+      if (detail) handleRemoteOverlayCommand(detail);
+    };
     window.addEventListener('zhiling:alert-resume-recording', handleAlertResume);
+    window.addEventListener('zhiling:preview-overlay-cmd', handlePreviewOverlayCmd);
 
     const unsubStore = useAppStore.subscribe(() => {
       publishSnapshot(false);
@@ -307,6 +334,7 @@ export const App: React.FC = () => {
         snapTimer = null;
       }
       window.removeEventListener('zhiling:alert-resume-recording', handleAlertResume);
+      window.removeEventListener('zhiling:preview-overlay-cmd', handlePreviewOverlayCmd);
       unsubStore();
       bc?.close();
       disconnectDesktop();
@@ -524,6 +552,12 @@ export const App: React.FC = () => {
     const handler = (): boolean => {
       const s = useAppStore.getState();
       if (s.settingsOpen) {
+        const settingsBack = (
+          window as unknown as { __zhilingHandleSettingsBack?: () => boolean }
+        ).__zhilingHandleSettingsBack;
+        if (settingsBack?.()) {
+          return true;
+        }
         s.setSettingsOpen(false);
         return true;
       }
@@ -536,8 +570,22 @@ export const App: React.FC = () => {
         return true;
       }
       if (s.activeView === 'classroom') {
+        const win = window as unknown as {
+          __zhilingHandleUtteranceSheetBack?: () => boolean;
+          __zhilingHandleClassroomOverlayBack?: () => boolean;
+          __zhilingHandleClassroomChatBack?: () => boolean;
+        };
+        if (win.__zhilingHandleUtteranceSheetBack?.()) {
+          return true;
+        }
+        if (win.__zhilingHandleClassroomOverlayBack?.()) {
+          return true;
+        }
         if (s.stickyNotes.some((n) => n.isOpen)) {
           void s.setAllStickyNotesOpen(false);
+          return true;
+        }
+        if (win.__zhilingHandleClassroomChatBack?.()) {
           return true;
         }
         void s.leaveClassroom();
@@ -626,6 +674,11 @@ export const App: React.FC = () => {
       <SessionNotesExportModal />
       <ImportAudioModal />
       <AddonDownloadModal />
+      <MobilePreviewFloatingOverlay
+        open={previewFloatingOverlayOpen}
+        snapshot={previewOverlaySnap}
+        onClose={() => setPreviewFloatingOverlayOpen(false)}
+      />
       <UpdateCornerPopup />
       <NoticeToast />
     </div>

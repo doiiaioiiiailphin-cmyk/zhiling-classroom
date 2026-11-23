@@ -249,3 +249,69 @@ html.mini-overlay-mode #root {
   background-color: #1456f0;
   animation: streamCaretPulse 0.85s ease-in-out infinite;
 }
+
+/* 移动端独立设置页与嵌套子页面原生推入/返回过渡动画 */
+@keyframes mobileSettingsPageIn {
+  from {
+    opacity: 0;
+    transform: translate3d(20px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes mobileSettingsRootBack {
+  from {
+    opacity: 0.72;
+    transform: translate3d(-12px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.animate-mobile-page-in {
+  animation: mobileSettingsPageIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-mobile-root-back {
+  animation: mobileSettingsRootBack 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 移动端长按转写记录操作抽屉动效与系统长按菜单抑制 */
+.mobile-longpress-target {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+@keyframes mobileSheetBackdropIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes mobileSheetSlideUp {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 32px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.animate-sheet-backdrop {
+  animation: mobileSheetBackdropIn 0.2s ease-out both;
+}
+
+.animate-sheet-up {
+  animation: mobileSheetSlideUp 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}

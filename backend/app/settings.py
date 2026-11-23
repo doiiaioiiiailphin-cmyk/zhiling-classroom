@@ -14,16 +14,14 @@ from .schemas import ASRModelsRequest, AppSettings, DesktopHotkeys, LLMProvider,
 
 
 OPENCODE_FREE_PROVIDER_ID = "opencode-free-bridge"
-OPENCODE_FREE_BASE_URL = "builtin://opencode-free-bridge"
-OPENCODE_FREE_PRESET = (OPENCODE_FREE_PROVIDER_ID, "OpenCode 免费模型", "openai-compatible", OPENCODE_FREE_BASE_URL)
+DEFAULT_LLM_PROVIDER_ID = "deepseek"
 
 
 LLM_PRESETS = (
-    OPENCODE_FREE_PRESET,
+    ("deepseek", "DeepSeek", "openai-compatible", "https://api.deepseek.com/v1"),
     ("openai", "OpenAI", "openai", "https://api.openai.com/v1"),
     ("anthropic", "Anthropic", "anthropic", "https://api.anthropic.com"),
     ("gemini", "Google Gemini", "gemini", "https://generativelanguage.googleapis.com"),
-    ("deepseek", "DeepSeek", "openai-compatible", "https://api.deepseek.com/v1"),
     ("aliyun", "阿里云百炼", "openai-compatible", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
     ("zhipu", "智谱 GLM", "openai-compatible", "https://open.bigmodel.cn/api/paas/v4"),
     ("moonshot", "月之暗面 Kimi", "openai-compatible", "https://api.moonshot.cn/v1"),
@@ -113,24 +111,38 @@ def llm_preset(preset) -> LLMProvider:
     )
 
 
-def migrate_opencode_defaults(settings: AppSettings):
-    if OPENCODE_FREE_PROVIDER_ID in settings.llm_providers:
-        return
-    settings.llm_providers[OPENCODE_FREE_PROVIDER_ID] = llm_preset(OPENCODE_FREE_PRESET)
-    openai = settings.llm_providers.get("openai")
-    if settings.selected_llm_provider_id == "openai" and openai and not (
-        openai.api_key.strip() or openai.last_fetched_at
+def migrate_remove_opencode_defaults(settings: AppSettings):
+    """移除旧版默认内置的 opencode-free-bridge 模型源；若用户未自行配置模型，自动将可开关 AI 功能置为关闭。"""
+    settings.llm_providers.pop(OPENCODE_FREE_PROVIDER_ID, None)
+    configured_id = next(
+        (
+            pid
+            for pid, cfg in settings.llm_providers.items()
+            if cfg.api_key.strip() or (cfg.is_custom and cfg.base_url.strip())
+        ),
+        None,
+    )
+    fallback_id = configured_id or (
+        DEFAULT_LLM_PROVIDER_ID
+        if DEFAULT_LLM_PROVIDER_ID in settings.llm_providers
+        else next(iter(settings.llm_providers), DEFAULT_LLM_PROVIDER_ID)
+    )
+    if (
+        settings.selected_llm_provider_id == OPENCODE_FREE_PROVIDER_ID
+        or settings.selected_llm_provider_id not in settings.llm_providers
     ):
-        settings.selected_llm_provider_id = OPENCODE_FREE_PROVIDER_ID
-    for feature, previous_id in LEGACY_DEFAULT_LLM_ROUTING.items():
+        settings.selected_llm_provider_id = fallback_id
+
+    for feature in LEGACY_DEFAULT_LLM_ROUTING:
         binding = settings.feature_routing.binding(feature)
-        provider = settings.llm_providers.get(previous_id)
-        if not provider or binding.provider_id != previous_id or provider.api_key.strip() or provider.last_fetched_at:
-            continue
-        seeded = binding.model_id in provider.available_models and is_legacy_seed(previous_id, provider.available_models)
-        if not binding.model_id or seeded:
-            binding.provider_id = OPENCODE_FREE_PROVIDER_ID
+        if (
+            binding.provider_id == OPENCODE_FREE_PROVIDER_ID
+            or binding.provider_id not in settings.llm_providers
+        ):
+            binding.provider_id = fallback_id
             binding.model_id = ""
+            if feature != "chat":
+                binding.enabled = False
 
 
 def default_settings() -> AppSettings:
@@ -148,10 +160,14 @@ def default_settings() -> AppSettings:
     asr["custom-asr"]["isCustom"] = True
 
     return AppSettings.model_validate({
-        "selectedLlmProviderId": OPENCODE_FREE_PROVIDER_ID,
+        "selectedLlmProviderId": DEFAULT_LLM_PROVIDER_ID,
         "llmProviders": llm,
         "featureRouting": {
-            feature: dict(enabled=True, providerId=OPENCODE_FREE_PROVIDER_ID, modelId="")
+            feature: dict(
+                enabled=(feature == "chat"),
+                providerId=DEFAULT_LLM_PROVIDER_ID,
+                modelId="",
+            )
             for feature in LEGACY_DEFAULT_LLM_ROUTING
         },
         "selectedAsrProviderId": "builtin-free-asr",
@@ -265,7 +281,7 @@ class SettingsStore:
                 "toggleMiniOverlay": hotkeys.get("toggleMiniOverlay", default_hk["toggleMiniOverlay"]),
             }
         settings = AppSettings.model_validate(payload)
-        migrate_opencode_defaults(settings)
+        migrate_remove_opencode_defaults(settings)
         return settings
 
     async def initialize(self):
@@ -278,10 +294,10 @@ class SettingsStore:
                 settings = self.decode(row.settings_json)
                 if schema_version == 0:
                     remove_legacy_catalogs(settings)
-                if schema_version < 2 or not row.settings_json.startswith(self.prefix):
+                if schema_version < 3 or not row.settings_json.startswith(self.prefix):
                     row.settings_json = self.encode(settings)
-            if schema_version < 2:
-                await session.execute(text("PRAGMA user_version = 2"))
+            if schema_version < 3:
+                await session.execute(text("PRAGMA user_version = 3"))
 
     async def get(self) -> AppSettings:
         async with self.db.sessions() as session:
@@ -292,10 +308,8 @@ class SettingsStore:
         async with self.db.write() as session:
             row = await session.get(SettingsRow, 1)
             previous = self.decode(row.settings_json)
-            migrate_opencode_defaults(settings)
+            migrate_remove_opencode_defaults(settings)
             remove_legacy_catalogs(settings, previous)
-            # Only successful backend catalog requests update the built-in provider's model list.
-            settings.llm_providers[OPENCODE_FREE_PROVIDER_ID] = previous.llm_providers[OPENCODE_FREE_PROVIDER_ID]
             row.settings_json = self.encode(settings)
         return settings
 
@@ -303,7 +317,9 @@ class SettingsStore:
         async with self.db.write() as session:
             row = await session.get(SettingsRow, 1)
             settings = self.decode(row.settings_json)
-            provider = settings.llm_providers[OPENCODE_FREE_PROVIDER_ID]
+            provider = settings.llm_providers.get(OPENCODE_FREE_PROVIDER_ID)
+            if provider is None:
+                return
             provider.available_models = models
             provider.last_fetched_at = iso_utc(datetime.now(UTC))
             for _, binding in settings.feature_routing:

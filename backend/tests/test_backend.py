@@ -100,10 +100,13 @@ class BackendTests(unittest.TestCase):
             response = client.get("/api/v1/settings")
             self.assertEqual(response.headers["Cache-Control"], "no-store")
             settings = response.json()["data"]
-            self.assertEqual(len(settings["llmProviders"]), 13)
-            self.assertEqual(settings["selectedLlmProviderId"], "opencode-free-bridge")
-            self.assertEqual(settings["llmProviders"]["opencode-free-bridge"]["name"], "OpenCode 免费模型")
-            self.assertTrue(all(route["providerId"] == "opencode-free-bridge" for route in settings["featureRouting"].values()))
+            self.assertEqual(len(settings["llmProviders"]), 12)
+            self.assertNotIn("opencode-free-bridge", settings["llmProviders"])
+            self.assertEqual(settings["selectedLlmProviderId"], "deepseek")
+            self.assertTrue(all(route["providerId"] == "deepseek" for route in settings["featureRouting"].values()))
+            self.assertTrue(settings["featureRouting"]["chat"]["enabled"])
+            for auto_feat in ("sentenceCorrection", "resegmentation", "keyTermHighlight", "bubbleExplanation"):
+                self.assertFalse(settings["featureRouting"][auto_feat]["enabled"])
             self.assertEqual(len(settings["asrProviders"]), 10)
             self.assertEqual(settings["selectedAsrProviderId"], "builtin-free-asr")
             self.assertEqual(settings["llmProviders"]["openai"]["apiKey"], "")
@@ -128,15 +131,26 @@ class BackendTests(unittest.TestCase):
     def test_migrate_old_model_seeds_without_removing_fetched_catalogs_or_keys(self):
         with self.client() as client:
             settings = client.get("/api/v1/settings").json()["data"]
-            settings["llmProviders"].pop("opencode-free-bridge")
-            settings["selectedLlmProviderId"] = "openai"
-            settings["featureRouting"]["chat"]["providerId"] = "anthropic"
+            # Simulate an older DB still storing opencode-free-bridge
+            settings["llmProviders"]["opencode-free-bridge"] = {
+                "providerId": "opencode-free-bridge",
+                "name": "OpenCode 免费模型",
+                "protocol": "openai-compatible",
+                "baseUrl": "builtin://opencode-free-bridge",
+                "apiKey": "",
+                "availableModels": [],
+            }
+            settings["selectedLlmProviderId"] = "opencode-free-bridge"
+            settings["featureRouting"]["chat"]["providerId"] = "opencode-free-bridge"
+            settings["featureRouting"]["sentenceCorrection"].update(
+                enabled=True, providerId="opencode-free-bridge", modelId=""
+            )
             settings["llmProviders"]["openai"].update(
                 apiKey="saved-llm-key",
                 availableModels=["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o4-mini"],
             )
-            settings["featureRouting"]["resegmentation"].update(providerId="openai", modelId="gpt-4.1-mini")
-            settings["featureRouting"]["bubbleExplanation"].update(providerId="openai", modelId="manually-configured")
+            settings["featureRouting"]["resegmentation"].update(enabled=True, providerId="openai", modelId="gpt-4.1-mini")
+            settings["featureRouting"]["bubbleExplanation"].update(enabled=True, providerId="openai", modelId="manually-configured")
             settings["llmProviders"]["gemini"].update(
                 availableModels=["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
                 lastFetchedAt="2026-11-15T10:00:00Z",
@@ -156,9 +170,10 @@ class BackendTests(unittest.TestCase):
 
         with self.client() as client:
             migrated = client.get("/api/v1/settings").json()["data"]
+            self.assertNotIn("opencode-free-bridge", migrated["llmProviders"])
             self.assertEqual(migrated["selectedLlmProviderId"], "openai")
-            self.assertEqual(migrated["featureRouting"]["chat"]["providerId"], "opencode-free-bridge")
-            self.assertEqual(migrated["llmProviders"]["opencode-free-bridge"]["availableModels"], [])
+            self.assertEqual(migrated["featureRouting"]["chat"]["providerId"], "openai")
+            self.assertFalse(migrated["featureRouting"]["sentenceCorrection"]["enabled"])
             self.assertEqual(migrated["llmProviders"]["openai"]["availableModels"], [])
             self.assertEqual(migrated["llmProviders"]["openai"]["apiKey"], "saved-llm-key")
             self.assertEqual(migrated["featureRouting"]["resegmentation"]["modelId"], "")
@@ -168,10 +183,10 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(migrated["asrProviders"]["elevenlabs"]["selectedModelId"], "")
             self.assertEqual(migrated["asrProviders"]["elevenlabs"]["apiKey"], "saved-speech-key")
             self.assertEqual(migrated["asrProviders"]["deepgram"], settings["asrProviders"]["deepgram"])
-            restored = client.put("/api/v1/settings", json=settings).json()["data"]
+            restored = client.put("/api/v1/settings", json=migrated).json()["data"]
             self.assertEqual(restored, migrated)
         with closing(sqlite3.connect(self.root / "classroom.sqlite3")) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_asr_catalog_that_matches_previous_seed_is_preserved_after_real_fetch(self):
         model_ids = ["gpt-4o-transcribe-diarize", "gpt-4o-transcribe", "whisper-1"]
@@ -206,7 +221,9 @@ class BackendTests(unittest.TestCase):
             repo = client.app.state.repo
             settings = client.get("/api/v1/settings").json()["data"]
             settings["llmProviders"]["openai"]["apiKey"] = "native-test"
-            settings["featureRouting"]["bubbleExplanation"].update(providerId="openai", modelId="explanation-model")
+            settings["featureRouting"]["bubbleExplanation"].update(
+                enabled=True, providerId="openai", modelId="explanation-model"
+            )
             settings["featureRouting"]["chat"].update(providerId="openai", modelId="chat-model")
             self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
             sid = self.create_session(client)
@@ -290,8 +307,12 @@ class BackendTests(unittest.TestCase):
                 baseUrl="https://opencode.ai/zen/go/v1",
                 apiKey="stream-test-key",
             )
-            settings["featureRouting"]["keyTermHighlight"].update(providerId="custom", modelId="highlight-model")
-            settings["featureRouting"]["bubbleExplanation"].update(providerId="custom", modelId="explain-model")
+            settings["featureRouting"]["keyTermHighlight"].update(
+                enabled=True, providerId="custom", modelId="highlight-model"
+            )
+            settings["featureRouting"]["bubbleExplanation"].update(
+                enabled=True, providerId="custom", modelId="explain-model"
+            )
             settings["featureRouting"]["chat"].update(providerId="custom", modelId="chat-model")
             self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
 
@@ -395,7 +416,7 @@ class BackendTests(unittest.TestCase):
                 ("resegmentation", "segment"),
                 ("keyTermHighlight", "highlight"),
             ]:
-                settings["featureRouting"][feature].update(providerId="openai", modelId=model)
+                settings["featureRouting"][feature].update(enabled=True, providerId="openai", modelId=model)
             self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
 
             sid = self.create_session(client)
@@ -460,7 +481,7 @@ class BackendTests(unittest.TestCase):
                 ("keyTermHighlight", "highlight"),
                 ("chat", "chat"),
             ]:
-                settings["featureRouting"][feature].update(providerId="openai", modelId=model)
+                settings["featureRouting"][feature].update(enabled=True, providerId="openai", modelId=model)
             self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
 
             sid = self.create_session(client)
@@ -600,7 +621,7 @@ class BackendTests(unittest.TestCase):
                 for feature, model in [
                     ("sentenceCorrection", "correct"), ("resegmentation", "segment"), ("keyTermHighlight", "highlight"),
                 ]:
-                    settings["featureRouting"][feature].update(providerId="openai", modelId=model)
+                    settings["featureRouting"][feature].update(enabled=True, providerId="openai", modelId=model)
                 self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
                 sid = self.create_session(client)
                 with client.websocket_connect(f"ws://localhost/ws/v1/sessions/{sid}/stream") as socket:
@@ -779,3 +800,55 @@ class BackendTests(unittest.TestCase):
             js_text = js_resp.content.decode("utf-8")
             self.assertNotIn('WebRtcAec3Wasm="data:', js_text)
             self.assertIn("globalThis.WebRtcAec3 = WebRtcAec3;", js_text)
+
+    def test_unconfigured_llm_keeps_auto_ai_inactive_and_prompts_on_manual_ai(self):
+        upstream_calls: list[str] = []
+
+        def upstream(request: httpx.Request):
+            upstream_calls.append(str(request.url))
+            return httpx.Response(500, json={"error": "should not be called"})
+
+        with self.client(httpx.MockTransport(upstream)) as client:
+            repo = client.app.state.repo
+            pipeline = client.app.state.streams.pipeline
+            settings = client.get("/api/v1/settings").json()["data"]
+            self.assertNotIn("opencode-free-bridge", settings["llmProviders"])
+            self.assertEqual(settings["selectedLlmProviderId"], "deepseek")
+            self.assertFalse(settings["featureRouting"]["sentenceCorrection"]["enabled"])
+            self.assertFalse(settings["featureRouting"]["resegmentation"]["enabled"])
+            self.assertFalse(settings["featureRouting"]["keyTermHighlight"]["enabled"])
+            self.assertFalse(settings["featureRouting"]["bubbleExplanation"]["enabled"])
+
+            # 即使手动打开开关但未配置模型密钥，后台自动流水线也应静默跳过，不触发报错或上游请求
+            for feature in ("sentenceCorrection", "resegmentation", "keyTermHighlight"):
+                settings["featureRouting"][feature]["enabled"] = True
+            self.assertEqual(client.put("/api/v1/settings", json=settings).status_code, 200)
+
+            sid = self.create_session(client)
+            u1, _ = client.portal.call(repo.save_final, sid, "0", "嗯，今天讲解线性代数特征值", 0, 1200)
+            published: list[tuple[str, dict]] = []
+
+            async def capture_publish(_sid: str, event_type: str, data: dict):
+                published.append((event_type, data))
+
+            async def submit_and_drain(uid: str):
+                pipeline.submit(sid, uid)
+                await pipeline.shutdown()
+
+            orig_publish = pipeline.publish
+            pipeline.publish = capture_publish
+            try:
+                client.portal.call(submit_and_drain, u1.utterance.id)
+            finally:
+                pipeline.publish = orig_publish
+
+            self.assertEqual(upstream_calls, [])
+            self.assertEqual(published, [])
+
+            # 手动触发问答时给出清晰配置指引
+            chat_resp = client.post(f"/api/v1/sessions/{sid}/chat", json={"content": "总结一下"})
+            self.assertEqual(chat_resp.status_code, 400)
+            err = chat_resp.json()["error"]
+            self.assertEqual(err["code"], "MODEL_NOT_CONFIGURED")
+            self.assertIn("设置", err["message"])
+            self.assertEqual(upstream_calls, [])
