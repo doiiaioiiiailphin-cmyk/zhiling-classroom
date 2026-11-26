@@ -551,6 +551,15 @@ export const App: React.FC = () => {
     if (!isAndroid || IS_MINI_OVERLAY_MODE) return;
     const handler = (): boolean => {
       const s = useAppStore.getState();
+      if (
+        s.appUpdate.popupVisible &&
+        s.appUpdate.status !== 'downloading' &&
+        s.appUpdate.status !== 'verifying' &&
+        s.appUpdate.status !== 'applying'
+      ) {
+        s.dismissUpdatePopup();
+        return true;
+      }
       if (s.settingsOpen) {
         const settingsBack = (
           window as unknown as { __zhilingHandleSettingsBack?: () => boolean }

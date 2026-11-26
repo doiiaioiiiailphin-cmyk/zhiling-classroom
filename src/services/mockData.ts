@@ -25,6 +25,7 @@ import type {
   StickyNoteCreateInput,
   StickyNoteItem,
   StickyNotePatchInput,
+  UtteranceDeleteResult,
   UtteranceItem,
   UtterancePatch,
 } from '../types/domain';
@@ -960,6 +961,60 @@ export const mockAdapter = {
       }
     }
     throw new Error('未找到对应转写句');
+  },
+
+  async deleteUtterances(
+    sessionId: string,
+    utteranceIds: string[]
+  ): Promise<UtteranceDeleteResult> {
+    const db = loadDb();
+    const ws = db.workspaces[sessionId];
+    if (!ws) throw new Error('未找到对应课堂');
+    const idSet = new Set(utteranceIds.map((id) => id.trim()).filter(Boolean));
+    const deletedIds: string[] = [];
+    const imageSegIds = new Set(
+      (ws.attachments ?? [])
+        .filter((att) => att.kind !== 'material' && att.segmentId)
+        .map((att) => att.segmentId as string)
+    );
+
+    const nextSegments: KnowledgeSegment[] = [];
+    for (const seg of ws.segments) {
+      const kept = seg.utterances.filter((u) => {
+        if (idSet.has(u.id)) {
+          deletedIds.push(u.id);
+          return false;
+        }
+        return true;
+      });
+      const removedInSeg = kept.length !== seg.utterances.length;
+      if (kept.length === 0 && !imageSegIds.has(seg.id)) {
+        continue;
+      }
+      if (removedInSeg) {
+        const nextHighlights = seg.highlights.filter((hl) =>
+          kept.some((u) => u.rawText.includes(hl.term) || u.refinedText.includes(hl.term))
+        );
+        nextSegments.push({
+          ...seg,
+          utterances: kept,
+          highlights: nextHighlights,
+          detailedExplanation: undefined,
+        });
+      } else {
+        nextSegments.push(seg);
+      }
+    }
+
+    ws.segments = nextSegments;
+    const session = db.sessions.find((s) => s.id === sessionId);
+    if (session) session.updatedAt = new Date().toISOString();
+    saveDb(db);
+    return {
+      deletedIds,
+      deletedCount: deletedIds.length,
+      segments: ws.segments,
+    };
   },
 
   async bookmarkNow(

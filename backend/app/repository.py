@@ -971,6 +971,69 @@ class Repository:
             await db.flush()
             return segment.id, utterance_item(utterance, speaker.label), pruned
 
+    async def delete_utterances(
+        self, session_id: str, utterance_ids: list[str], *, require_all: bool = False,
+    ) -> tuple[list[str], list[KnowledgeSegment]]:
+        unique_ids = list(dict.fromkeys(uid.strip() for uid in utterance_ids if uid and uid.strip()))
+        if not unique_ids:
+            raise AppError(400, "EMPTY_UTTERANCE_IDS", "请至少选择一条要删除的转写记录")
+        async with self.db.write() as db:
+            session = await require(db, ClassSession, session_id, "课堂")
+            found_map: dict[str, str] = {}
+            for start in range(0, len(unique_ids), 400):
+                chunk = unique_ids[start:start + 400]
+                rows = await db.execute(
+                    select(Utterance.id, Utterance.segment_id).where(
+                        Utterance.session_id == session_id,
+                        Utterance.id.in_(chunk),
+                    )
+                )
+                for uid, seg_id in rows:
+                    found_map[uid] = seg_id
+
+            if require_all and len(found_map) < len(unique_ids):
+                raise missing("转写")
+
+            deleted_ids = [uid for uid in unique_ids if uid in found_map]
+            if not deleted_ids:
+                return [], await self._segments(db, session_id)
+
+            affected_seg_ids = list(dict.fromkeys(found_map[uid] for uid in deleted_ids))
+            for start in range(0, len(deleted_ids), 400):
+                chunk = deleted_ids[start:start + 400]
+                await db.execute(
+                    delete(Utterance).where(
+                        Utterance.session_id == session_id,
+                        Utterance.id.in_(chunk),
+                    )
+                )
+            await db.flush()
+
+            for seg_id in affected_seg_ids:
+                segment = await db.get(Segment, seg_id)
+                if segment is None or segment.session_id != session_id:
+                    continue
+                remaining_utterances = await db.scalar(
+                    select(func.count(Utterance.id)).where(Utterance.segment_id == seg_id)
+                ) or 0
+                remaining_images = await db.scalar(
+                    select(func.count(SessionAttachment.id)).where(
+                        SessionAttachment.session_id == session_id,
+                        SessionAttachment.segment_id == seg_id,
+                        SessionAttachment.kind != "material",
+                    )
+                ) or 0
+                if remaining_utterances == 0 and remaining_images == 0:
+                    await db.delete(segment)
+                else:
+                    self.invalidate_explanation(segment)
+                    await self._prune_highlights(db, seg_id)
+
+            session.updated_at = now()
+            await db.flush()
+            segments = await self._segments(db, session_id)
+            return deleted_ids, segments
+
     async def bookmark_now(
         self, session_id: str, req: BookmarkNowRequest,
     ) -> tuple[str, UtteranceItem, KnowledgeSegment | None]:

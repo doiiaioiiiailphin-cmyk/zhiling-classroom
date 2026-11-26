@@ -17,7 +17,7 @@ from .schemas import (
     NativeAudioDevices, SearchHitItem, SegmentExplanation, SessionAttachmentItem, SessionCard, SessionCreate,
     SessionExportRequest, SessionPatch, SpeakerRename, StickyNoteBatchOpenPatch, StickyNoteCreate,
     StickyNoteItem, StickyNotePatch, UpdateApplyResult, UpdateCheckResult,
-    UtteranceItem, UtterancePatch, Workspace,
+    UtteranceBatchDeleteRequest, UtteranceDeleteResult, UtteranceItem, UtterancePatch, Workspace,
 )
 from .services.exporter import export_session_document
 from .settings import same_asr_connection
@@ -194,6 +194,41 @@ async def patch_utterance(
             sessionId, "highlights.updated", {"segmentId": seg_id, "highlights": [h.wire() for h in pruned]},
         )
     return Data(data=updated)
+
+
+@router.delete("/sessions/{sessionId}/utterances/{utteranceId}", response_model_exclude_unset=True)
+async def delete_utterance(
+    sessionId: str, utteranceId: str, request: Request, repo: Repo,
+) -> Data[UtteranceDeleteResult]:
+    async with request.app.state.ai.locks.get("transcript:" + sessionId):
+        deleted_ids, segments = await repo.delete_utterances(sessionId, [utteranceId], require_all=True)
+        await request.app.state.streams.publish(
+            sessionId, "segments.regrouped", {"segments": [s.wire() for s in segments]},
+        )
+    return Data(data=UtteranceDeleteResult(
+        deleted_ids=deleted_ids,
+        deleted_count=len(deleted_ids),
+        segments=segments,
+    ))
+
+
+@router.post("/sessions/{sessionId}/utterances/batch-delete", response_model_exclude_unset=True)
+async def batch_delete_utterances(
+    sessionId: str, body: UtteranceBatchDeleteRequest, request: Request, repo: Repo,
+) -> Data[UtteranceDeleteResult]:
+    async with request.app.state.ai.locks.get("transcript:" + sessionId):
+        deleted_ids, segments = await repo.delete_utterances(
+            sessionId, body.utterance_ids, require_all=False,
+        )
+        if deleted_ids:
+            await request.app.state.streams.publish(
+                sessionId, "segments.regrouped", {"segments": [s.wire() for s in segments]},
+            )
+    return Data(data=UtteranceDeleteResult(
+        deleted_ids=deleted_ids,
+        deleted_count=len(deleted_ids),
+        segments=segments,
+    ))
 
 
 @router.post("/sessions/{sessionId}/bookmarks/now")

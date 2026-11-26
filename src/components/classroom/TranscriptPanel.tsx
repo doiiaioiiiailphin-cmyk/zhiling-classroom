@@ -7,16 +7,22 @@ import {
   BookmarkCheck,
   BookmarkPlus,
   Check,
+  CheckSquare,
+  Copy,
   HelpCircle,
+  ListChecks,
+  Loader2,
   MessageSquarePlus,
   Pencil,
   Play,
+  Square,
   StickyNote,
   Trash2,
   UserRound,
   X,
 } from 'lucide-react';
 import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
+import { useMarqueeAutoScroll } from '../../hooks/useMarqueeAutoScroll';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import {
@@ -40,6 +46,7 @@ import type {
   SessionAttachmentItem,
   UtterancePatch,
 } from '../../types/domain';
+import { ContextMenu, type ContextMenuItem } from '../ui/ContextMenu';
 import { DraggableBottomSheet } from '../ui/DraggableBottomSheet';
 import { Modal } from '../ui/Modal';
 import { Tooltip } from '../ui/Tooltip';
@@ -69,6 +76,8 @@ interface UtteranceRowProps {
   hideDesktopHoverBar: boolean;
   /** 手机与安卓平板均支持长按记录呼出快捷操作 */
   enableLongPress: boolean;
+  isBatchMode: boolean;
+  isSelected: boolean;
   isActiveAudio: boolean;
   isFocusedTarget: boolean;
   editRequestSeq: number;
@@ -84,6 +93,16 @@ interface UtteranceRowProps {
     displayedText: string,
     anchor: { x: number; y: number }
   ) => void;
+  onOpenDesktopContextMenu: (
+    e: React.MouseEvent<HTMLDivElement>,
+    utterance: TranscriptUtterance,
+    displayedText: string
+  ) => void;
+  onRequestDeleteUtterance: (
+    utterance: TranscriptUtterance,
+    displayedText: string
+  ) => void;
+  onToggleSelect: (utteranceId: string, shiftKey: boolean) => void;
 }
 
 const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
@@ -96,6 +115,8 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     deferOffscreen,
     hideDesktopHoverBar,
     enableLongPress,
+    isBatchMode,
+    isSelected,
     isActiveAudio,
     isFocusedTarget,
     editRequestSeq,
@@ -107,6 +128,9 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     onFocusStickyAnchor,
     onQuickNoteUtterance,
     onOpenMobileActions,
+    onOpenDesktopContextMenu,
+    onRequestDeleteUtterance,
+    onToggleSelect,
   }) => {
     const [isEditingSpk, setIsEditingSpk] = useState(false);
     const [speakerDraft, setSpeakerDraft] = useState('');
@@ -157,7 +181,7 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     }, [editRequestSeq, displayedText]);
 
     const handleRowPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!enableLongPress || isEditingText || isEditingNote || isEditingSpk) return;
+      if (isBatchMode || !enableLongPress || isEditingText || isEditingNote || isEditingSpk) return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (isUtteranceInteractiveTarget(e.target)) return;
 
@@ -197,13 +221,30 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     };
 
     const handleRowContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!enableLongPress || isEditingText || isEditingNote || isEditingSpk) return;
+      if (isEditingText || isEditingNote || isEditingSpk) return;
+      if (isBatchMode) {
+        // 批量模式下由外层转写区右键菜单统一处理（删除已选 / 全选 / 退出批量删除）
+        return;
+      }
       if (isUtteranceInteractiveTarget(e.target)) return;
       e.preventDefault();
-      if (!longPressTriggeredRef.current) {
-        clearLongPressTimers();
-        onOpenMobileActions(utterance, displayedText, { x: e.clientX, y: e.clientY });
+      e.stopPropagation();
+      if (longPressTriggeredRef.current) {
+        longPressTriggeredRef.current = false;
+        return;
       }
+      clearLongPressTimers();
+      if (hideDesktopHoverBar) {
+        onOpenMobileActions(utterance, displayedText, { x: e.clientX, y: e.clientY });
+      } else {
+        onOpenDesktopContextMenu(e, utterance, displayedText);
+      }
+    };
+
+    const handleRowBatchClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!isBatchMode) return;
+      e.stopPropagation();
+      onToggleSelect(utterance.id, e.shiftKey);
     };
 
     const commitRename = async () => {
@@ -251,25 +292,33 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
     return (
       <div
         data-utterance-id={utterance.id}
+        data-utterance-selected={isBatchMode && isSelected ? 'true' : undefined}
         data-has-sticky-anchor={primarySticky ? 'true' : undefined}
+        onClick={handleRowBatchClick}
         onPointerDown={handleRowPointerDown}
         onPointerMove={handleRowPointerMove}
         onPointerUp={clearLongPressTimers}
         onPointerCancel={clearLongPressTimers}
         onPointerLeave={clearLongPressTimers}
         onContextMenu={handleRowContextMenu}
-        className={`relative group rounded-lg px-2.5 py-2 -mx-2.5 space-y-1.5 transition-all duration-150 ${
-          enableLongPress && !isEditingText && !isEditingNote && !isEditingSpk
+        className={`relative group rounded-lg px-2.5 py-2 -mx-2.5 transition-all duration-150 ${
+          isBatchMode ? 'flex items-start gap-2.5 cursor-pointer select-none' : 'space-y-1.5'
+        } ${
+          !isBatchMode && enableLongPress && !isEditingText && !isEditingNote && !isEditingSpk
             ? 'mobile-longpress-target'
             : ''
         } ${
-          isLongPressing
-            ? 'scale-[0.985] bg-[#EBF2FF]/85 ring-1 ring-[#1456F0]/30'
-            : isFocusedTarget
-              ? 'bg-[#EBF2FF] ring-2 ring-[#1456F0]/30'
-              : isActiveAudio
-                ? 'bg-[#F0F4FF]/80 border-l-[3px] border-[#1456F0]'
-                : 'hover:bg-[#F8F9FA]'
+          isBatchMode
+            ? isSelected
+              ? 'bg-[#EBF2FF]/90 ring-1 ring-[#1456F0]/35'
+              : 'hover:bg-[#F5F7FA]'
+            : isLongPressing
+              ? 'scale-[0.985] bg-[#EBF2FF]/85 ring-1 ring-[#1456F0]/30'
+              : isFocusedTarget
+                ? 'bg-[#EBF2FF] ring-2 ring-[#1456F0]/30'
+                : isActiveAudio
+                  ? 'bg-[#F0F4FF]/80 border-l-[3px] border-[#1456F0]'
+                  : 'hover:bg-[#F8F9FA]'
         }`}
         style={
           deferOffscreen
@@ -277,8 +326,30 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             : undefined
         }
       >
+        {/* 批量删除左侧勾选轨（触控端按住此轨上下滑动可连选并触发边缘自动滚动） */}
+        {isBatchMode && (
+          <div
+            data-batch-checkbox-rail="true"
+            className="relative z-20 -ml-1 -my-1 px-1.5 py-1.5 self-stretch flex items-start pt-1.5 shrink-0 touch-none"
+          >
+            <span
+              role="checkbox"
+              aria-checked={isSelected}
+              aria-label={`选择 [${utterance.timestampText}] 的转写记录`}
+              className={`w-5 h-5 rounded-md border-[1.5px] flex items-center justify-center transition-all ${
+                isSelected
+                  ? 'bg-[#1456F0] border-[#1456F0] text-white shadow-[0_2px_6px_rgba(20,86,240,0.28)]'
+                  : 'bg-white border-[#C9CDD4] group-hover:border-[#1456F0]'
+              }`}
+            >
+              {isSelected && <Check className="w-3.5 h-3.5" strokeWidth={2.6} />}
+            </span>
+          </div>
+        )}
+
+        <div className={isBatchMode ? 'flex-1 min-w-0 space-y-1.5' : 'contents'}>
         {/* 便签时间戳命中的右侧纸色渐变：点击直接跳转至便签中对应时间戳位置 */}
-        {primarySticky && stickyTheme && (
+        {!isBatchMode && primarySticky && stickyTheme && (
           <>
             <div
               aria-hidden="true"
@@ -326,10 +397,13 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
                     <button
                       type="button"
                       onClick={() => {
+                        if (isBatchMode) return;
                         setSpeakerDraft(utterance.speakerLabel);
                         setIsEditingSpk(true);
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-[#F0F4FF] hover:bg-[#DCE8FF] px-2.5 py-1 text-[14px] font-medium text-[#1456F0] whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                      className={`inline-flex items-center gap-1.5 rounded-md bg-[#F0F4FF] px-2.5 py-1 text-[14px] font-medium text-[#1456F0] whitespace-nowrap shrink-0 transition-colors ${
+                        isBatchMode ? 'pointer-events-none' : 'hover:bg-[#DCE8FF] cursor-pointer'
+                      }`}
                     >
                       <UserRound className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
                       <span>{utterance.speakerLabel}</span>
@@ -342,8 +416,15 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             <Tooltip content="点击从该时间点回听课堂原声" placement="top">
               <button
                 type="button"
-                onClick={() => onSeekAudio(utterance.startTimeMs)}
-                className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[14px] text-[#646A73] hover:bg-[#EBF2FF] hover:text-[#1456F0] tabular-nums transition-colors cursor-pointer"
+                onClick={() => {
+                  if (isBatchMode) return;
+                  onSeekAudio(utterance.startTimeMs);
+                }}
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[14px] text-[#646A73] tabular-nums transition-colors ${
+                  isBatchMode
+                    ? 'pointer-events-none'
+                    : 'hover:bg-[#EBF2FF] hover:text-[#1456F0] cursor-pointer'
+                }`}
               >
                 <Play className="w-3 h-3 fill-current opacity-70" />
                 <span>{utterance.timestampText}</span>
@@ -366,7 +447,7 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
 
           {/* 右侧微操作栏（桌面与平板悬浮显示；手机窄屏改为长按呼出操作抽屉）+ 便签纸色直达角标 */}
           <div className="flex items-center gap-1 shrink-0">
-            {!hideDesktopHoverBar && (
+            {!hideDesktopHoverBar && !isBatchMode && (
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                 <Tooltip content="追问 AI 这句话" placement="top">
                   <button
@@ -417,10 +498,22 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
                     <Pencil className="w-4 h-4" />
                   </button>
                 </Tooltip>
+
+                <Tooltip content="删除此条转写记录" placement="top">
+                  <button
+                    type="button"
+                    data-utterance-delete={utterance.id}
+                    aria-label="删除此条转写记录"
+                    onClick={() => onRequestDeleteUtterance(utterance, displayedText)}
+                    className="w-7 h-7 rounded-md hover:bg-[#FFECE8] text-[#646A73] hover:text-[#D83931] flex items-center justify-center cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </Tooltip>
               </div>
             )}
 
-            {primarySticky && stickyTheme && (
+            {!isBatchMode && primarySticky && stickyTheme && (
               <div className="relative">
                 <Tooltip
                   content={
@@ -580,22 +673,27 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
         ) : utterance.userNote ? (
           <div
             role="button"
-            tabIndex={0}
+            tabIndex={isBatchMode ? -1 : 0}
             onClick={() => {
+              if (isBatchMode) return;
               setNoteDraft(utterance.userNote ?? '');
               setIsEditingNote(true);
             }}
             onKeyDown={(e) => {
+              if (isBatchMode) return;
               if (e.key === 'Enter') {
                 setNoteDraft(utterance.userNote ?? '');
                 setIsEditingNote(true);
               }
             }}
-            className="mt-1 rounded-lg border-l-[3px] border-[#3370FF] bg-[#F0F4FF]/80 px-3 py-1.5 text-[14px] text-[#4E5969] cursor-pointer hover:bg-[#EBF2FF]"
+            className={`mt-1 rounded-lg border-l-[3px] border-[#3370FF] bg-[#F0F4FF]/80 px-3 py-1.5 text-[14px] text-[#4E5969] ${
+              isBatchMode ? 'pointer-events-none' : 'cursor-pointer hover:bg-[#EBF2FF]'
+            }`}
           >
             批注：{utterance.userNote}
           </div>
         ) : null}
+        </div>
       </div>
     );
   }
@@ -616,6 +714,8 @@ interface SegmentCardProps {
   showDiarization: boolean;
   hideDesktopHoverBar: boolean;
   enableLongPress: boolean;
+  isBatchMode: boolean;
+  selectedIds: Set<string>;
   activeAudioMs: number | null;
   focusedUtteranceId: string | null;
   isFocusedSegment: boolean;
@@ -635,6 +735,16 @@ interface SegmentCardProps {
     displayedText: string,
     anchor: { x: number; y: number }
   ) => void;
+  onOpenDesktopContextMenu: (
+    e: React.MouseEvent<HTMLDivElement>,
+    utterance: TranscriptUtterance,
+    displayedText: string
+  ) => void;
+  onRequestDeleteUtterance: (
+    utterance: TranscriptUtterance,
+    displayedText: string
+  ) => void;
+  onToggleSelect: (utteranceId: string, shiftKey: boolean) => void;
 }
 
 const SegmentCard: React.FC<SegmentCardProps> = React.memo(
@@ -651,6 +761,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     showDiarization,
     hideDesktopHoverBar,
     enableLongPress,
+    isBatchMode,
+    selectedIds,
     activeAudioMs,
     focusedUtteranceId,
     isFocusedSegment,
@@ -666,6 +778,9 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     onFocusStickyAnchor,
     onQuickNoteUtterance,
     onOpenMobileActions,
+    onOpenDesktopContextMenu,
+    onRequestDeleteUtterance,
+    onToggleSelect,
   }) => {
     const borderShapeClass =
       isFirstChunk && isLastChunk
@@ -719,6 +834,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   deferOffscreen={false}
                   hideDesktopHoverBar={hideDesktopHoverBar}
                   enableLongPress={enableLongPress}
+                  isBatchMode={isBatchMode}
+                  isSelected={selectedIds.has(utt.id)}
                   isActiveAudio={isPlayingHere}
                   isFocusedTarget={focusedUtteranceId === utt.id}
                   editRequestSeq={
@@ -732,6 +849,9 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                   onFocusStickyAnchor={onFocusStickyAnchor}
                   onQuickNoteUtterance={onQuickNoteUtterance}
                   onOpenMobileActions={onOpenMobileActions}
+                  onOpenDesktopContextMenu={onOpenDesktopContextMenu}
+                  onRequestDeleteUtterance={onRequestDeleteUtterance}
+                  onToggleSelect={onToggleSelect}
                 />
               );
             })}
@@ -928,10 +1048,14 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   const renameSpeaker = useAppStore((s) => s.renameSpeaker);
   const seekAudioPlayback = useAppStore((s) => s.seekAudioPlayback);
   const updateUtterance = useAppStore((s) => s.updateUtterance);
+  const deleteUtterance = useAppStore((s) => s.deleteUtterance);
+  const batchDeleteUtterances = useAppStore((s) => s.batchDeleteUtterances);
   const prefillChatComposer = useAppStore((s) => s.prefillChatComposer);
   const deleteSessionAttachment = useAppStore((s) => s.deleteSessionAttachment);
   const onlyBookmarks = useAppStore((s) => s.onlyBookmarksFilter);
   const setOnlyBookmarks = useAppStore((s) => s.setOnlyBookmarksFilter);
+  const batchDeleteMode = useAppStore((s) => s.transcriptBatchDeleteMode);
+  const setBatchDeleteMode = useAppStore((s) => s.setTranscriptBatchDeleteMode);
   const showNotice = useAppStore((s) => s.showNotice);
 
   const viewport = useViewportLayout();
@@ -948,6 +1072,19 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     displayedText: string;
     anchor: { x: number; y: number };
   } | null>(null);
+  const [desktopContextMenu, setDesktopContextMenu] = useState<{
+    position: { x: number; y: number } | null;
+    items: ContextMenuItem[];
+  }>({ position: null, items: [] });
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const lastClickedOrderIndexRef = useRef<number | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{
+    ids: string[];
+    previewText: string;
+    previewTime?: string;
+    fromBatch: boolean;
+  } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [editRequest, setEditRequest] = useState<{
     utteranceId: string;
     seq: number;
@@ -999,36 +1136,11 @@ export const TranscriptPanel: React.FC = React.memo(() => {
       displayedText: string,
       anchor: { x: number; y: number }
     ) => {
+      setDesktopContextMenu({ position: null, items: [] });
       setMobileActionTarget({ utterance, displayedText, anchor });
     },
     []
   );
-
-  // Android 返回键与 Esc 键优先关闭长按转写操作抽屉
-  useEffect(() => {
-    if (!mobileActionTarget) return;
-    const win = window as unknown as {
-      __zhilingHandleUtteranceSheetBack?: () => boolean;
-    };
-    const closeSheet = () => {
-      setMobileActionTarget(null);
-      return true;
-    };
-    win.__zhilingHandleUtteranceSheetBack = closeSheet;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setMobileActionTarget(null);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      if (win.__zhilingHandleUtteranceSheetBack === closeSheet) {
-        delete win.__zhilingHandleUtteranceSheetBack;
-      }
-      window.removeEventListener('keydown', onKeyDown);
-    };
-  }, [mobileActionTarget]);
 
   const imagesBySegment = useMemo(() => {
     const map = new Map<string, SessionAttachmentItem[]>();
@@ -1135,6 +1247,196 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     gap: 0,
     overscanPx: 750,
   });
+
+  // 按当前可见列表顺序展平所有转写记录，供虚拟列表安全的框选与 Shift 连选使用
+  const { orderedUtterances, orderedIds, idToIndex } = useMemo(() => {
+    const list: Array<{ utterance: TranscriptUtterance; displayedText: string }> = [];
+    const ids: string[] = [];
+    const map = new Map<string, number>();
+    for (const row of renderedSegments) {
+      for (const utt of row.visibleUtterances) {
+        const displayedText =
+          enableCorrection && utt.isRefined ? utt.refinedText : utt.rawText;
+        map.set(utt.id, list.length);
+        ids.push(utt.id);
+        list.push({ utterance: utt, displayedText });
+      }
+    }
+    return { orderedUtterances: list, orderedIds: ids, idToIndex: map };
+  }, [renderedSegments, enableCorrection]);
+
+  const enterBatchDeleteMode = useCallback(
+    (initialUtteranceId?: string) => {
+      setMobileActionTarget(null);
+      setDesktopContextMenu({ position: null, items: [] });
+      setSelectionBar(null);
+      setBatchDeleteMode(true);
+      if (initialUtteranceId && idToIndex.has(initialUtteranceId)) {
+        setSelectedIds(new Set([initialUtteranceId]));
+        lastClickedOrderIndexRef.current = idToIndex.get(initialUtteranceId) ?? null;
+      } else {
+        setSelectedIds(new Set());
+        lastClickedOrderIndexRef.current = null;
+      }
+    },
+    [idToIndex, setBatchDeleteMode]
+  );
+
+  const exitBatchDeleteMode = useCallback(() => {
+    setBatchDeleteMode(false);
+    setSelectedIds(new Set());
+    lastClickedOrderIndexRef.current = null;
+    setDesktopContextMenu({ position: null, items: [] });
+  }, [setBatchDeleteMode]);
+
+  // 切换课堂时自动复位批量模式与确认弹窗
+  useEffect(() => {
+    setSelectedIds(new Set());
+    lastClickedOrderIndexRef.current = null;
+    setPendingDelete(null);
+    setDesktopContextMenu({ position: null, items: [] });
+    setMobileActionTarget(null);
+    setBatchDeleteMode(false);
+  }, [sessionId, setBatchDeleteMode]);
+
+  // 列表更新（如删句、切换仅看书签）后清理已不存在于可见列表中的选中 ID
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (idToIndex.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [idToIndex]);
+
+  const {
+    marqueeVisual,
+    isDraggingSelection,
+    handleContainerPointerDown: handleMarqueePointerDown,
+    shouldSuppressRowClick,
+    syncSelectionOnScroll,
+  } = useMarqueeAutoScroll({
+    enabled: batchDeleteMode && !pendingDelete,
+    scrollRef,
+    orderedIds,
+    idToIndex,
+    selectedIds,
+    onSelectedIdsChange: setSelectedIds,
+    onNotifyScroll: notifyScroll,
+    edgeZonePx: 68,
+  });
+
+  const handleToggleSelectUtterance = useCallback(
+    (utteranceId: string, shiftKey: boolean) => {
+      if (shouldSuppressRowClick()) return;
+      const idx = idToIndex.get(utteranceId);
+      if (idx === undefined) return;
+
+      if (shiftKey && lastClickedOrderIndexRef.current !== null) {
+        const anchor = lastClickedOrderIndexRef.current;
+        const start = Math.min(anchor, idx);
+        const end = Math.max(anchor, idx);
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          const shouldSelect = !prev.has(utteranceId);
+          for (let i = start; i <= end; i += 1) {
+            const id = orderedIds[i];
+            if (!id) continue;
+            if (shouldSelect) next.add(id);
+            else next.delete(id);
+          }
+          return next;
+        });
+        lastClickedOrderIndexRef.current = idx;
+        return;
+      }
+
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(utteranceId)) next.delete(utteranceId);
+        else next.add(utteranceId);
+        return next;
+      });
+      lastClickedOrderIndexRef.current = idx;
+    },
+    [idToIndex, orderedIds, shouldSuppressRowClick]
+  );
+
+  const allVisibleSelected =
+    orderedIds.length > 0 && selectedIds.size >= orderedIds.length;
+
+  const handleToggleSelectAll = useCallback(() => {
+    if (orderedIds.length === 0) return;
+    if (allVisibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(orderedIds));
+    }
+  }, [allVisibleSelected, orderedIds]);
+
+  const handleRequestDeleteSingle = useCallback(
+    (utterance: TranscriptUtterance, displayedText: string) => {
+      setMobileActionTarget(null);
+      setDesktopContextMenu({ position: null, items: [] });
+      setPendingDelete({
+        ids: [utterance.id],
+        previewText: displayedText,
+        previewTime: utterance.timestampText,
+        fromBatch: false,
+      });
+    },
+    []
+  );
+
+  const handleRequestDeleteSelected = useCallback(() => {
+    const ids = orderedIds.filter((id) => selectedIds.has(id));
+    if (ids.length === 0) return;
+    const firstItem = orderedUtterances.find((item) => item.utterance.id === ids[0]);
+    setDesktopContextMenu({ position: null, items: [] });
+    setPendingDelete({
+      ids,
+      previewText: firstItem?.displayedText ?? '',
+      previewTime: firstItem?.utterance.timestampText,
+      fromBatch: true,
+    });
+  }, [orderedIds, orderedUtterances, selectedIds]);
+
+  const handleConfirmPendingDelete = useCallback(async () => {
+    if (!pendingDelete || isDeleting) return;
+    setIsDeleting(true);
+    try {
+      if (pendingDelete.ids.length === 1) {
+        const ok = await deleteUtterance(pendingDelete.ids[0]);
+        if (ok) {
+          setPendingDelete(null);
+          if (pendingDelete.fromBatch) {
+            exitBatchDeleteMode();
+          }
+        }
+      } else {
+        const deletedCount = await batchDeleteUtterances(pendingDelete.ids);
+        if (deletedCount > 0) {
+          setPendingDelete(null);
+          exitBatchDeleteMode();
+        }
+      }
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [
+    pendingDelete,
+    isDeleting,
+    deleteUtterance,
+    batchDeleteUtterances,
+    exitBatchDeleteMode,
+  ]);
 
   const cancelPendingRestore = useCallback(() => {
     if (restoreRefineRafRef.current !== null) {
@@ -1491,8 +1793,262 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     [prefillChatComposer]
   );
 
+  const handleOpenDesktopContextMenu = useCallback(
+    (
+      e: React.MouseEvent<HTMLDivElement>,
+      utterance: TranscriptUtterance,
+      displayedText: string
+    ) => {
+      setSelectionBar(null);
+      setMobileActionTarget(null);
+      const activeSelText = window.getSelection()?.toString().trim() ?? '';
+      const textToCopy = activeSelText || displayedText;
+
+      const items: ContextMenuItem[] = [
+        {
+          id: 'copy-utterance-text',
+          label: activeSelText ? '复制选中文字' : '复制此句文字',
+          icon: Copy,
+          onClick: () => {
+            void navigator.clipboard?.writeText(textToCopy).then(
+              () => showNotice('info', activeSelText ? '已复制选中文字' : '已复制该条转写文字'),
+              () => showNotice('error', '复制失败，请手动复制')
+            );
+          },
+        },
+        {
+          id: 'ask-ai-utterance',
+          label: '追问 AI 这句话',
+          icon: MessageSquarePlus,
+          onClick: () => handleAskAboutText(displayedText, utterance.timestampText),
+        },
+        {
+          id: 'sticky-utterance',
+          label: `记到便签 [${utterance.timestampText}]`,
+          icon: StickyNote,
+          onClick: () => handleQuickNoteUtterance(utterance),
+        },
+        {
+          id: 'bookmark-utterance',
+          label: utterance.isBookmarked ? '取消难点书签' : '标记为「不懂」',
+          icon: utterance.isBookmarked ? BookmarkCheck : BookmarkPlus,
+          onClick: () => {
+            const nextBookmarked = !utterance.isBookmarked;
+            void updateUtterance(utterance.id, {
+              isBookmarked: nextBookmarked,
+              bookmarkKind: nextBookmarked ? 'confused' : null,
+            });
+          },
+        },
+        {
+          id: 'edit-utterance',
+          label: '编辑文字 / 添加批注',
+          icon: Pencil,
+          onClick: () => {
+            editSeqCounterRef.current += 1;
+            setEditRequest({ utteranceId: utterance.id, seq: editSeqCounterRef.current });
+          },
+        },
+        {
+          id: 'play-utterance-audio',
+          label: `从 [${utterance.timestampText}] 回放原声`,
+          icon: Play,
+          onClick: () => seekAudioPlayback(utterance.startTimeMs),
+        },
+        {
+          id: 'enter-batch-delete',
+          label: '批量删除记录',
+          icon: ListChecks,
+          dividerBefore: true,
+          onClick: () => enterBatchDeleteMode(utterance.id),
+        },
+        {
+          id: 'delete-single-utterance',
+          label: '删除此条记录',
+          icon: Trash2,
+          danger: true,
+          onClick: () => handleRequestDeleteSingle(utterance, displayedText),
+        },
+      ];
+
+      setDesktopContextMenu({
+        position: { x: e.clientX, y: e.clientY },
+        items,
+      });
+    },
+    [
+      enterBatchDeleteMode,
+      handleAskAboutText,
+      handleQuickNoteUtterance,
+      handleRequestDeleteSingle,
+      seekAudioPlayback,
+      showNotice,
+      updateUtterance,
+    ]
+  );
+
+  const handleTranscriptAreaContextMenu = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (hideDesktopHoverBar) return;
+      if (e.target instanceof Element && e.target.closest('input, textarea')) return;
+      if (orderedIds.length === 0) return;
+
+      e.preventDefault();
+      setSelectionBar(null);
+      setMobileActionTarget(null);
+
+      if (batchDeleteMode) {
+        const count = selectedIds.size;
+        setDesktopContextMenu({
+          position: { x: e.clientX, y: e.clientY },
+          items: [
+            {
+              id: 'batch-delete-selected-now',
+              label: count > 0 ? `删除已选 (${count} 条)` : '请先框选或勾选记录',
+              icon: Trash2,
+              danger: count > 0,
+              disabled: count === 0,
+              onClick: handleRequestDeleteSelected,
+            },
+            {
+              id: 'batch-select-all-ctx',
+              label: allVisibleSelected ? '取消全选' : `全选当前可见 (${orderedIds.length} 条)`,
+              icon: allVisibleSelected ? Square : CheckSquare,
+              dividerBefore: true,
+              onClick: handleToggleSelectAll,
+            },
+            {
+              id: 'batch-exit-ctx',
+              label: '退出批量删除',
+              icon: X,
+              onClick: exitBatchDeleteMode,
+            },
+          ],
+        });
+        return;
+      }
+
+      setDesktopContextMenu({
+        position: { x: e.clientX, y: e.clientY },
+        items: [
+          {
+            id: 'canvas-enter-batch-delete',
+            label: '批量删除转写记录',
+            icon: ListChecks,
+            onClick: () => enterBatchDeleteMode(),
+          },
+        ],
+      });
+    },
+    [
+      allVisibleSelected,
+      batchDeleteMode,
+      enterBatchDeleteMode,
+      exitBatchDeleteMode,
+      handleRequestDeleteSelected,
+      handleToggleSelectAll,
+      hideDesktopHoverBar,
+      orderedIds.length,
+      selectedIds.size,
+    ]
+  );
+
+  // Android 返回键与桌面键盘快捷键统一分层接管：删除确认窗 -> 右键菜单 -> 长按抽屉 -> 批量删除模式
+  useEffect(() => {
+    const hasOverlay =
+      Boolean(pendingDelete) ||
+      Boolean(desktopContextMenu.position) ||
+      Boolean(mobileActionTarget) ||
+      batchDeleteMode;
+    if (!hasOverlay) return;
+
+    const win = window as unknown as {
+      __zhilingHandleUtteranceSheetBack?: () => boolean;
+    };
+    const handleBack = () => {
+      if (pendingDelete) {
+        if (!isDeleting) setPendingDelete(null);
+        return true;
+      }
+      if (desktopContextMenu.position) {
+        setDesktopContextMenu({ position: null, items: [] });
+        return true;
+      }
+      if (mobileActionTarget) {
+        setMobileActionTarget(null);
+        return true;
+      }
+      if (batchDeleteMode) {
+        exitBatchDeleteMode();
+        return true;
+      }
+      return false;
+    };
+    win.__zhilingHandleUtteranceSheetBack = handleBack;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      const inEditable = Boolean(target?.closest('input, textarea, [contenteditable="true"]'));
+
+      if (pendingDelete) {
+        if (e.key === 'Enter' && !isDeleting) {
+          e.preventDefault();
+          void handleConfirmPendingDelete();
+        }
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (desktopContextMenu.position) {
+          e.preventDefault();
+          setDesktopContextMenu({ position: null, items: [] });
+          return;
+        }
+        if (mobileActionTarget) {
+          e.preventDefault();
+          setMobileActionTarget(null);
+          return;
+        }
+        if (batchDeleteMode) {
+          e.preventDefault();
+          exitBatchDeleteMode();
+          return;
+        }
+      }
+
+      if (!batchDeleteMode || inEditable) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        handleToggleSelectAll();
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.size > 0) {
+        e.preventDefault();
+        handleRequestDeleteSelected();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      if (win.__zhilingHandleUtteranceSheetBack === handleBack) {
+        delete win.__zhilingHandleUtteranceSheetBack;
+      }
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [
+    batchDeleteMode,
+    desktopContextMenu.position,
+    exitBatchDeleteMode,
+    handleConfirmPendingDelete,
+    handleRequestDeleteSelected,
+    handleToggleSelectAll,
+    isDeleting,
+    mobileActionTarget,
+    pendingDelete,
+    selectedIds.size,
+  ]);
+
   const handleMouseUpSelection = () => {
-    if (enableLongPress) return;
+    if (enableLongPress || batchDeleteMode) return;
     const sel = window.getSelection();
     const text = sel?.toString().trim() ?? '';
     if (!text || text.length < 2 || !sel || sel.rangeCount === 0) {
@@ -1521,34 +2077,127 @@ export const TranscriptPanel: React.FC = React.memo(() => {
 
   return (
     <section className="h-full flex flex-col bg-[#F5F6F7] relative">
-      {/* 右侧栏顶栏：保持纯粹干净，工具均已收纳进顶栏 ··· 宫格 */}
-      <div className="h-11 sm:h-12 px-3.5 sm:px-5 bg-white border-b border-[#ECEEF2] flex items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2 text-[15px] font-semibold text-[#1F2329] min-w-0">
-          <AlignLeft className="w-[18px] h-[18px] text-[#1456F0] shrink-0" strokeWidth={1.85} />
-          <span className="truncate">转写记录与知识点分段</span>
-        </div>
-
-        <div className="flex items-center gap-2.5 shrink-0">
-          {onlyBookmarks && (
+      {/* 右侧栏顶栏：普通模式展示标题与分段计数；批量删除模式自动切换为多选操作栏 */}
+      {batchDeleteMode ? (
+        viewport.isCompactWidth ? (
+          <div
+            data-batch-toolbar="mobile"
+            className="h-12 px-3.5 bg-white border-b border-[#DCE4F7] flex items-center justify-between gap-2 shrink-0"
+          >
             <button
               type="button"
-              onClick={() => setOnlyBookmarks(false)}
-              className="h-7 px-2.5 rounded-lg bg-[#EBF2FF] hover:bg-[#DCE8FF] text-[#1456F0] text-[14px] font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              data-batch-cancel="true"
+              onClick={exitBatchDeleteMode}
+              className="px-2.5 py-1.5 rounded-lg text-[15px] text-[#4E5969] active:bg-[#F2F3F5] cursor-pointer whitespace-nowrap"
             >
-              <Bookmark className="w-3.5 h-3.5" />
-              <span>难点书签 ({totalBookmarkCount})</span>
-              <X className="w-3.5 h-3.5" />
+              取消
             </button>
-          )}
+            <span
+              data-batch-selected-count={selectedIds.size}
+              className="text-[15px] font-semibold text-[#1F2329] tabular-nums"
+            >
+              已选 {selectedIds.size} 条
+            </span>
+            <button
+              type="button"
+              data-batch-select-all="true"
+              onClick={handleToggleSelectAll}
+              disabled={orderedIds.length === 0}
+              className="px-2.5 py-1.5 rounded-lg text-[15px] font-medium text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 cursor-pointer whitespace-nowrap"
+            >
+              {allVisibleSelected ? '取消全选' : '全选'}
+            </button>
+          </div>
+        ) : (
+          <div
+            data-batch-toolbar="desktop"
+            className="h-12 px-4 sm:px-5 bg-[#F5F8FF] border-b border-[#D0DFFB] flex items-center justify-between gap-3 shrink-0"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                data-batch-select-all="true"
+                onClick={handleToggleSelectAll}
+                disabled={orderedIds.length === 0}
+                className="inline-flex items-center gap-2 rounded-lg px-2 py-1 text-[14px] font-medium text-[#1F2329] hover:bg-[#EBF2FF] disabled:opacity-40 transition-colors cursor-pointer shrink-0"
+              >
+                <span
+                  className={`w-[18px] h-[18px] rounded border-[1.5px] flex items-center justify-center transition-colors ${
+                    allVisibleSelected
+                      ? 'bg-[#1456F0] border-[#1456F0] text-white'
+                      : 'bg-white border-[#8F959E]'
+                  }`}
+                >
+                  {allVisibleSelected && <Check className="w-3 h-3" strokeWidth={2.6} />}
+                </span>
+                <span className="whitespace-nowrap">
+                  {allVisibleSelected ? '取消全选' : '全选'}
+                </span>
+              </button>
 
-          <span className="text-[14px] text-[#4E5969]">
-            共 {segments.length} 段知识点
-          </span>
+              <span
+                data-batch-selected-count={selectedIds.size}
+                className="px-2.5 py-0.5 rounded-md bg-[#EBF2FF] text-[#1456F0] text-[14px] font-semibold tabular-nums whitespace-nowrap shrink-0"
+              >
+                已选 {selectedIds.size} / {orderedIds.length} 条
+              </span>
+
+              <span className="hidden xl:inline text-[14px] text-[#646A73] truncate">
+                按住左键拖拽选框可批量圈选，移近顶/底部自动滚动
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-batch-cancel="true"
+                onClick={exitBatchDeleteMode}
+                className="h-8 px-3 rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#4E5969] transition-colors cursor-pointer whitespace-nowrap"
+              >
+                退出
+              </button>
+              <button
+                type="button"
+                data-batch-delete-trigger="true"
+                disabled={selectedIds.size === 0}
+                onClick={handleRequestDeleteSelected}
+                className="h-8 px-3.5 rounded-lg bg-[#D83931] hover:bg-[#B42318] disabled:bg-[#E5E6EB] disabled:text-[#8F959E] disabled:cursor-not-allowed text-white text-[14px] font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Trash2 className="w-4 h-4 shrink-0" />
+                <span>删除所选 ({selectedIds.size})</span>
+              </button>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="h-11 sm:h-12 px-3.5 sm:px-5 bg-white border-b border-[#ECEEF2] flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2 text-[15px] font-semibold text-[#1F2329] min-w-0">
+            <AlignLeft className="w-[18px] h-[18px] text-[#1456F0] shrink-0" strokeWidth={1.85} />
+            <span className="truncate">转写记录与知识点分段</span>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0">
+            {onlyBookmarks && (
+              <button
+                type="button"
+                onClick={() => setOnlyBookmarks(false)}
+                className="h-7 px-2.5 rounded-lg bg-[#EBF2FF] hover:bg-[#DCE8FF] text-[#1456F0] text-[14px] font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Bookmark className="w-3.5 h-3.5" />
+                <span>难点书签 ({totalBookmarkCount})</span>
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            <span className="text-[14px] text-[#4E5969]">
+              共 {segments.length} 段知识点
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 划词追问浮动工具条 */}
-      {selectionBar && (
+      {selectionBar && !batchDeleteMode && (
         <div
           style={{ left: `${selectionBar.x}px`, top: `${selectionBar.y}px` }}
           className="fixed z-40 -translate-x-1/2 rounded-xl border border-[#DEE0E3] bg-white shadow-lg px-2 py-1.5 flex items-center gap-1"
@@ -1572,22 +2221,35 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         </div>
       )}
 
-      {/* 知识点分段流 */}
-      <div
-        ref={scrollRef}
-        onWheel={cancelPendingFocusRefine}
-        onTouchStart={cancelPendingFocusRefine}
-        onPointerDown={cancelPendingFocusRefine}
-        onScroll={() => {
-          notifyScroll();
-          captureCurrentTranscriptScroll();
-          if (selectionBar) setSelectionBar(null);
-        }}
-        onMouseUp={handleMouseUpSelection}
-        className={`flex-1 overflow-y-auto ${
-          viewport.isCompactWidth ? 'px-3.5 pt-4 pb-24' : 'px-5 py-5'
-        }`}
-      >
+      {/* 知识点分段流 + 选框视口覆盖层（覆盖层严格裁剪在可视区域内，绝不撑大 scrollHeight） */}
+      <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div
+          ref={scrollRef}
+          data-transcript-scroll="true"
+          onWheel={cancelPendingFocusRefine}
+          onTouchStart={cancelPendingFocusRefine}
+          onPointerDown={(e) => {
+            cancelPendingFocusRefine();
+            handleMarqueePointerDown(e);
+          }}
+          onContextMenu={handleTranscriptAreaContextMenu}
+          onScroll={() => {
+            notifyScroll();
+            captureCurrentTranscriptScroll();
+            syncSelectionOnScroll();
+            if (selectionBar) setSelectionBar(null);
+          }}
+          onMouseUp={handleMouseUpSelection}
+          className={`flex-1 overflow-y-auto ${
+            batchDeleteMode || isDraggingSelection ? 'select-none' : ''
+          } ${
+            viewport.isCompactWidth
+              ? batchDeleteMode
+                ? 'px-3.5 pt-4 pb-6'
+                : 'px-3.5 pt-4 pb-24'
+              : 'px-5 py-5'
+          }`}
+        >
         {renderedSegments.length === 0 && !isRecording ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
@@ -1635,6 +2297,8 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                         showDiarization={showDiarization}
                         hideDesktopHoverBar={hideDesktopHoverBar}
                         enableLongPress={enableLongPress}
+                        isBatchMode={batchDeleteMode}
+                        selectedIds={selectedIds}
                         activeAudioMs={activeAudioMs}
                         focusedUtteranceId={focusedIds.utteranceId}
                         isFocusedSegment={focusedIds.segmentId === segment.id}
@@ -1650,6 +2314,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                         onFocusStickyAnchor={focusStickyNoteTimestamp}
                         onQuickNoteUtterance={handleQuickNoteUtterance}
                         onOpenMobileActions={handleOpenMobileActions}
+                        onOpenDesktopContextMenu={handleOpenDesktopContextMenu}
+                        onRequestDeleteUtterance={handleRequestDeleteSingle}
+                        onToggleSelect={handleToggleSelectUtterance}
                       />
                     </div>
                   )
@@ -1660,10 +2327,80 @@ export const TranscriptPanel: React.FC = React.memo(() => {
             <LiveRecordingBanner enableBubble={enableBubble} />
           </>
         )}
+        </div>
+
+        {/* 桌面端矩形拖拽选框覆盖层 */}
+        {marqueeVisual &&
+          marqueeVisual.rect.width >= 2 &&
+          marqueeVisual.rect.height >= 2 && (
+            <div
+              aria-hidden="true"
+              data-marquee-overlay="true"
+              className="pointer-events-none absolute inset-0 overflow-hidden z-20"
+            >
+              <div
+                data-marquee-box="true"
+                style={{
+                  left: `${marqueeVisual.rect.left}px`,
+                  top: `${marqueeVisual.rect.top}px`,
+                  width: `${marqueeVisual.rect.width}px`,
+                  height: `${marqueeVisual.rect.height}px`,
+                }}
+                className={`absolute rounded-[6px] border-[1.5px] ${
+                  marqueeVisual.mode === 'deselect'
+                    ? 'border-[#646A73] bg-[#646A73]/10'
+                    : 'border-[#1456F0] bg-[#1456F0]/12 shadow-[0_2px_10px_rgba(20,86,240,0.12)]'
+                }`}
+              >
+                {marqueeVisual.rangeCount > 0 &&
+                  marqueeVisual.rect.width >= 64 &&
+                  marqueeVisual.rect.height >= 28 && (
+                    <span
+                      className={`absolute right-1.5 bottom-1.5 px-2 py-0.5 rounded-md text-[14px] font-medium tabular-nums shadow-xs ${
+                        marqueeVisual.mode === 'deselect'
+                          ? 'bg-[#4E5969] text-white'
+                          : 'bg-[#1456F0] text-white'
+                      }`}
+                    >
+                      {marqueeVisual.mode === 'deselect'
+                        ? `取消 ${marqueeVisual.rangeCount}`
+                        : `已框选 ${marqueeVisual.rangeCount}`}
+                    </span>
+                  )}
+              </div>
+            </div>
+          )}
       </div>
 
+      {/* 手机窄屏底部固定批量删除操作条（贴合 Android 安全区，不与右下角悬浮按钮冲突） */}
+      {batchDeleteMode && viewport.isCompactWidth && (
+        <div
+          data-mobile-batch-footer="true"
+          style={{ paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))' }}
+          className="shrink-0 bg-white border-t border-[#ECEEF2] px-4 pt-2.5 space-y-2 shadow-[0_-6px_20px_rgba(31,35,41,0.06)] z-20"
+        >
+          <p className="text-[14px] text-[#646A73] text-center">
+            点击记录勾选，或按住左侧选框上下滑选（靠近边缘自动滚动）
+          </p>
+          <button
+            type="button"
+            data-batch-delete-trigger="true"
+            disabled={selectedIds.size === 0}
+            onClick={handleRequestDeleteSelected}
+            className="w-full h-11 rounded-xl bg-[#D83931] active:bg-[#B42318] disabled:bg-[#E5E6EB] disabled:text-[#8F959E] disabled:cursor-not-allowed text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-4 h-4 shrink-0" />
+            <span>
+              {selectedIds.size > 0
+                ? `删除已选 (${selectedIds.size} 条)`
+                : '请选择要删除的记录'}
+            </span>
+          </button>
+        </div>
+      )}
+
       {/* 原声倍速点句回放条 */}
-      <AudioPlaybackBar />
+      {!batchDeleteMode && <AudioPlaybackBar />}
 
       {/* 长按转写记录快捷操作：手机窄屏使用可拖拽底部抽屉，平板/宽屏使用按压点锚定浮层，均带平滑收回动效 */}
       {(() => {
@@ -1819,6 +2556,34 @@ export const TranscriptPanel: React.FC = React.memo(() => {
               </button>
             </div>
 
+            {/* 批量管理与删除操作组 */}
+            <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] divide-y divide-[#ECEEF2] overflow-hidden">
+              <button
+                type="button"
+                data-utterance-action="batch-delete"
+                onClick={() => enterBatchDeleteMode(mobileActionTarget.utterance.id)}
+                className="w-full min-h-[46px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] hover:bg-[#EBF2FF]/60 active:bg-[#EBF2FF] transition-colors cursor-pointer"
+              >
+                <ListChecks className="w-4 h-4 text-[#1456F0] shrink-0" />
+                <span>批量删除记录</span>
+              </button>
+
+              <button
+                type="button"
+                data-utterance-action="delete-single"
+                onClick={() =>
+                  handleRequestDeleteSingle(
+                    mobileActionTarget.utterance,
+                    mobileActionTarget.displayedText
+                  )
+                }
+                className="w-full min-h-[46px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#D83931] hover:bg-[#FFECE8]/70 active:bg-[#FFECE8] transition-colors cursor-pointer"
+              >
+                <Trash2 className="w-4 h-4 text-[#D83931] shrink-0" />
+                <span>删除此条记录</span>
+              </button>
+            </div>
+
             {useBottomSheetForActions && (
               <button
                 type="button"
@@ -1843,7 +2608,10 @@ export const TranscriptPanel: React.FC = React.memo(() => {
               dataAttributes={{ 'data-mobile-utterance-sheet': 'true' }}
               showHandle
             >
-              <div className="px-4 pt-1 pb-[calc(16px+env(safe-area-inset-bottom,0px))] space-y-3.5">
+              <div
+                style={{ paddingBottom: 'calc(16px + var(--android-safe-bottom, 0px))' }}
+                className="px-4 pt-1 space-y-3.5"
+              >
                 {actionContent}
               </div>
             </DraggableBottomSheet>
@@ -1858,6 +2626,92 @@ export const TranscriptPanel: React.FC = React.memo(() => {
           </>
         );
       })()}
+
+      {/* 桌面端与平板鼠标右键菜单 */}
+      <ContextMenu
+        position={desktopContextMenu.position}
+        items={desktopContextMenu.items}
+        onClose={() => setDesktopContextMenu({ position: null, items: [] })}
+      />
+
+      {/* 单条 / 批量删除转写记录确认弹窗 */}
+      <Modal
+        open={Boolean(pendingDelete)}
+        onClose={() => {
+          if (!isDeleting) setPendingDelete(null);
+        }}
+        closable={!isDeleting}
+        title={
+          pendingDelete && pendingDelete.ids.length > 1
+            ? '批量删除转写记录'
+            : '删除转写记录'
+        }
+        widthClass="max-w-md"
+        layerClass="z-[75]"
+      >
+        {pendingDelete && (
+          <div className="p-4 sm:p-5 space-y-4">
+            <div className="space-y-2">
+              <p className="text-[15px] font-medium text-[#1F2329]">
+                {pendingDelete.ids.length > 1
+                  ? `确定要删除已选的 ${pendingDelete.ids.length} 条转写记录吗？`
+                  : '确定要删除这条转写记录吗？'}
+              </p>
+
+              {pendingDelete.previewText && (
+                <div className="rounded-xl border border-[#ECEEF2] bg-[#F7F8FA] px-3.5 py-2.5 space-y-1">
+                  {pendingDelete.previewTime && (
+                    <div className="text-[14px] font-mono text-[#646A73] tabular-nums">
+                      [{pendingDelete.previewTime}]
+                      {pendingDelete.ids.length > 1
+                        ? ` 等共 ${pendingDelete.ids.length} 条记录`
+                        : ''}
+                    </div>
+                  )}
+                  <p className="text-[14px] text-[#4E5969] leading-relaxed line-clamp-2 break-words">
+                    {pendingDelete.previewText}
+                  </p>
+                </div>
+              )}
+
+              <p className="text-[14px] text-[#646A73] leading-relaxed">
+                仅移除转写文字，已录制的课堂原声与课堂便签不会被删除；删除后无法撤销。
+              </p>
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPendingDelete(null)}
+                className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg border border-[#DEE0E3] bg-white hover:bg-[#F2F3F5] text-[14px] font-medium text-[#1F2329] disabled:opacity-50 inline-flex items-center justify-center whitespace-nowrap transition-colors cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                data-confirm-delete-utterances="true"
+                disabled={isDeleting}
+                onClick={() => void handleConfirmPendingDelete()}
+                className="min-h-10 py-2 px-4 w-full sm:w-auto rounded-lg bg-[#D83931] hover:bg-[#B42318] text-white text-[14px] font-medium disabled:opacity-60 inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
+              >
+                {isDeleting ? (
+                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                ) : (
+                  <Trash2 className="w-4 h-4 shrink-0" />
+                )}
+                <span>
+                  {isDeleting
+                    ? '正在删除...'
+                    : pendingDelete.ids.length > 1
+                      ? `确认删除 (${pendingDelete.ids.length} 条)`
+                      : '确认删除'}
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal
         open={Boolean(previewImage)}

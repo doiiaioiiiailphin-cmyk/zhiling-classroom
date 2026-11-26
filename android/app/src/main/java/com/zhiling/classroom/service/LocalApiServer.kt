@@ -229,6 +229,38 @@ class LocalApiServer(
                             DataEnvelope(updated)
                         }
                     }
+                    delete("/sessions/{sessionId}/utterances/{utteranceId}") {
+                        call.respondApi {
+                            val sid = call.parameters["sessionId"]!!
+                            val uid = call.parameters["utteranceId"]!!
+                            val result = repo.deleteUtterances(sid, listOf(uid), requireAll = true)
+                            streams.publish(
+                                sid,
+                                "segments.regrouped",
+                                buildJsonObject {
+                                    put("segments", WireJson.encodeToJsonElement(result.segments))
+                                },
+                            )
+                            DataEnvelope(result)
+                        }
+                    }
+                    post("/sessions/{sessionId}/utterances/batch-delete") {
+                        call.respondApi {
+                            val sid = call.parameters["sessionId"]!!
+                            val req = WireJson.decodeFromString<UtteranceBatchDeleteRequest>(call.receiveText())
+                            val result = repo.deleteUtterances(sid, req.utteranceIds, requireAll = false)
+                            if (result.deletedCount > 0) {
+                                streams.publish(
+                                    sid,
+                                    "segments.regrouped",
+                                    buildJsonObject {
+                                        put("segments", WireJson.encodeToJsonElement(result.segments))
+                                    },
+                                )
+                            }
+                            DataEnvelope(result)
+                        }
+                    }
                     post("/sessions/{sessionId}/bookmarks/now") {
                         call.respondApi {
                             val sid = call.parameters["sessionId"]!!

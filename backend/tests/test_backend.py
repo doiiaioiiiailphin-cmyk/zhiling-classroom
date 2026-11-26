@@ -852,3 +852,90 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(err["code"], "MODEL_NOT_CONFIGURED")
             self.assertIn("设置", err["message"])
             self.assertEqual(upstream_calls, [])
+
+    def test_delete_single_and_batch_utterances_prunes_highlights_and_empty_segments(self):
+        from backend.app.schemas import Regrouping, SegmentExplanation, Term
+
+        with self.client() as client:
+            repo = client.app.state.repo
+            sid = self.create_session(client)
+
+            # 创建 2 个知识分段，共 4 条转写
+            u1, _ = client.portal.call(repo.save_final, sid, "0", "矩阵特征值与特征向量定义", 0, 1200)
+            u2, _ = client.portal.call(repo.save_final, sid, "0", "施密特正交化过程详解", 1500, 3000)
+            u3, _ = client.portal.call(repo.save_final, sid, "0", "傅里叶级数收敛定理", 3500, 5000)
+            u4, _ = client.portal.call(repo.save_final, sid, "0", "拉普拉斯变换性质", 5500, 7000)
+
+            seg1_id = u1.segment_id
+            seg2_id = client.portal.call(
+                repo.regroup,
+                u3.utterance.id,
+                Regrouping(action="create_new_segment", updated_topic_title="积分变换与级数"),
+            )
+            self.assertNotEqual(seg1_id, seg2_id)
+
+            # 为 seg1 添加两个术语高亮与段落详解缓存
+            client.portal.call(
+                repo.save_highlights,
+                seg1_id,
+                [
+                    Term(term="特征值", explanation="线性变换的缩放因子"),
+                    Term(term="施密特正交化", explanation="将线性无关组化为正交组"),
+                ],
+            )
+            _, _, rev = client.portal.call(repo.explain_input, sid, seg1_id)
+            client.portal.call(
+                repo.save_explanation,
+                sid,
+                seg1_id,
+                rev,
+                SegmentExplanation(title="特征值", core_points=["核心定义"], elaboration="详细推导"),
+            )
+
+            # 1) 单条删除 u2 -> seg1 保留 u1，失效高亮「施密特正交化」被剪裁，段落详解缓存清空
+            del1 = client.delete(f"/api/v1/sessions/{sid}/utterances/{u2.utterance.id}")
+            self.assertEqual(del1.status_code, 200)
+            body1 = del1.json()["data"]
+            self.assertEqual(body1["deletedIds"], [u2.utterance.id])
+            self.assertEqual(body1["deletedCount"], 1)
+            seg1_after = next(s for s in body1["segments"] if s["id"] == seg1_id)
+            self.assertEqual([u["id"] for u in seg1_after["utterances"]], [u1.utterance.id])
+            self.assertEqual([h["term"] for h in seg1_after["highlights"]], ["特征值"])
+            self.assertIsNone(seg1_after.get("detailedExplanation"))
+
+            # 2) 单条删除不存在的 ID -> 返回 404
+            self.assertEqual(
+                client.delete(f"/api/v1/sessions/{sid}/utterances/nonexistent-id").status_code,
+                404,
+            )
+
+            # 3) 批量删除 seg2 全部语句 (u3, u4) + 混合不存在的 ID -> 幂等忽略无效 ID，且空段落 seg2 自动移除
+            batch = client.post(
+                f"/api/v1/sessions/{sid}/utterances/batch-delete",
+                json={"utteranceIds": [u3.utterance.id, u4.utterance.id, "missing-id", u3.utterance.id]},
+            )
+            self.assertEqual(batch.status_code, 200)
+            body2 = batch.json()["data"]
+            self.assertEqual(body2["deletedIds"], [u3.utterance.id, u4.utterance.id])
+            self.assertEqual(body2["deletedCount"], 2)
+            self.assertEqual([s["id"] for s in body2["segments"]], [seg1_id])
+
+            # 4) 给 seg1 挂载一张截图后再删除 u1 -> 含截图附件的段落应保留不删
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+                b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            att_resp = client.post(
+                f"/api/v1/sessions/{sid}/attachments?fileName=board.png&kind=screenshot&segmentId={seg1_id}",
+                content=png_bytes,
+                headers={"Content-Type": "image/png"},
+            )
+            self.assertEqual(att_resp.status_code, 201)
+
+            del_last = client.delete(f"/api/v1/sessions/{sid}/utterances/{u1.utterance.id}")
+            self.assertEqual(del_last.status_code, 200)
+            body3 = del_last.json()["data"]
+            self.assertEqual(len(body3["segments"]), 1)
+            self.assertEqual(body3["segments"][0]["id"], seg1_id)
+            self.assertEqual(body3["segments"][0]["utterances"], [])
+            self.assertEqual(body3["segments"][0]["highlights"], [])

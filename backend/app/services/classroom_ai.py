@@ -763,12 +763,19 @@ class TranscriptPipeline:
         use_refined = settings.feature_routing.sentence_correction.enabled
         async with self.ai.locks.get("transcript:" + session_id):
             if regroup_decisions:
+                regrouped_any = False
                 for uid, decision in regroup_decisions:
-                    await self.repo.regroup(uid, decision)
-                segments = await self.repo.segments(session_id)
-                await self.publish(
-                    session_id, "segments.regrouped", {"segments": [segment.wire() for segment in segments]}
-                )
+                    try:
+                        await self.repo.regroup(uid, decision)
+                        regrouped_any = True
+                    except AppError as error:
+                        if error.status != 404:
+                            raise
+                if regrouped_any:
+                    segments = await self.repo.segments(session_id)
+                    await self.publish(
+                        session_id, "segments.regrouped", {"segments": [segment.wire() for segment in segments]}
+                    )
             if extracted_terms is not None:
                 saved_list = await self.repo.save_highlights_for_utterances(
                     utterance_ids, extracted_terms, use_refined=use_refined,
@@ -845,7 +852,12 @@ class TranscriptPipeline:
                     missing_ids.append(uid)
                     continue
                 refined = _guard_filler_only_correction(raw_map.get(uid, ""), refined_map[uid])
-                segment_id, highlights = await self.repo.save_correction(uid, refined)
+                try:
+                    segment_id, highlights = await self.repo.save_correction(uid, refined)
+                except AppError as error:
+                    if error.status == 404:
+                        continue
+                    raise
                 await self.publish(session_id, "utterance.corrected", CorrectedEvent(
                     segment_id=segment_id, utterance_id=uid, refined_text=refined,
                 ).wire())
@@ -914,12 +926,19 @@ class TranscriptPipeline:
         if not decisions:
             return
         async with self.ai.locks.get("transcript:" + session_id):
+            regrouped_any = False
             for uid, decision in decisions:
-                await self.repo.regroup(uid, decision)
-            segments = await self.repo.segments(session_id)
-            await self.publish(
-                session_id, "segments.regrouped", {"segments": [segment.wire() for segment in segments]}
-            )
+                try:
+                    await self.repo.regroup(uid, decision)
+                    regrouped_any = True
+                except AppError as error:
+                    if error.status != 404:
+                        raise
+            if regrouped_any:
+                segments = await self.repo.segments(session_id)
+                await self.publish(
+                    session_id, "segments.regrouped", {"segments": [segment.wire() for segment in segments]}
+                )
 
     async def _compute_highlight_terms(
         self, session_id: str, utterance_ids: list[str], settings: AppSettings,

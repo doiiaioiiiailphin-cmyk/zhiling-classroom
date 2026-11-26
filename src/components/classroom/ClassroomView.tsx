@@ -82,6 +82,7 @@ export const ClassroomView: React.FC = () => {
   const micEnabled = useAppStore((s) => s.settings?.micEnabled ?? true);
   const systemAudioEnabled = useAppStore((s) => s.settings?.systemAudioEnabled ?? false);
   const onlyBookmarksFilter = useAppStore((s) => s.onlyBookmarksFilter);
+  const transcriptBatchDeleteMode = useAppStore((s) => s.transcriptBatchDeleteMode);
   const audioBarVisible = useAppStore((s) => s.audioPlayback.visible);
   const windowMaximized = useAppStore((s) => s.windowMaximized);
 
@@ -539,6 +540,10 @@ export const ClassroomView: React.FC = () => {
               setMobileTab((prev) => (prev === 'chat' ? 'transcript' : 'chat'))
             }
             className={`absolute right-3 bottom-[calc(12px+env(safe-area-inset-bottom,0px))] z-30 flex items-center justify-center border cursor-pointer select-none transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-90 ${
+              mobileTab === 'transcript' && transcriptBatchDeleteMode
+                ? 'opacity-0 scale-75 pointer-events-none'
+                : ''
+            } ${
               mobileTab === 'chat'
                 ? 'w-[46px] h-[46px] rounded-2xl border-[#DEE0E3] bg-[#F2F4F7] hover:bg-[#EBF2FF] hover:border-[#BEDAFF] text-[#1F2329] hover:text-[#1456F0] shadow-none translate-x-0 translate-y-0'
                 : `w-12 h-12 rounded-2xl border-[#1456F0] bg-[#1456F0] hover:bg-[#3370FF] text-white shadow-[0_8px_24px_rgba(20,86,240,0.32)] -translate-x-0.5 ${

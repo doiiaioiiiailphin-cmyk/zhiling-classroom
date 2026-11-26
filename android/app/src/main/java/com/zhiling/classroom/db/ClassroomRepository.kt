@@ -588,6 +588,122 @@ class ClassroomRepository(
         Pair(segId, updated)
     }
 
+    fun deleteUtterances(
+        sessionId: String,
+        utteranceIds: List<String>,
+        requireAll: Boolean = false,
+    ): UtteranceDeleteResult = synchronized(writeLock) {
+        ensureSessionExists(sessionId)
+        val uniqueIds = LinkedHashSet<String>().apply {
+            for (raw in utteranceIds) {
+                val trimmed = raw.trim()
+                if (trimmed.isNotEmpty()) add(trimmed)
+            }
+        }.toList()
+        if (uniqueIds.isEmpty()) {
+            throw AppException(400, "EMPTY_UTTERANCE_IDS", "请至少选择一条要删除的转写记录")
+        }
+        if (uniqueIds.size > 2000) {
+            throw AppException(400, "TOO_MANY_UTTERANCE_IDS", "单次最多批量删除 2000 条记录")
+        }
+
+        val foundMap = LinkedHashMap<String, String>()
+        for (chunk in uniqueIds.chunked(400)) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val args = arrayOf(sessionId) + chunk.toTypedArray()
+            readable.rawQuery(
+                "SELECT id, segment_id FROM utterances WHERE session_id = ? AND id IN ($placeholders)",
+                args,
+            ).use { cur ->
+                while (cur.moveToNext()) {
+                    foundMap[cur.getString(0)] = cur.getString(1)
+                }
+            }
+        }
+        if (requireAll && foundMap.size < uniqueIds.size) {
+            throw AppException(404, "UTTERANCE_NOT_FOUND", "发言记录不存在")
+        }
+
+        val deletedIds = uniqueIds.filter { foundMap.containsKey(it) }
+        if (deletedIds.isEmpty()) {
+            return@synchronized UtteranceDeleteResult(
+                deletedIds = emptyList(),
+                deletedCount = 0,
+                segments = listSegments(sessionId),
+            )
+        }
+
+        val affectedSegIds = LinkedHashSet<String>().apply {
+            for (uid in deletedIds) {
+                foundMap[uid]?.let { add(it) }
+            }
+        }
+
+        val ts = nowIsoUtc()
+        writable.beginTransaction()
+        try {
+            for (chunk in deletedIds.chunked(400)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                val args = arrayOf(sessionId) + chunk.toTypedArray()
+                writable.delete("utterances", "session_id = ? AND id IN ($placeholders)", args)
+            }
+
+            for (segId in affectedSegIds) {
+                val remainingUtts = readable.rawQuery(
+                    "SELECT COUNT(*) FROM utterances WHERE segment_id = ?",
+                    arrayOf(segId),
+                ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+
+                val remainingImages = readable.rawQuery(
+                    "SELECT COUNT(*) FROM session_attachments WHERE session_id = ? AND segment_id = ? AND kind != 'material'",
+                    arrayOf(sessionId, segId),
+                ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+
+                if (remainingUtts == 0 && remainingImages == 0) {
+                    writable.delete("knowledge_segments", "id = ? AND session_id = ?", arrayOf(segId, sessionId))
+                } else {
+                    val segCv = ContentValues().apply {
+                        putNull("detailed_explanation")
+                        put("updated_at", ts)
+                    }
+                    writable.update("knowledge_segments", segCv, "id = ? AND session_id = ?", arrayOf(segId, sessionId))
+
+                    // Prune highlights whose term no longer appears in remaining utterances of this segment
+                    val texts = mutableListOf<Pair<String, String>>()
+                    readable.rawQuery(
+                        "SELECT raw_text, refined_text FROM utterances WHERE segment_id = ?",
+                        arrayOf(segId),
+                    ).use { cur ->
+                        while (cur.moveToNext()) {
+                            texts.add(Pair(cur.getString(0) ?: "", cur.getString(1) ?: ""))
+                        }
+                    }
+                    val existingHighlights = listHighlightsForSegment(segId)
+                    for (hl in existingHighlights) {
+                        val stillPresent = texts.any { (raw, refined) ->
+                            raw.contains(hl.term) || refined.contains(hl.term)
+                        }
+                        if (!stillPresent) {
+                            writable.delete("segment_highlights", "id = ?", arrayOf(hl.id))
+                        }
+                    }
+                }
+            }
+
+            val sessCv = ContentValues().apply { put("updated_at", ts) }
+            writable.update("class_sessions", sessCv, "id = ?", arrayOf(sessionId))
+            writable.setTransactionSuccessful()
+        } finally {
+            writable.endTransaction()
+        }
+
+        UtteranceDeleteResult(
+            deletedIds = deletedIds,
+            deletedCount = deletedIds.size,
+            segments = listSegments(sessionId),
+        )
+    }
+
     fun bookmarkNow(sessionId: String, req: BookmarkNowRequest): Triple<String, UtteranceItem, Boolean> =
         synchronized(writeLock) {
             ensureSessionExists(sessionId)

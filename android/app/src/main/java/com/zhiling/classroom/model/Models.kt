@@ -193,6 +193,11 @@ data class UtterancePatchRequest(
 )
 
 @Serializable
+data class UtteranceBatchDeleteRequest(
+    val utteranceIds: List<String>,
+)
+
+@Serializable
 data class BookmarkNowRequest(
     val kind: String = "confused",
     val note: String? = null,
@@ -222,6 +227,13 @@ data class KnowledgeSegment(
     val utterances: List<UtteranceItem> = emptyList(),
     val highlights: List<HighlightItem> = emptyList(),
     val detailedExplanation: SegmentExplanation? = null,
+)
+
+@Serializable
+data class UtteranceDeleteResult(
+    val deletedIds: List<String>,
+    val deletedCount: Int,
+    val segments: List<KnowledgeSegment>,
 )
 
 @Serializable

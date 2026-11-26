@@ -250,6 +250,7 @@ export const SessionNotesExportModal: React.FC = () => {
         aria-modal="true"
         aria-label={`课堂总结与导出 · ${sessionTitle}`}
         data-mobile-notes-page="true"
+        style={{ paddingTop: 'var(--android-safe-top, 0px)' }}
         className="fixed inset-0 z-50 bg-[#F5F6F7] flex flex-col overflow-hidden animate-mobile-page-in"
       >
         {/* 手机端原生页面顶部导航栏 */}
@@ -583,7 +584,10 @@ export const SessionNotesExportModal: React.FC = () => {
         </div>
 
         {/* 手机端固定底部主操作栏 */}
-        <footer className="border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md px-3.5 pt-3 pb-[calc(12px+env(safe-area-inset-bottom,0px))] shrink-0">
+        <footer
+          style={{ paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))' }}
+          className="border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md px-3.5 pt-3 shrink-0"
+        >
           {tab === 'notes' && (
             <div className="flex items-center gap-2.5">
               {effectiveNote?.contentMarkdown && !isGeneratingNote && (

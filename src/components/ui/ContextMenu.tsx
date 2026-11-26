@@ -14,6 +14,8 @@ export interface ContextMenuItem {
   label: string;
   icon: LucideIcon;
   danger?: boolean;
+  disabled?: boolean;
+  dividerBefore?: boolean;
   onClick?: () => void;
   children?: Array<{
     id: string;
@@ -92,9 +94,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ position, items, onClo
 
           return (
             <div key={item.id}>
+              {item.dividerBefore && <div className="my-1 border-t border-[#ECEEF2]" />}
               <button
                 type="button"
+                disabled={item.disabled}
                 onClick={() => {
+                  if (item.disabled) return;
                   if (hasChildren) {
                     setExpandedSubId(isExpanded ? null : item.id);
                     return;
@@ -102,16 +107,22 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ position, items, onClo
                   item.onClick?.();
                   onClose();
                 }}
-                className={`w-full flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[14px] transition-colors cursor-pointer ${
-                  item.danger
-                    ? 'text-[#D83931] hover:bg-[#FFECE8]'
-                    : 'text-[#1F2329] hover:bg-[#F2F3F5]'
+                className={`w-full flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-[14px] transition-colors ${
+                  item.disabled
+                    ? 'opacity-45 cursor-not-allowed text-[#8F959E]'
+                    : item.danger
+                      ? 'text-[#D83931] hover:bg-[#FFECE8] cursor-pointer'
+                      : 'text-[#1F2329] hover:bg-[#F2F3F5] cursor-pointer'
                 }`}
               >
                 <span className="flex items-center gap-2.5">
                   <Icon
                     className={`w-[17px] h-[17px] ${
-                      item.danger ? 'text-[#D83931]' : 'text-[#4E5969]'
+                      item.disabled
+                        ? 'text-[#8F959E]'
+                        : item.danger
+                          ? 'text-[#D83931]'
+                          : 'text-[#4E5969]'
                     }`}
                     strokeWidth={1.8}
                   />

@@ -301,7 +301,7 @@ export const SettingsModal: React.FC = () => {
     appUpdate.status === 'verifying' ||
     appUpdate.status === 'applying';
 
-  const currentVersionLabel = `v${appUpdate.info?.currentVersion || '0.1.12'}`;
+  const currentVersionLabel = `v${appUpdate.info?.currentVersion || '0.1.13'}`;
 
   const renderMobileSubpageContent = (section: SettingsTabKey) => {
     if (section === 'llm') {

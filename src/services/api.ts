@@ -23,6 +23,7 @@ import type {
   UpdateApplyResult,
   UpdateCheckResult,
   UpdateDownloadProgress,
+  UtteranceDeleteResult,
   UtteranceItem,
   UtterancePatch,
 } from '../types/domain';
@@ -512,6 +513,31 @@ export const api = {
     );
   },
 
+  deleteUtterance(
+    sessionId: string,
+    utteranceId: string
+  ): Promise<UtteranceDeleteResult> {
+    if (IS_MOCK_MODE) return mockAdapter.deleteUtterances(sessionId, [utteranceId]);
+    return requestJson<UtteranceDeleteResult>(
+      `/sessions/${encodeURIComponent(sessionId)}/utterances/${encodeURIComponent(utteranceId)}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  batchDeleteUtterances(
+    sessionId: string,
+    utteranceIds: string[]
+  ): Promise<UtteranceDeleteResult> {
+    if (IS_MOCK_MODE) return mockAdapter.deleteUtterances(sessionId, utteranceIds);
+    return requestJson<UtteranceDeleteResult>(
+      `/sessions/${encodeURIComponent(sessionId)}/utterances/batch-delete`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ utteranceIds }),
+      }
+    );
+  },
+
   bookmarkNow(
     sessionId: string,
     kind: 'confused' | 'important' = 'confused',
@@ -777,8 +803,8 @@ export const api = {
   checkAppUpdates(force = false): Promise<UpdateCheckResult> {
     if (IS_MOCK_MODE) {
       return Promise.resolve({
-        currentVersion: '0.1.12',
-        latestVersion: '0.1.12',
+        currentVersion: '0.1.13',
+        latestVersion: '0.1.13',
         hasUpdate: false,
         releaseTitle: '',
         releaseNotes: '',

@@ -70,6 +70,7 @@ export const StickyNotesLayer: React.FC = React.memo(() => {
         panelStyle={{
           backgroundColor: activeTheme.headerBg,
           borderColor: activeTheme.border,
+          paddingBottom: 'var(--android-safe-bottom, 0px)',
         }}
         dataAttributes={{ 'data-mobile-sticky-sheet': 'true' }}
         showHandle

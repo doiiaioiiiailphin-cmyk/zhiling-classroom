@@ -34,6 +34,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.Locale
 
 /**
  * 知聆课堂 Android 主窗口：
@@ -197,6 +198,7 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    refreshSafeAreaInsetsFromRoot()
                     applySafeAreaInsetsToCss()
                 }
             }
@@ -230,15 +232,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
-            val bars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime()
-            )
-            val density = resources.displayMetrics.density
-            safeTopDp = bars.top / density
-            safeBottomDp = bars.bottom / density
+            updateSafeAreaInsets(insets)
             applySafeAreaInsetsToCss()
             insets
         }
+        ViewCompat.requestApplyInsets(root)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -278,8 +276,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshSafeAreaInsetsFromRoot()
+        applySafeAreaInsetsToCss()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        refreshSafeAreaInsetsFromRoot()
         applySafeAreaInsetsToCss()
         runOnUiThread {
             if (::webView.isInitialized) {
@@ -294,13 +299,32 @@ class MainActivity : AppCompatActivity() {
     private var safeTopDp: Float = 0f
     private var safeBottomDp: Float = 0f
 
+    private fun updateSafeAreaInsets(insets: WindowInsetsCompat) {
+        val bars = insets.getInsets(
+            WindowInsetsCompat.Type.systemBars()
+                or WindowInsetsCompat.Type.displayCutout()
+                or WindowInsetsCompat.Type.ime(),
+        )
+        val density = resources.displayMetrics.density.coerceAtLeast(1f)
+        safeTopDp = bars.top / density
+        safeBottomDp = bars.bottom / density
+    }
+
+    private fun refreshSafeAreaInsetsFromRoot() {
+        val decor = window?.decorView ?: return
+        val insets = ViewCompat.getRootWindowInsets(decor) ?: return
+        updateSafeAreaInsets(insets)
+    }
+
     private fun applySafeAreaInsetsToCss() {
+        val topStr = String.format(Locale.US, "%.1f", safeTopDp)
+        val bottomStr = String.format(Locale.US, "%.1f", safeBottomDp)
         val js = """
             (function(){
               var r = document.documentElement;
               if (!r) return;
-              r.style.setProperty('--android-safe-top', '${"%.1f".format(safeTopDp)}px');
-              r.style.setProperty('--android-safe-bottom', '${"%.1f".format(safeBottomDp)}px');
+              r.style.setProperty('--android-safe-top', '${topStr}px');
+              r.style.setProperty('--android-safe-bottom', '${bottomStr}px');
             })();
         """.trimIndent()
         runOnUiThread {

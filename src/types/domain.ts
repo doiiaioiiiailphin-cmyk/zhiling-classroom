@@ -103,6 +103,12 @@ export interface KnowledgeSegment {
   detailedExplanation?: SegmentDetailedExplanation;
 }
 
+export interface UtteranceDeleteResult {
+  deletedIds: string[];
+  deletedCount: number;
+  segments: KnowledgeSegment[];
+}
+
 export interface SessionAttachmentItem {
   id: string;
   sessionId: string;

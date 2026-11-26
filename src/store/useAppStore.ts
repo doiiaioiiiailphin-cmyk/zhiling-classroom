@@ -280,6 +280,7 @@ interface AppStoreState {
     seq: number;
   } | null;
   onlyBookmarksFilter: boolean;
+  transcriptBatchDeleteMode: boolean;
   windowMaximized: boolean;
   windowMotion: 'entering' | 'idle' | 'minimizing' | 'minimized-hidden' | 'closing';
 
@@ -371,6 +372,7 @@ interface AppStoreState {
   updateAudioPlaybackState: (patch: { currentMs?: number; isPlaying?: boolean }) => void;
   closeAudioPlayback: () => void;
   setOnlyBookmarksFilter: (val: boolean) => void;
+  setTranscriptBatchDeleteMode: (active: boolean) => void;
   setWindowMaximized: (val: boolean) => void;
   setWindowMotion: (
     motion: 'entering' | 'idle' | 'minimizing' | 'minimized-hidden' | 'closing'
@@ -384,6 +386,8 @@ interface AppStoreState {
   ) => Promise<void>;
 
   updateUtterance: (utteranceId: string, patch: UtterancePatch) => Promise<void>;
+  deleteUtterance: (utteranceId: string) => Promise<boolean>;
+  batchDeleteUtterances: (utteranceIds: string[]) => Promise<number>;
   markConfusedNow: (note?: string) => Promise<void>;
   jumpToTranscript: (target: {
     segmentId?: string;
@@ -724,6 +728,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     transcriptFocusRequest: null,
     chatDraftPrefill: null,
     onlyBookmarksFilter: false,
+    transcriptBatchDeleteMode: false,
     windowMaximized: false,
     windowMotion: 'entering',
 
@@ -1114,6 +1119,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           transcriptFocusRequest: null,
           chatDraftPrefill: null,
           onlyBookmarksFilter: false,
+          transcriptBatchDeleteMode: false,
           activeView: 'classroom',
         });
         try {
@@ -1181,6 +1187,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             livePartialUtterance: null,
             transcriptFocusRequest: null,
             chatDraftPrefill: null,
+            transcriptBatchDeleteMode: false,
             activeView: 'home',
           });
         } catch {
@@ -1194,6 +1201,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
             livePartialUtterance: null,
             transcriptFocusRequest: null,
             chatDraftPrefill: null,
+            transcriptBatchDeleteMode: false,
             activeView: 'home',
           });
         }
@@ -1201,6 +1209,7 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         set({
           transcriptFocusRequest: null,
           chatDraftPrefill: null,
+          transcriptBatchDeleteMode: false,
           activeView: 'home',
         });
       }
@@ -1685,6 +1694,8 @@ export const useAppStore = create<AppStoreState>((set, get) => {
 
     setOnlyBookmarksFilter: (val) => set({ onlyBookmarksFilter: val }),
 
+    setTranscriptBatchDeleteMode: (active) => set({ transcriptBatchDeleteMode: active }),
+
     setWindowMaximized: (val) => set({ windowMaximized: val }),
 
     setWindowMotion: (motion) => set({ windowMotion: motion }),
@@ -1790,6 +1801,37 @@ export const useAppStore = create<AppStoreState>((set, get) => {
         }));
       } catch (err) {
         showNotice('error', err instanceof Error ? err.message : '更新转写内容失败');
+      }
+    },
+
+    deleteUtterance: async (utteranceId) => {
+      const session = get().activeSession;
+      if (!session) return false;
+      try {
+        const res = await api.deleteUtterance(session.id, utteranceId);
+        set((state) => (state.activeSession?.id === session.id ? { segments: res.segments } : {}));
+        showNotice('info', '已删除该条转写记录');
+        return true;
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '删除转写记录失败');
+        return false;
+      }
+    },
+
+    batchDeleteUtterances: async (utteranceIds) => {
+      const session = get().activeSession;
+      const uniqueIds = Array.from(new Set(utteranceIds.filter(Boolean)));
+      if (!session || uniqueIds.length === 0) return 0;
+      try {
+        const res = await api.batchDeleteUtterances(session.id, uniqueIds);
+        set((state) => (state.activeSession?.id === session.id ? { segments: res.segments } : {}));
+        if (res.deletedCount > 0) {
+          showNotice('info', `已批量删除 ${res.deletedCount} 条转写记录`);
+        }
+        return res.deletedCount;
+      } catch (err) {
+        showNotice('error', err instanceof Error ? err.message : '批量删除转写记录失败');
+        return 0;
       }
     },
 
@@ -2394,8 +2436,23 @@ export const useAppStore = create<AppStoreState>((set, get) => {
           const bridge = getDesktopBridge();
           if (bridge?.quit_for_update) {
             void bridge.quit_for_update();
-          } else if (bridge?.close_window) {
+            return;
+          }
+          if (bridge?.close_window) {
             void bridge.close_window();
+            return;
+          }
+          // Android 端拉起系统 APK 安装器（或前往授权未知来源安装）后应用本身不会退出，
+          // 恢复为 ready 状态以便用户取消或授权返回后可再次一键安装或关闭弹窗
+          if (isAndroidPlatform()) {
+            set((state) => ({
+              appUpdate: {
+                ...state.appUpdate,
+                status: 'ready',
+                popupVisible: true,
+                errorMessage: null,
+              },
+            }));
           }
           return;
         }

@@ -142,6 +142,10 @@ class UtterancePatch(WireModel):
         return self
 
 
+class UtteranceBatchDeleteRequest(WireModel):
+    utterance_ids: Annotated[list[Id], Field(min_length=1, max_length=2000)]
+
+
 class BookmarkNowRequest(WireModel):
     kind: Literal["confused", "important"] = "confused"
     note: CleanedText | None = None
@@ -212,6 +216,12 @@ class KnowledgeSegment(WireModel):
     utterances: list[UtteranceItem]
     highlights: list[Highlight]
     detailed_explanation: SegmentExplanation | None = None
+
+
+class UtteranceDeleteResult(WireModel):
+    deleted_ids: list[Id]
+    deleted_count: int
+    segments: list[KnowledgeSegment]
 
 
 class SessionAttachmentItem(WireModel):

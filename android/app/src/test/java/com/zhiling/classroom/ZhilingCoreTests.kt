@@ -288,4 +288,23 @@ class ZhilingCoreTests {
         assertFalse(defaults.featureRouting.keyTermHighlight.enabled)
         assertFalse(defaults.featureRouting.bubbleExplanation.enabled)
     }
+
+    @Test
+    fun testUtteranceBatchDeleteWireModelsRoundTrip() {
+        val req = UtteranceBatchDeleteRequest(utteranceIds = listOf("u-1", "u-2", "u-3"))
+        val reqJson = WireJson.encodeToString(UtteranceBatchDeleteRequest.serializer(), req)
+        val decodedReq = WireJson.decodeFromString(UtteranceBatchDeleteRequest.serializer(), reqJson)
+        assertEquals(listOf("u-1", "u-2", "u-3"), decodedReq.utteranceIds)
+
+        val res = UtteranceDeleteResult(
+            deletedIds = listOf("u-1", "u-2"),
+            deletedCount = 2,
+            segments = emptyList(),
+        )
+        val resJson = WireJson.encodeToString(UtteranceDeleteResult.serializer(), res)
+        val decodedRes = WireJson.decodeFromString(UtteranceDeleteResult.serializer(), resJson)
+        assertEquals(2, decodedRes.deletedCount)
+        assertEquals(listOf("u-1", "u-2"), decodedRes.deletedIds)
+        assertTrue(decodedRes.segments.isEmpty())
+    }
 }
