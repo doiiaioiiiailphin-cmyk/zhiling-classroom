@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlignLeft,
   ArrowLeft,
   Bookmark,
   BookmarkPlus,
@@ -8,7 +7,6 @@ import {
   FileText,
   FileUp,
   Headphones,
-  MessageSquareText,
   Mic,
   Pause,
   PictureInPicture2,
@@ -16,6 +14,7 @@ import {
   StickyNote,
   Volume2,
 } from 'lucide-react';
+import { useSpringDriver } from '../../hooks/useSpringDriver';
 import { useAppStore } from '../../store/useAppStore';
 import {
   getDesktopBridge,
@@ -23,6 +22,7 @@ import {
   isMacPlatform,
   useViewportLayout,
 } from '../../utils/desktopBridge';
+import { prefersReducedMotion, triggerHaptic } from '../../utils/springPhysics';
 import { formatDuration } from '../../utils/format';
 import { IconButton } from '../ui/IconButton';
 import { MoreGridMenu, type GridMenuItem } from '../ui/MoreGridMenu';
@@ -109,6 +109,23 @@ export const ClassroomView: React.FC = () => {
   const [mobileStickyBasketOpen, setMobileStickyBasketOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const materialInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileStageRef = useRef<HTMLDivElement | null>(null);
+  const transcriptLayerRef = useRef<HTMLDivElement | null>(null);
+  const chatLayerRef = useRef<HTMLDivElement | null>(null);
+  const revealRingRef = useRef<HTMLDivElement | null>(null);
+  const toggleBtnRef = useRef<HTMLButtonElement | null>(null);
+  const revealOriginRef = useRef<{ cx: number; cy: number; maxRadius: number }>({
+    cx: 354,
+    cy: 740,
+    maxRadius: 880,
+  });
+  const hasInitializedRevealRef = useRef(false);
+  const iconGroupRef = useRef<SVGGElement | null>(null);
+  const bubbleGroupRef = useRef<SVGGElement | null>(null);
+  const bubblePathRef = useRef<SVGPathElement | null>(null);
+  const line1Ref = useRef<SVGLineElement | null>(null);
+  const line2Ref = useRef<SVGLineElement | null>(null);
+  const line3Ref = useRef<SVGLineElement | null>(null);
 
   const viewport = useViewportLayout();
   const isMobileViewport = viewport.isCompactWidth;
@@ -174,6 +191,176 @@ export const ClassroomView: React.FC = () => {
       setMobileTab('chat');
     }
   }, [isMobileViewport, chatPrefillSeq]);
+
+  const applyRevealFrame = useMemo(() => {
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+    return (rawVal: number, _vel: number, settled: boolean) => {
+      const p = clamp01(rawVal / 1000);
+      const origin = revealOriginRef.current;
+      const minRadius = 20;
+      const radius = minRadius + (origin.maxRadius - minRadius) * p;
+      const chatLayer = chatLayerRef.current;
+      const transcriptLayer = transcriptLayerRef.current;
+      const ringEl = revealRingRef.current;
+      const isAnimating = !settled && p > 0.002 && p < 0.998;
+
+      if (chatLayer) {
+        if (settled && p <= 0.01) {
+          chatLayer.style.visibility = 'hidden';
+          chatLayer.style.pointerEvents = 'none';
+          chatLayer.style.clipPath = `circle(0px at ${origin.cx.toFixed(1)}px ${origin.cy.toFixed(1)}px)`;
+          chatLayer.style.willChange = '';
+          chatLayer.dataset.revealState = 'hidden';
+        } else if (settled && p >= 0.99) {
+          chatLayer.style.visibility = 'visible';
+          chatLayer.style.pointerEvents = 'auto';
+          chatLayer.style.clipPath = '';
+          chatLayer.style.willChange = '';
+          chatLayer.dataset.revealState = 'shown';
+        } else {
+          chatLayer.style.visibility = 'visible';
+          chatLayer.style.pointerEvents = p >= 0.5 ? 'auto' : 'none';
+          chatLayer.style.willChange = 'clip-path';
+          chatLayer.style.clipPath = `circle(${radius.toFixed(1)}px at ${origin.cx.toFixed(1)}px ${origin.cy.toFixed(1)}px)`;
+          chatLayer.dataset.revealState = 'animating';
+        }
+      }
+
+      if (transcriptLayer) {
+        if (settled) {
+          transcriptLayer.style.transform = '';
+          transcriptLayer.style.willChange = '';
+        } else {
+          transcriptLayer.style.willChange = 'transform';
+          transcriptLayer.style.transform = `scale(${(1 - 0.016 * p).toFixed(4)})`;
+        }
+      }
+
+      if (ringEl) {
+        if (isAnimating) {
+          const diameter = radius * 2;
+          ringEl.style.opacity = (Math.sin(Math.PI * p) * 0.45).toFixed(3);
+          ringEl.style.width = `${diameter.toFixed(1)}px`;
+          ringEl.style.height = `${diameter.toFixed(1)}px`;
+          ringEl.style.transform = `translate3d(${(origin.cx - radius).toFixed(1)}px, ${(origin.cy - radius).toFixed(1)}px, 0)`;
+        } else {
+          ringEl.style.opacity = '0';
+          ringEl.style.transform = 'scale(0)';
+        }
+      }
+
+      // 同步按钮内部矢量图案变形：聊天气泡 <-> 转写列表三横线
+      const midBell = Math.sin(Math.PI * p);
+      if (iconGroupRef.current) {
+        const rot = (-16 * midBell).toFixed(2);
+        const sc = (1 + 0.12 * midBell).toFixed(4);
+        iconGroupRef.current.setAttribute(
+          'transform',
+          `translate(12 12) rotate(${rot}) scale(${sc}) translate(-12 -12)`
+        );
+      }
+
+      const tOut = clamp01(p / 0.58);
+      const easeOutBubble = 1 - (1 - tOut) * (1 - tOut);
+      if (bubblePathRef.current) {
+        bubblePathRef.current.setAttribute('stroke-dashoffset', (easeOutBubble * 102).toFixed(2));
+        bubblePathRef.current.style.opacity = clamp01(1 - tOut * 1.15).toFixed(3);
+      }
+      if (bubbleGroupRef.current) {
+        const bubbleScale = (1 + easeOutBubble * 0.18).toFixed(4);
+        const bubbleRot = (-10 * easeOutBubble).toFixed(2);
+        bubbleGroupRef.current.setAttribute(
+          'transform',
+          `translate(12 12) rotate(${bubbleRot}) scale(${bubbleScale}) translate(-12 -12)`
+        );
+      }
+
+      if (line1Ref.current) {
+        line1Ref.current.setAttribute('x1', lerp(8, 4, p).toFixed(2));
+        line1Ref.current.setAttribute('y1', lerp(9, 6, p).toFixed(2));
+        line1Ref.current.setAttribute('x2', lerp(16, 20, p).toFixed(2));
+        line1Ref.current.setAttribute('y2', lerp(9, 6, p).toFixed(2));
+      }
+      if (line2Ref.current) {
+        line2Ref.current.setAttribute('x1', lerp(8, 4, p).toFixed(2));
+        line2Ref.current.setAttribute('y1', lerp(13, 12, p).toFixed(2));
+        line2Ref.current.setAttribute('x2', lerp(13, 15, p).toFixed(2));
+        line2Ref.current.setAttribute('y2', lerp(13, 12, p).toFixed(2));
+      }
+      if (line3Ref.current) {
+        const tLine3 = clamp01((p - 0.22) / 0.78);
+        line3Ref.current.setAttribute('x1', lerp(8, 4, tLine3).toFixed(2));
+        line3Ref.current.setAttribute('y1', lerp(13, 18, tLine3).toFixed(2));
+        line3Ref.current.setAttribute('x2', lerp(8, 18, tLine3).toFixed(2));
+        line3Ref.current.setAttribute('y2', lerp(13, 18, tLine3).toFixed(2));
+        line3Ref.current.style.opacity = clamp01((p - 0.22) / 0.42).toFixed(3);
+      }
+    };
+  }, []);
+
+  const revealSpring = useSpringDriver({
+    initialValue: 0,
+    config: {
+      stiffness: 290,
+      damping: 31,
+      mass: 1,
+      restDisplacementThreshold: 0.5,
+      restVelocityThreshold: 0.8,
+    },
+    onUpdate: applyRevealFrame,
+  });
+
+  const revealOriginCapturedRef = useRef(false);
+
+  const captureRevealOrigin = () => {
+    const stageEl = mobileStageRef.current;
+    const btnEl = toggleBtnRef.current;
+    if (!stageEl || !btnEl) return false;
+    const stageRect = stageEl.getBoundingClientRect();
+    const btnRect = btnEl.getBoundingClientRect();
+    if (stageRect.width <= 0 || stageRect.height <= 0 || btnRect.width <= 0) return false;
+    const cx = btnRect.left - stageRect.left + btnRect.width / 2;
+    const cy = btnRect.top - stageRect.top + btnRect.height / 2;
+    const maxRadius =
+      Math.hypot(
+        Math.max(cx, stageRect.width - cx),
+        Math.max(cy, stageRect.height - cy),
+      ) + 20;
+    revealOriginRef.current = { cx, cy, maxRadius };
+    return true;
+  };
+
+  useLayoutEffect(() => {
+    if (!isMobileViewport) {
+      hasInitializedRevealRef.current = false;
+      revealOriginCapturedRef.current = false;
+      return;
+    }
+
+    if (!revealOriginCapturedRef.current) {
+      captureRevealOrigin();
+    }
+    revealOriginCapturedRef.current = false;
+
+    const targetVal = mobileTab === 'chat' ? 1000 : 0;
+    if (!hasInitializedRevealRef.current || prefersReducedMotion()) {
+      hasInitializedRevealRef.current = true;
+      revealSpring.jumpTo(targetVal);
+      return;
+    }
+
+    revealSpring.animateTo(targetVal, {
+      config: {
+        stiffness: 290,
+        damping: 31,
+        mass: 1,
+        restDisplacementThreshold: 0.5,
+        restVelocityThreshold: 0.8,
+      },
+    });
+  }, [isMobileViewport, mobileTab, revealSpring]);
 
   const totalBookmarkCount = useMemo(
     () =>
@@ -500,29 +687,28 @@ export const ClassroomView: React.FC = () => {
         </div>
       </header>
 
-      {/* 主体：桌面/平板（>=768px）保持可拖拽双栏；手机端（<768px）转写全屏沉浸 + 底部对话框形态，右下角持久变形按钮丝滑切换 */}
+      {/* 主体：桌面/平板（>=768px）保持可拖拽双栏；手机端（<768px）转写全屏沉浸，右下角按钮通过圆形蒙版 + 图案联动变形平滑切换问答 */}
       {isMobileViewport ? (
-        <div className="flex-1 relative min-h-0 overflow-hidden bg-[#F5F6F7]">
-          {/* 转写记录主层：始终挂载保留滚动位置，切换问答时轻微景深退后 */}
+        <div
+          ref={mobileStageRef}
+          data-mobile-stage="true"
+          className="flex-1 relative min-h-0 overflow-hidden bg-[#F5F6F7]"
+        >
+          {/* 转写记录主层：始终挂载保留滚动位置，切换过程中保持轻量景深缩放 */}
           <div
+            ref={transcriptLayerRef}
             aria-hidden={mobileTab !== 'transcript'}
-            className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[transform,opacity] ${
-              mobileTab === 'transcript'
-                ? 'opacity-100 scale-100 translate-y-0 pointer-events-auto z-10'
-                : 'opacity-0 scale-[0.968] -translate-y-2.5 pointer-events-none z-0'
-            }`}
+            className="absolute inset-0 z-10 origin-center"
           >
             <TranscriptPanel />
           </div>
 
-          {/* 课堂问答层：自带底部对话框底栏，切回转写时整层与底栏一并平滑收起 */}
+          {/* 课堂问答层：由 120Hz RK4 圆形蒙版自右下角切换按钮中心向外绽放/收拢 */}
           <div
+            ref={chatLayerRef}
+            data-mobile-chat-layer="true"
             aria-hidden={mobileTab !== 'chat'}
-            className={`absolute inset-0 transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[transform,opacity] ${
-              mobileTab === 'chat'
-                ? 'opacity-100 translate-y-0 scale-100 pointer-events-auto z-20'
-                : 'opacity-0 translate-y-7 scale-[0.985] pointer-events-none z-0'
-            }`}
+            className="absolute inset-0 z-20"
           >
             <ChatPanel
               mobileDockMode
@@ -530,16 +716,28 @@ export const ClassroomView: React.FC = () => {
             />
           </div>
 
-          {/* 底栏右下角持久变形切换小按钮：问答态嵌在对话框右下角，转写态仅保留该悬浮小按钮 */}
+          {/* 圆形蒙版扩展前沿柔光环，强化边缘质感 */}
+          <div
+            ref={revealRingRef}
+            aria-hidden="true"
+            style={{ opacity: 0, transform: 'scale(0)' }}
+            className="pointer-events-none absolute left-0 top-0 z-[25] rounded-full border-[1.5px] border-[#1456F0]/45 shadow-[0_0_24px_rgba(20,86,240,0.2)] will-change-transform"
+          />
+
+          {/* 底栏右下角持久变形切换小按钮：内置矢量图案与圆形蒙版逐帧同步形变 */}
           <button
+            ref={toggleBtnRef}
             type="button"
             data-mobile-view-toggle={mobileTab}
             aria-label={mobileTab === 'chat' ? '切换至转写记录' : '切换至课堂问答'}
             title={mobileTab === 'chat' ? '切回转写记录' : '打开课堂问答'}
-            onClick={() =>
-              setMobileTab((prev) => (prev === 'chat' ? 'transcript' : 'chat'))
-            }
-            className={`absolute right-3 bottom-[calc(12px+env(safe-area-inset-bottom,0px))] z-30 flex items-center justify-center border cursor-pointer select-none transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-90 ${
+            onClick={() => {
+              triggerHaptic('selection');
+              revealOriginCapturedRef.current = captureRevealOrigin();
+              setMobileTab((prev) => (prev === 'chat' ? 'transcript' : 'chat'));
+            }}
+            style={{ transitionTimingFunction: 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))' }}
+            className={`spring-press absolute right-3 bottom-[calc(12px+env(safe-area-inset-bottom,0px))] z-30 flex items-center justify-center border cursor-pointer select-none transition-[transform,opacity,background-color,border-color,color,width,height,box-shadow] duration-[360ms] ${
               mobileTab === 'transcript' && transcriptBatchDeleteMode
                 ? 'opacity-0 scale-75 pointer-events-none'
                 : ''
@@ -551,24 +749,41 @@ export const ClassroomView: React.FC = () => {
                   }`
             }`}
           >
-            <span className="relative w-5 h-5 flex items-center justify-center">
-              <MessageSquareText
-                className={`absolute w-[21px] h-[21px] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
-                  mobileTab === 'transcript'
-                    ? 'opacity-100 scale-100 rotate-0'
-                    : 'opacity-0 scale-50 -rotate-45'
-                }`}
-                strokeWidth={2}
-              />
-              <AlignLeft
-                className={`absolute w-5 h-5 transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
-                  mobileTab === 'chat'
-                    ? 'opacity-100 scale-100 rotate-0'
-                    : 'opacity-0 scale-50 rotate-45'
-                }`}
-                strokeWidth={2.1}
-              />
-            </span>
+            <svg
+              data-morph-icon="true"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-[21px] h-[21px] overflow-visible pointer-events-none"
+              aria-hidden="true"
+            >
+              <g ref={iconGroupRef}>
+                <g ref={bubbleGroupRef}>
+                  <path
+                    ref={bubblePathRef}
+                    data-morph-bubble="true"
+                    pathLength={100}
+                    strokeDasharray="100"
+                    strokeDashoffset="0"
+                    d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+                  />
+                </g>
+                <line ref={line1Ref} data-morph-line="1" x1="8" y1="9" x2="16" y2="9" />
+                <line ref={line2Ref} data-morph-line="2" x1="8" y1="13" x2="13" y2="13" />
+                <line
+                  ref={line3Ref}
+                  data-morph-line="3"
+                  x1="8"
+                  y1="13"
+                  x2="8"
+                  y2="13"
+                  style={{ opacity: 0 }}
+                />
+              </g>
+            </svg>
             {mobileTab === 'transcript' && isAiSending && (
               <span
                 aria-hidden="true"

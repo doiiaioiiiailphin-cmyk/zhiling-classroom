@@ -95,27 +95,34 @@ def sticky_note_item(
     timestamps: list[StickyNoteTimestamp],
     conflicts: list[StickyNoteTimestampConflict] | None = None,
 ) -> StickyNoteItem:
-    sorted_ts = sorted(timestamps, key=lambda t: (t.char_offset, t.timestamp_sec, t.id))
+    sorted_ts = sorted(
+        timestamps,
+        key=lambda t: (
+            int(t.char_offset) if t.char_offset is not None else 0,
+            int(t.timestamp_sec) if t.timestamp_sec is not None else 0,
+            t.id,
+        ),
+    )
     return StickyNoteItem(
         id=row.id,
         session_id=row.session_id,
         title=row.title or "",
         content=row.content or "",
         paper_color=row.paper_color if row.paper_color in {"cream", "butter", "sage", "blush"} else "cream",
-        pos_x=row.pos_x,
-        pos_y=row.pos_y,
-        width=row.width,
-        height=row.height,
+        pos_x=int(row.pos_x) if row.pos_x is not None else 120,
+        pos_y=int(row.pos_y) if row.pos_y is not None else 96,
+        width=int(row.width) if row.width is not None else 340,
+        height=int(row.height) if row.height is not None else 300,
         is_open=bool(row.is_open),
-        z_order=row.z_order,
+        z_order=int(row.z_order) if row.z_order is not None else 1,
         is_translucent=bool(row.is_translucent),
         timestamps=[
             StickyNoteTimestampItem(
                 id=t.id,
                 note_id=t.note_id,
-                timestamp_sec=t.timestamp_sec,
-                timestamp_text=t.timestamp_text,
-                char_offset=t.char_offset,
+                timestamp_sec=int(t.timestamp_sec) if t.timestamp_sec is not None else 0,
+                timestamp_text=t.timestamp_text or format_ms(max(0, int(t.timestamp_sec or 0) * 1000)),
+                char_offset=int(t.char_offset) if t.char_offset is not None else 0,
                 created_at=iso_utc(t.created_at),
             )
             for t in sorted_ts
@@ -151,9 +158,15 @@ def folder_item(row: Folder) -> FolderItem:
 
 def session_card(row: ClassSession, speakers: int, segments: int) -> SessionCard:
     return SessionCard(
-        id=row.id, folder_id=row.folder_id, title=row.title, status=row.status,
-        duration_seconds=row.duration_seconds, speaker_count=speakers, segment_count=segments,
-        created_at=iso_utc(row.created_at), updated_at=iso_utc(row.updated_at),
+        id=row.id,
+        folder_id=row.folder_id,
+        title=row.title or "未命名课堂",
+        status=row.status if row.status in {"idle", "recording", "paused"} else "idle",
+        duration_seconds=max(0, int(row.duration_seconds or 0)),
+        speaker_count=speakers,
+        segment_count=segments,
+        created_at=iso_utc(row.created_at),
+        updated_at=iso_utc(row.updated_at),
     )
 
 
@@ -174,11 +187,19 @@ def default_speaker_label(channel: str, existing_count: int) -> str:
 
 
 def utterance_item(row: Utterance, label: str) -> UtteranceItem:
+    start_ms = max(0, int(row.start_time_ms or 0))
+    end_ms = max(start_ms, int(row.end_time_ms if row.end_time_ms is not None else start_ms))
+    raw_text = row.raw_text or ""
     item = UtteranceItem(
-        id=row.id, speaker_id=row.speaker_id, speaker_label=label,
-        timestamp_text=format_ms(row.start_time_ms), start_time_ms=row.start_time_ms,
-        end_time_ms=row.end_time_ms, raw_text=row.raw_text,
-        refined_text=row.refined_text, is_refined=row.is_refined,
+        id=row.id,
+        speaker_id=row.speaker_id,
+        speaker_label=label or "讲话人",
+        timestamp_text=format_ms(start_ms),
+        start_time_ms=start_ms,
+        end_time_ms=end_ms,
+        raw_text=raw_text,
+        refined_text=row.refined_text if row.refined_text is not None else raw_text,
+        is_refined=bool(row.is_refined),
     )
     if row.is_bookmarked:
         item.is_bookmarked = True
@@ -200,10 +221,10 @@ def attachment_item(row: SessionAttachment) -> SessionAttachmentItem:
         id=row.id,
         session_id=row.session_id,
         segment_id=row.segment_id,
-        kind=row.kind,
-        file_name=row.file_name,
-        mime_type=row.mime_type,
-        size_bytes=row.size_bytes,
+        kind=row.kind if row.kind in {"screenshot", "image", "material"} else "material",
+        file_name=row.file_name or "未命名附件",
+        mime_type=row.mime_type or "application/octet-stream",
+        size_bytes=max(0, int(row.size_bytes or 0)),
         url=f"/api/v1/sessions/{row.session_id}/attachments/{row.id}/raw",
         created_at=iso_utc(row.created_at),
     )
@@ -223,7 +244,10 @@ def attachment_item(row: SessionAttachment) -> SessionAttachmentItem:
 
 def message_item(row: Message, attachments_map: dict[str, SessionAttachmentItem] | None = None) -> ChatMessage:
     message = ChatMessage(
-        id=row.id, session_id=row.session_id, role=row.role, content=row.content,
+        id=row.id,
+        session_id=row.session_id,
+        role=row.role if row.role in {"user", "assistant"} else "assistant",
+        content=row.content or "",
         created_at=iso_utc(row.created_at),
     )
     if row.thinking:
@@ -237,18 +261,25 @@ def message_item(row: Message, attachments_map: dict[str, SessionAttachmentItem]
                 resolved = [attachments_map[aid] for aid in att_ids if aid in attachments_map]
                 if resolved:
                     message.attachments = resolved
-        except ValueError:
+        except (ValueError, TypeError):
             pass
     return message
 
 
 def segment_item(row: Segment, utterances=None, highlights=None) -> KnowledgeSegment:
     segment = KnowledgeSegment(
-        id=row.id, session_id=row.session_id, order_index=row.order_index, topic_title=row.topic_title,
-        utterances=utterances or [], highlights=highlights or [],
+        id=row.id,
+        session_id=row.session_id,
+        order_index=int(row.order_index or 0),
+        topic_title=row.topic_title or "",
+        utterances=utterances or [],
+        highlights=highlights or [],
     )
     if row.detailed_explanation:
-        segment.detailed_explanation = SegmentExplanation.model_validate_json(row.detailed_explanation)
+        try:
+            segment.detailed_explanation = SegmentExplanation.model_validate_json(row.detailed_explanation)
+        except (ValueError, TypeError):
+            segment.detailed_explanation = None
     return segment
 
 
@@ -389,14 +420,20 @@ class Repository:
             if row.study_note_json:
                 try:
                     ws.study_note = SessionStudyNote.model_validate_json(row.study_note_json)
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
             if row.flashcards_json:
                 try:
                     raw_cards = json.loads(row.flashcards_json)
                     if isinstance(raw_cards, list):
-                        ws.flashcards = [FlashcardItem.model_validate(item) for item in raw_cards]
-                except ValueError:
+                        parsed_cards: list[FlashcardItem] = []
+                        for item in raw_cards:
+                            try:
+                                parsed_cards.append(FlashcardItem.model_validate(item))
+                            except (ValueError, TypeError):
+                                continue
+                        ws.flashcards = parsed_cards
+                except (ValueError, TypeError):
                     pass
             if attachments:
                 ws.attachments = attachments

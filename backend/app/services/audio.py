@@ -76,10 +76,10 @@ class AudioStorage:
         return path
 
     def existing_duration_ms(self, session_id: str) -> int:
-        path = self.path(session_id)
         try:
+            path = self.path(session_id)
             return max(0, path.stat().st_size - WAV_HEADER.size) // BYTES_PER_MS
-        except FileNotFoundError:
+        except (OSError, AppError):
             return 0
 
     def read_wav_slice(

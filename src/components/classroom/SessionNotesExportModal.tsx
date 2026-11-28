@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
 import {
   BookOpenCheck,
   Check,
@@ -15,6 +14,7 @@ import {
   RefreshCw,
   RotateCcw,
 } from 'lucide-react';
+import { useOverscrollSpring } from '../../hooks/useOverscrollSpring';
 import { useSmoothStream } from '../../hooks/useSmoothStream';
 import { AddonDownloadCancelled, api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
@@ -24,7 +24,9 @@ import type {
   SessionStudyNote,
 } from '../../types/domain';
 import { useViewportLayout } from '../../utils/desktopBridge';
+import { triggerHaptic } from '../../utils/springPhysics';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
+import { MobileSpringPage } from '../ui/MobileSpringPage';
 import { Modal } from '../ui/Modal';
 import { ThinkingDisclosure } from '../ui/ThinkingDisclosure';
 
@@ -221,6 +223,20 @@ export const SessionNotesExportModal: React.FC = () => {
   // 手机窄屏/矮横屏使用全屏页面式；平板大屏与桌面端保持类电脑弹窗体验
   const useMobilePageLayout = viewport.isCompactPhoneLayout;
   const canClose = !isGeneratingNote && !isExporting;
+  const notesOverscroll = useOverscrollSpring({
+    enabled: (useMobilePageLayout || viewport.isMobileTouchLayout) && modalState.open,
+  });
+  const {
+    reset: resetNotesOverscroll,
+    bindScrollRef: bindNotesScrollRef,
+    scrollRef: notesScrollRef,
+    contentRef: notesContentRef,
+  } = notesOverscroll;
+
+  useEffect(() => {
+    resetNotesOverscroll();
+    notesScrollRef.current?.scrollTo({ top: 0 });
+  }, [tab, resetNotesOverscroll, notesScrollRef]);
 
   useEffect(() => {
     if (!modalState.open || !useMobilePageLayout) return;
@@ -234,8 +250,6 @@ export const SessionNotesExportModal: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [modalState.open, useMobilePageLayout, canClose, closeNotesExportModal]);
 
-  if (!modalState.open) return null;
-
   const canExportAny =
     includeStudyNote ||
     includeHighlights ||
@@ -244,82 +258,107 @@ export const SessionNotesExportModal: React.FC = () => {
     includeStickyNotes;
 
   if (useMobilePageLayout) {
-    return createPortal(
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={`课堂总结与导出 · ${sessionTitle}`}
-        data-mobile-notes-page="true"
-        style={{ paddingTop: 'var(--android-safe-top, 0px)' }}
-        className="fixed inset-0 z-50 bg-[#F5F6F7] flex flex-col overflow-hidden animate-mobile-page-in"
+    const tabIndex = tab === 'notes' ? 0 : tab === 'flashcards' ? 1 : 2;
+    return (
+      <MobileSpringPage
+        open={modalState.open}
+        onClose={() => {
+          if (canClose) closeNotesExportModal();
+        }}
+        enableSwipeBack={canClose}
+        zIndexClassName="z-50"
+        className="bg-[#F5F6F7]"
       >
-        {/* 手机端原生页面顶部导航栏 */}
-        <header className="h-[52px] bg-white border-b border-[#ECEEF2] px-2 flex items-center justify-between gap-2 shrink-0">
-          <button
-            type="button"
-            disabled={!canClose}
-            onClick={() => {
-              if (canClose) closeNotesExportModal();
-            }}
-            aria-label="返回课堂"
-            className="h-10 px-2 rounded-xl text-[#1F2329] active:bg-[#F2F3F5] disabled:opacity-40 inline-flex items-center gap-0.5 text-[15px] font-medium shrink-0 cursor-pointer"
-          >
-            <ChevronLeft className="w-5 h-5 shrink-0" />
-            <span>返回</span>
-          </button>
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`课堂总结与导出 · ${sessionTitle}`}
+          data-mobile-notes-page="true"
+          style={{ paddingTop: 'var(--android-safe-top, 0px)' }}
+          className="h-full w-full flex flex-col overflow-hidden"
+        >
+          {/* 手机端原生页面顶部导航栏 */}
+          <header className="h-[52px] bg-white border-b border-[#ECEEF2] px-2 flex items-center justify-between gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={!canClose}
+              onClick={() => {
+                if (canClose) closeNotesExportModal();
+              }}
+              aria-label="返回课堂"
+              className="spring-press h-10 px-2 rounded-xl text-[#1F2329] active:bg-[#F2F3F5] disabled:opacity-40 inline-flex items-center gap-0.5 text-[15px] font-medium shrink-0 cursor-pointer"
+            >
+              <ChevronLeft className="w-5 h-5 shrink-0" />
+              <span>返回</span>
+            </button>
 
-          <div className="min-w-0 flex-1 text-center px-1">
-            <div className="text-[16px] font-semibold text-[#1F2329] truncate">
-              {sessionTitle}
+            <div className="min-w-0 flex-1 text-center px-1">
+              <div className="text-[16px] font-semibold text-[#1F2329] truncate">
+                {sessionTitle}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={!canClose}
+              onClick={() => {
+                if (canClose) closeNotesExportModal();
+              }}
+              className="spring-press h-10 px-3 rounded-xl text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 text-[15px] font-medium shrink-0 cursor-pointer"
+            >
+              完成
+            </button>
+          </header>
+
+          {/* 三等分原生滑动指示胶囊切换栏 */}
+          <div className="px-3.5 py-2.5 bg-white border-b border-[#ECEEF2] shrink-0">
+            <div className="relative grid grid-cols-3 rounded-xl bg-[#EEF0F4] p-1">
+              <div
+                aria-hidden="true"
+                style={{
+                  transform: `translate3d(${tabIndex * 100}%, 0, 0)`,
+                  transitionTimingFunction: 'var(--spring-snappy, cubic-bezier(0.22, 1, 0.36, 1))',
+                }}
+                className="pointer-events-none absolute top-1 bottom-1 left-1 w-[calc((100%-8px)/3)] rounded-lg bg-white shadow-xs transition-transform duration-[280ms]"
+              />
+              {(
+                [
+                  { key: 'notes', label: '精编笔记', icon: BookOpenCheck },
+                  { key: 'flashcards', label: '自测闪卡', icon: Layers },
+                  { key: 'export', label: '导出文档', icon: FileDown },
+                ] as const
+              ).map((item) => {
+                const Icon = item.icon;
+                const active = tab === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    data-notes-tab={item.key}
+                    onClick={() => {
+                      triggerHaptic('selection');
+                      setTab(item.key);
+                    }}
+                    className={`relative z-10 h-9 px-1.5 rounded-lg text-[14px] font-medium inline-flex items-center justify-center gap-1 min-w-0 whitespace-nowrap transition-colors duration-200 cursor-pointer ${
+                      active
+                        ? 'text-[#1456F0]'
+                        : 'text-[#4E5969] active:text-[#1F2329]'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={!canClose}
-            onClick={() => {
-              if (canClose) closeNotesExportModal();
-            }}
-            className="h-10 px-3 rounded-xl text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 text-[15px] font-medium shrink-0 cursor-pointer"
+          {/* 主体全页滚动内容区（支持顶/底部物理橡皮筋回弹） */}
+          <div
+            ref={bindNotesScrollRef}
+            className="flex-1 min-h-0 overflow-y-auto overscroll-contain-y px-3.5 py-4"
           >
-            完成
-          </button>
-        </header>
-
-        {/* 三等分原生分段切换栏：窄屏绝无遮挡或裁切 */}
-        <div className="px-3.5 py-2.5 bg-white border-b border-[#ECEEF2] shrink-0">
-          <div className="grid grid-cols-3 gap-1 rounded-xl bg-[#EEF0F4] p-1">
-            {(
-              [
-                { key: 'notes', label: '精编笔记', icon: BookOpenCheck },
-                { key: 'flashcards', label: '自测闪卡', icon: Layers },
-                { key: 'export', label: '导出文档', icon: FileDown },
-              ] as const
-            ).map((item) => {
-              const Icon = item.icon;
-              const active = tab === item.key;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  data-notes-tab={item.key}
-                  onClick={() => setTab(item.key)}
-                  className={`h-9 px-1.5 rounded-lg text-[14px] font-medium inline-flex items-center justify-center gap-1 min-w-0 whitespace-nowrap transition-all cursor-pointer ${
-                    active
-                      ? 'bg-white text-[#1456F0] shadow-xs'
-                      : 'text-[#4E5969] active:text-[#1F2329]'
-                  }`}
-                >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className="truncate">{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* 主体全页滚动内容区 */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-3.5 py-4 space-y-4">
+            <div ref={notesContentRef} className="min-h-full space-y-4">
           {loadingWorkspace ? (
             <div className="h-full flex items-center justify-center gap-2.5 text-[15px] text-[#646A73]">
               <Loader2 className="w-5 h-5 animate-spin text-[#1456F0]" />
@@ -375,32 +414,50 @@ export const SessionNotesExportModal: React.FC = () => {
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={() => setFlipped((f) => !f)}
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setFlipped((f) => !f);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
                       setFlipped((f) => !f);
                     }
                   }}
-                  className="flex-1 min-h-[240px] rounded-2xl border border-[#BEDAFF] bg-gradient-to-b from-[#F8FAFF] to-white p-5 flex flex-col justify-between shadow-xs active:scale-[0.99] transition-transform cursor-pointer select-none"
+                  className="flashcard-perspective flex-1 min-h-[240px] cursor-pointer select-none"
                 >
-                  <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
-                    <span>{flipped ? '参考解析与答案' : '自测提问（点击翻转）'}</span>
-                    <RotateCcw className="w-4 h-4 shrink-0" />
-                  </div>
+                  <div
+                    className={`flashcard-inner grid grid-cols-1 grid-rows-1 h-full min-h-[240px] ${
+                      flipped ? 'is-flipped' : ''
+                    }`}
+                  >
+                    <div className="flashcard-face col-start-1 row-start-1 rounded-2xl border border-[#BEDAFF] bg-gradient-to-b from-[#F8FAFF] to-white p-5 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
+                        <span>自测提问（点击翻转）</span>
+                        <RotateCcw className="w-4 h-4 shrink-0" />
+                      </div>
+                      <div className="my-auto py-4">
+                        <p className="text-[17px] font-semibold text-[#1F2329] leading-relaxed">
+                          {currentCard.front}
+                        </p>
+                      </div>
+                      <div className="text-[14px] text-[#646A73]">
+                        先思考作答，再点击卡片核对
+                      </div>
+                    </div>
 
-                  <div className="my-auto py-4">
-                    {flipped ? (
-                      <MarkdownRenderer content={currentCard.back} />
-                    ) : (
-                      <p className="text-[17px] font-semibold text-[#1F2329] leading-relaxed">
-                        {currentCard.front}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="text-[14px] text-[#646A73]">
-                    {flipped ? '再次点击卡片切回题目面' : '先思考作答，再点击卡片核对'}
+                    <div className="flashcard-face flashcard-face-back col-start-1 row-start-1 rounded-2xl border border-[#94BFFF] bg-gradient-to-b from-[#F2F7FF] to-white p-5 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
+                        <span>参考解析与答案</span>
+                        <RotateCcw className="w-4 h-4 shrink-0" />
+                      </div>
+                      <div className="my-auto py-4">
+                        <MarkdownRenderer content={currentCard.back} />
+                      </div>
+                      <div className="text-[14px] text-[#646A73]">
+                        再次点击卡片切回题目面
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -581,13 +638,14 @@ export const SessionNotesExportModal: React.FC = () => {
               </section>
             </div>
           )}
-        </div>
+            </div>
+          </div>
 
-        {/* 手机端固定底部主操作栏 */}
-        <footer
-          style={{ paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))' }}
-          className="border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md px-3.5 pt-3 shrink-0"
-        >
+          {/* 手机端固定底部主操作栏 */}
+          <footer
+            style={{ paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))' }}
+            className="border-t border-[#ECEEF2] bg-white px-3.5 pt-3 shrink-0"
+          >
           {tab === 'notes' && (
             <div className="flex items-center gap-2.5">
               {effectiveNote?.contentMarkdown && !isGeneratingNote && (
@@ -685,8 +743,8 @@ export const SessionNotesExportModal: React.FC = () => {
             </button>
           )}
         </footer>
-      </div>,
-      document.body
+        </div>
+      </MobileSpringPage>
     );
   }
 
@@ -865,32 +923,50 @@ export const SessionNotesExportModal: React.FC = () => {
                 <div
                   role="button"
                   tabIndex={0}
-                  onClick={() => setFlipped((f) => !f)}
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setFlipped((f) => !f);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
                       setFlipped((f) => !f);
                     }
                   }}
-                  className="flex-1 min-h-[260px] rounded-2xl border border-[#BEDAFF] bg-gradient-to-b from-[#F8FAFF] to-white p-7 flex flex-col justify-between shadow-xs hover:border-[#3370FF] transition-colors cursor-pointer select-none"
+                  className="flashcard-perspective flex-1 min-h-[260px] cursor-pointer select-none"
                 >
-                  <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
-                    <span>{flipped ? '参考解析与答案' : '自测提问（点击卡片翻转看答案）'}</span>
-                    <RotateCcw className="w-4 h-4" />
-                  </div>
+                  <div
+                    className={`flashcard-inner grid grid-cols-1 grid-rows-1 h-full min-h-[260px] ${
+                      flipped ? 'is-flipped' : ''
+                    }`}
+                  >
+                    <div className="flashcard-face col-start-1 row-start-1 rounded-2xl border border-[#BEDAFF] bg-gradient-to-b from-[#F8FAFF] to-white p-7 flex flex-col justify-between shadow-xs hover:border-[#3370FF] transition-colors">
+                      <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
+                        <span>自测提问（点击卡片翻转看答案）</span>
+                        <RotateCcw className="w-4 h-4" />
+                      </div>
+                      <div className="my-auto py-4">
+                        <p className="text-[17px] font-semibold text-[#1F2329] leading-relaxed">
+                          {currentCard.front}
+                        </p>
+                      </div>
+                      <div className="text-[14px] text-[#646A73]">
+                        先在脑海中作答，再点击卡片核对
+                      </div>
+                    </div>
 
-                  <div className="my-auto py-4">
-                    {flipped ? (
-                      <MarkdownRenderer content={currentCard.back} />
-                    ) : (
-                      <p className="text-[17px] font-semibold text-[#1F2329] leading-relaxed">
-                        {currentCard.front}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="text-[14px] text-[#646A73]">
-                    {flipped ? '再次点击卡片可切回题目面' : '先在脑海中作答，再点击卡片核对'}
+                    <div className="flashcard-face flashcard-face-back col-start-1 row-start-1 rounded-2xl border border-[#94BFFF] bg-gradient-to-b from-[#F2F7FF] to-white p-7 flex flex-col justify-between shadow-xs">
+                      <div className="flex items-center justify-between text-[14px] font-medium text-[#1456F0]">
+                        <span>参考解析与答案</span>
+                        <RotateCcw className="w-4 h-4" />
+                      </div>
+                      <div className="my-auto py-4">
+                        <MarkdownRenderer content={currentCard.back} />
+                      </div>
+                      <div className="text-[14px] text-[#646A73]">
+                        再次点击卡片可切回题目面
+                      </div>
+                    </div>
                   </div>
                 </div>
 

@@ -21,10 +21,13 @@ import { Tooltip } from '../ui/Tooltip';
 
 interface KnowledgeBubblePopoverProps {
   segment: KnowledgeSegment;
+  /** 移动端紧凑内联样式：嵌入段落卡片头部右上角，避免左侧额外留出 48px 空栏 */
+  compact?: boolean;
 }
 
 export const KnowledgeBubblePopover: React.FC<KnowledgeBubblePopoverProps> = ({
   segment,
+  compact = false,
 }) => {
   const fetchSegmentExplanation = useAppStore((s) => s.fetchSegmentExplanation);
   const [isOpen, setIsOpen] = useState(false);
@@ -68,9 +71,9 @@ export const KnowledgeBubblePopover: React.FC<KnowledgeBubblePopoverProps> = ({
           .finally(() => setIsLoading(false));
       }
     },
-    placement: 'left-start',
+    placement: compact ? 'bottom-end' : 'left-start',
     whileElementsMounted: autoUpdate,
-    middleware: [offset(10), flip({ padding: 14 }), shift({ padding: 14 })],
+    middleware: [offset(compact ? 8 : 10), flip({ padding: 14 }), shift({ padding: 14 })],
   });
 
   const click = useClick(context);
@@ -83,7 +86,23 @@ export const KnowledgeBubblePopover: React.FC<KnowledgeBubblePopoverProps> = ({
     role,
   ]);
 
-  const triggerButton = (
+  const triggerButton = compact ? (
+    <button
+      ref={refs.setReference}
+      type="button"
+      data-compact-bubble-trigger="true"
+      aria-label="查看知识点详解"
+      {...getReferenceProps()}
+      className={`h-7 px-2 rounded-lg text-[13px] font-medium inline-flex items-center gap-1 shrink-0 transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1456F0]/30 ${
+        isOpen
+          ? 'bg-[#1456F0] text-white shadow-[0_2px_8px_rgba(20,86,240,0.28)]'
+          : 'bg-[#EBF2FF] text-[#1456F0] active:bg-[#DCE8FF]'
+      }`}
+    >
+      <MessageSquareQuote className="w-3.5 h-3.5 shrink-0" strokeWidth={2} />
+      <span>详解</span>
+    </button>
+  ) : (
     <button
       ref={refs.setReference}
       type="button"
@@ -106,9 +125,13 @@ export const KnowledgeBubblePopover: React.FC<KnowledgeBubblePopoverProps> = ({
 
   return (
     <>
-      <Tooltip content={isOpen ? null : '查看本段知识点解析'} placement="left">
-        {triggerButton}
-      </Tooltip>
+      {compact ? (
+        triggerButton
+      ) : (
+        <Tooltip content={isOpen ? null : '查看本段知识点解析'} placement="left">
+          {triggerButton}
+        </Tooltip>
+      )}
 
       {isOpen && (
         <FloatingPortal>

@@ -23,6 +23,7 @@ export const MobilePreviewFloatingOverlay: React.FC<MobilePreviewFloatingOverlay
   const { width: vw, height: vh, isLandscape } = useViewportLayout();
   const [collapsed, setCollapsed] = useState(false);
   const [aiExpanded, setAiExpanded] = useState(false);
+  const [isPointerDragging, setIsPointerDragging] = useState(false);
   const [rect, setRect] = useState(() => ({
     x: 16,
     y: 64,
@@ -165,6 +166,18 @@ export const MobilePreviewFloatingOverlay: React.FC<MobilePreviewFloatingOverlay
     [isLandscape, vh]
   );
 
+  const handleBubbleSnapEdge = useCallback(() => {
+    const pad = 10;
+    setBubblePos((prev) => {
+      const next = {
+        x: prev.x + BUBBLE_W / 2 < vw / 2 ? pad : Math.max(pad, vw - BUBBLE_W - pad),
+        y: Math.max(48, Math.min(prev.y, vh - BUBBLE_H - 16)),
+      };
+      bubblePosRef.current = next;
+      return next;
+    });
+  }, [vw, vh]);
+
   if (!open) return null;
 
   const box = collapsed
@@ -186,8 +199,15 @@ export const MobilePreviewFloatingOverlay: React.FC<MobilePreviewFloatingOverlay
         top: `${box.y}px`,
         width: `${box.w}px`,
         height: `${box.h}px`,
+        transitionTimingFunction: isPointerDragging
+          ? undefined
+          : 'var(--spring-sheet, cubic-bezier(0.22, 1, 0.36, 1))',
       }}
-      className="fixed z-[92] transition-[width,height] duration-150 ease-out"
+      className={`fixed z-[92] ${
+        isPointerDragging
+          ? 'transition-none'
+          : 'transition-[left,top,width,height] duration-[320ms]'
+      }`}
     >
       <MiniOverlayView
         embeddedPreview
@@ -195,6 +215,8 @@ export const MobilePreviewFloatingOverlay: React.FC<MobilePreviewFloatingOverlay
         onRequestClose={onClose}
         onPreviewMove={handleMove}
         onPreviewResize={handleResize}
+        onPreviewBubbleSnapEdge={handleBubbleSnapEdge}
+        onPreviewOpStateChange={setIsPointerDragging}
         onPreviewCollapseChange={handleCollapseChange}
         onPreviewAiExpandChange={handleAiExpandChange}
       />

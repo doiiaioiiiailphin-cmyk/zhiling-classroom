@@ -571,14 +571,51 @@ def configure_macos_window(
         diag["configured"] = True
 
         if not is_self_test:
-            ns_win.makeKeyAndOrderFront_(None)
-            AppKit.NSApp.activateIgnoringOtherApps_(True)
+            _activate_macos_app_and_window(AppKit, ns_win)
 
     try:
         _run_on_main_thread(_apply, wait=True)
     except Exception as exc:
         diag["error"] = str(exc)
     return diag
+
+
+def _activate_macos_app_and_window(AppKit, ns_win) -> None:
+    """Bring the desktop app and window forward on modern and older macOS."""
+    try:
+        policy = getattr(AppKit, "NSApplicationActivationPolicyRegular", 0)
+        if AppKit.NSApp is not None and hasattr(AppKit.NSApp, "setActivationPolicy_"):
+            AppKit.NSApp.setActivationPolicy_(policy)
+    except Exception:
+        pass
+    try:
+        if ns_win is not None:
+            if ns_win.isMiniaturized():
+                ns_win.deminiaturize_(None)
+            ns_win.makeKeyAndOrderFront_(None)
+            if hasattr(ns_win, "orderFrontRegardless"):
+                ns_win.orderFrontRegardless()
+    except Exception:
+        pass
+    if AppKit.NSApp is None:
+        return
+    try:
+        if hasattr(AppKit.NSApp, "activate"):
+            AppKit.NSApp.activate()
+    except Exception:
+        pass
+    try:
+        running_app = AppKit.NSRunningApplication.currentApplication()
+        all_windows = getattr(AppKit, "NSApplicationActivateAllWindows", 1 << 0)
+        ignoring_others = getattr(AppKit, "NSApplicationActivateIgnoringOtherApps", 1 << 1)
+        if running_app is not None and hasattr(running_app, "activateWithOptions_"):
+            running_app.activateWithOptions_(all_windows | ignoring_others)
+    except Exception:
+        pass
+    try:
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
 
 
 def focus_macos_window(win_obj) -> None:
@@ -589,13 +626,45 @@ def focus_macos_window(win_obj) -> None:
     def _focus() -> None:
         import AppKit  # type: ignore
 
-        if ns_win.isMiniaturized():
-            ns_win.deminiaturize_(None)
-        ns_win.makeKeyAndOrderFront_(None)
-        AppKit.NSApp.activateIgnoringOtherApps_(True)
+        _activate_macos_app_and_window(AppKit, ns_win)
 
     try:
         _run_on_main_thread(_focus, wait=False)
+    except Exception:
+        pass
+
+
+def hide_macos_window_immediate(win_obj) -> None:
+    """Immediately order-out a macOS NSWindow without waiting for teardown."""
+    ns_win = _get_ns_window(win_obj)
+    if ns_win is None:
+        return
+
+    def _hide() -> None:
+        try:
+            ns_win.orderOut_(None)
+        except Exception:
+            pass
+
+    try:
+        _run_on_main_thread(_hide, wait=False)
+    except Exception:
+        pass
+
+
+def terminate_macos_app() -> None:
+    """Ask AppKit to terminate cleanly on the Cocoa main thread."""
+    def _terminate() -> None:
+        import AppKit  # type: ignore
+
+        try:
+            if AppKit.NSApp is not None:
+                AppKit.NSApp.terminate_(None)
+        except Exception:
+            pass
+
+    try:
+        _run_on_main_thread(_terminate, wait=False)
     except Exception:
         pass
 

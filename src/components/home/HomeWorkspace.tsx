@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AudioLines,
   BookOpenCheck,
@@ -12,6 +12,7 @@ import {
   FolderPlus,
   Loader2,
   Mic,
+  MoreHorizontal,
   Pencil,
   PictureInPicture2,
   Plus,
@@ -25,11 +26,13 @@ import {
 import { BrandLogoIcon } from '../icons/ProviderIcons';
 import { AudioSourceControl } from '../classroom/AudioSourceControl';
 import { ContextMenu, type ContextMenuItem } from '../ui/ContextMenu';
+import { DraggableBottomSheet } from '../ui/DraggableBottomSheet';
 import { IconButton } from '../ui/IconButton';
 import { Modal } from '../ui/Modal';
 import { MoreGridMenu, type GridMenuItem } from '../ui/MoreGridMenu';
 import { Tooltip } from '../ui/Tooltip';
 import { WindowControls } from '../ui/WindowControls';
+import { useOverscrollSpring } from '../../hooks/useOverscrollSpring';
 import { api } from '../../services/api';
 import { useAppStore } from '../../store/useAppStore';
 import type { ClassSessionCard, FolderItem, SearchHitItem } from '../../types/domain';
@@ -40,6 +43,7 @@ import {
   useViewportLayout,
 } from '../../utils/desktopBridge';
 import { formatDuration, formatShortDate } from '../../utils/format';
+import { triggerHaptic } from '../../utils/springPhysics';
 
 const HIT_KIND_LABELS: Record<SearchHitItem['kind'], string> = {
   title: '课堂标题',
@@ -78,6 +82,37 @@ export const HomeWorkspace: React.FC = () => {
   const [searchingGlobal, setSearchingGlobal] = useState(false);
   const [hotwordFolder, setHotwordFolder] = useState<FolderItem | null>(null);
   const [hotwordsDraft, setHotwordsDraft] = useState('');
+  const viewport = useViewportLayout();
+  const isCompactPhoneLayout = viewport.isCompactPhoneLayout;
+  const isMobileInteraction = viewport.isMobileTouchLayout;
+  const homeOverscroll = useOverscrollSpring({ enabled: isMobileInteraction });
+
+  type HomeMobileActionTarget =
+    | { kind: 'folder'; folder: FolderItem }
+    | { kind: 'session'; session: ClassSessionCard };
+
+  const [mobileCardAction, setMobileCardAction] = useState<HomeMobileActionTarget | null>(null);
+  const [showMoveFolderPicker, setShowMoveFolderPicker] = useState(false);
+  const [pressingCardKey, setPressingCardKey] = useState<string | null>(null);
+  const cardPressTimerRef = useRef<number | null>(null);
+  const cardPressFeedbackTimerRef = useRef<number | null>(null);
+  const cardPressOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressCardClickUntilRef = useRef<number>(0);
+
+  const clearCardPressTimers = () => {
+    if (cardPressTimerRef.current !== null) {
+      window.clearTimeout(cardPressTimerRef.current);
+      cardPressTimerRef.current = null;
+    }
+    if (cardPressFeedbackTimerRef.current !== null) {
+      window.clearTimeout(cardPressFeedbackTimerRef.current);
+      cardPressFeedbackTimerRef.current = null;
+    }
+    cardPressOriginRef.current = null;
+    setPressingCardKey(null);
+  };
+
+  useEffect(() => clearCardPressTimers, []);
 
   useEffect(() => {
     const q = searchQuery.trim();
@@ -174,6 +209,7 @@ export const HomeWorkspace: React.FC = () => {
 
   const openCanvasContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    if (isMobileInteraction) return;
     setMenuState({
       position: { x: e.clientX, y: e.clientY },
       items: [
@@ -202,6 +238,7 @@ export const HomeWorkspace: React.FC = () => {
   const openFolderContextMenu = (e: React.MouseEvent, folder: FolderItem) => {
     e.preventDefault();
     e.stopPropagation();
+    if (isMobileInteraction) return;
     setMenuState({
       position: { x: e.clientX, y: e.clientY },
       items: [
@@ -240,6 +277,7 @@ export const HomeWorkspace: React.FC = () => {
   const openSessionContextMenu = (e: React.MouseEvent, session: ClassSessionCard) => {
     e.preventDefault();
     e.stopPropagation();
+    if (isMobileInteraction) return;
 
     const targetFolders = folders.filter((f) => f.id !== session.folderId);
     const moveTargets: NonNullable<ContextMenuItem['children']> = [];
@@ -316,10 +354,45 @@ export const HomeWorkspace: React.FC = () => {
 
   const isMac = isMacPlatform();
   const isAndroid = isAndroidPlatform();
-  const viewport = useViewportLayout();
   const isShortLandscape = viewport.isShortLandscape;
   // 平板大屏（>=768px 且非矮横屏）与电脑一致，音频设置直接展示在顶栏
-  const isCompactMobileChrome = viewport.isCompactPhoneLayout;
+  const isCompactMobileChrome = isCompactPhoneLayout;
+
+  const startCardPress = (
+    cardKey: string,
+    target: HomeMobileActionTarget,
+    editing: boolean,
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    if (!isMobileInteraction || editing) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (
+      e.target instanceof Element &&
+      e.target.closest('button, input, textarea, [data-card-more="true"]')
+    ) {
+      return;
+    }
+    clearCardPressTimers();
+    cardPressOriginRef.current = { x: e.clientX, y: e.clientY };
+    cardPressFeedbackTimerRef.current = window.setTimeout(() => {
+      setPressingCardKey(cardKey);
+    }, 110);
+    cardPressTimerRef.current = window.setTimeout(() => {
+      suppressCardClickUntilRef.current = performance.now() + 420;
+      clearCardPressTimers();
+      triggerHaptic('medium');
+      setShowMoveFolderPicker(false);
+      setMobileCardAction(target);
+    }, 420);
+  };
+
+  const handleCardPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const origin = cardPressOriginRef.current;
+    if (!origin) return;
+    if (Math.hypot(e.clientX - origin.x, e.clientY - origin.y) > 8) {
+      clearCardPressTimers();
+    }
+  };
   const micEnabled = useAppStore((s) => s.settings?.micEnabled ?? true);
   const systemAudioEnabled = useAppStore((s) => s.settings?.systemAudioEnabled ?? false);
   const previewFloatingOverlayOpen = useAppStore((s) => s.previewFloatingOverlayOpen);
@@ -486,8 +559,11 @@ export const HomeWorkspace: React.FC = () => {
       </div>
 
       {/* 主体卡片工作区：内部独立滚动，外框保持自定义圆角 */}
-      <div className="flex-1 overflow-y-auto">
-        <main className="max-w-7xl w-full mx-auto px-4 py-5 md:px-8 md:py-8 space-y-5 md:space-y-6">
+      <div ref={homeOverscroll.bindScrollRef} className="flex-1 overflow-y-auto overscroll-contain-y">
+        <main
+          ref={homeOverscroll.contentRef}
+          className="max-w-7xl w-full mx-auto px-4 py-5 md:px-8 md:py-8 space-y-5 md:space-y-6"
+        >
         {searchQuery.trim().length > 0 && (
           <section className="rounded-xl border border-[#DEE0E3] bg-white p-5 space-y-3 shadow-xs">
             <div className="flex items-center justify-between">
@@ -566,45 +642,83 @@ export const HomeWorkspace: React.FC = () => {
           {visibleFolders.map((folder) => {
             const isEditing = editingId === folder.id;
             const isDragTarget = dragOverFolderId === folder.id;
+            const cardKey = `folder:${folder.id}`;
+            const isPressing = pressingCardKey === cardKey;
 
             return (
               <div
                 key={folder.id}
+                data-home-folder-id={folder.id}
                 onClick={() => {
+                  if (performance.now() < suppressCardClickUntilRef.current) return;
                   if (!isEditing) setCurrentFolderId(folder.id);
                 }}
+                onPointerDown={(e) =>
+                  startCardPress(cardKey, { kind: 'folder', folder }, isEditing, e)
+                }
+                onPointerMove={handleCardPointerMove}
+                onPointerUp={clearCardPressTimers}
+                onPointerCancel={clearCardPressTimers}
+                onPointerLeave={clearCardPressTimers}
                 onContextMenu={(e) => openFolderContextMenu(e, folder)}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragOverFolderId(folder.id);
-                }}
-                onDragLeave={() => setDragOverFolderId(null)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setDragOverFolderId(null);
-                  const sessionId = e.dataTransfer.getData('text/session-id');
-                  if (sessionId) {
-                    void moveSessionToFolder(sessionId, folder.id);
-                  }
-                }}
-                className={`min-h-[172px] rounded-xl border bg-white p-5 flex flex-col justify-between transition-all cursor-pointer ${
-                  isDragTarget
-                    ? 'border-[#1456F0] bg-[#EBF2FF]/55 ring-2 ring-[#1456F0]/20'
-                    : 'border-[#DEE0E3] hover:border-[#3370FF] hover:shadow-[0_8px_24px_rgba(31,35,41,0.08)]'
+                onDragOver={
+                  isMobileInteraction
+                    ? undefined
+                    : (e) => {
+                        e.preventDefault();
+                        setDragOverFolderId(folder.id);
+                      }
+                }
+                onDragLeave={isMobileInteraction ? undefined : () => setDragOverFolderId(null)}
+                onDrop={
+                  isMobileInteraction
+                    ? undefined
+                    : (e) => {
+                        e.preventDefault();
+                        setDragOverFolderId(null);
+                        const sessionId = e.dataTransfer.getData('text/session-id');
+                        if (sessionId) {
+                          void moveSessionToFolder(sessionId, folder.id);
+                        }
+                      }
+                }
+                className={`spring-press-card min-h-[172px] rounded-xl border bg-white p-5 flex flex-col justify-between cursor-pointer transition-transform ${
+                  isPressing
+                    ? 'scale-[0.98] border-[#1456F0] bg-[#F5F8FF] ring-2 ring-[#1456F0]/25'
+                    : isDragTarget
+                      ? 'border-[#1456F0] bg-[#EBF2FF]/55 ring-2 ring-[#1456F0]/20'
+                      : 'border-[#DEE0E3] hover:border-[#3370FF] hover:shadow-[0_8px_24px_rgba(31,35,41,0.08)]'
                 }`}
               >
-                <div className="flex items-start justify-between">
-                  <div className="w-10 h-10 rounded-lg bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="w-10 h-10 rounded-lg bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center shrink-0">
                     <Folder
                       className="w-5 h-5 fill-[#1456F0]/15"
                       strokeWidth={1.85}
                     />
                   </div>
-                  {folder.hotwords && folder.hotwords.length > 0 && (
-                    <span className="px-2 py-0.5 rounded-md bg-[#F0F4FF] text-[14px] font-medium text-[#1456F0]">
-                      热词 {folder.hotwords.length}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {folder.hotwords && folder.hotwords.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-md bg-[#F0F4FF] text-[14px] font-medium text-[#1456F0]">
+                        热词 {folder.hotwords.length}
+                      </span>
+                    )}
+                    {isMobileInteraction && !isEditing && (
+                      <button
+                        type="button"
+                        data-card-more="true"
+                        aria-label={`更多操作：${folder.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowMoveFolderPicker(false);
+                          setMobileCardAction({ kind: 'folder', folder });
+                        }}
+                        className="w-8 h-8 -mr-1.5 -mt-1 rounded-lg hover:bg-[#F2F3F5] active:bg-[#E5E6EB] text-[#646A73] flex items-center justify-center cursor-pointer"
+                      >
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="space-y-1.5">
@@ -637,35 +751,71 @@ export const HomeWorkspace: React.FC = () => {
             );
           })}
 
-          {/* 已保存课堂卡片（位于加号右侧，点击进入继续录音，右键管理） */}
+          {/* 已保存课堂卡片（位于加号右侧；桌面端右键管理，移动端长按或点 ··· 管理） */}
           {visibleSessions.map((session, idx) => {
             const isEditing = editingId === session.id;
+            const cardKey = `session:${session.id}`;
+            const isPressing = pressingCardKey === cardKey;
 
             return (
               <div
                 key={session.id}
-                draggable={!isEditing}
+                data-home-session-id={session.id}
+                draggable={!isEditing && !isMobileInteraction}
                 style={
                   idx >= 16
                     ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 176px' }
                     : undefined
                 }
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('text/session-id', session.id);
-                }}
+                onDragStart={
+                  isMobileInteraction
+                    ? undefined
+                    : (e) => {
+                        e.dataTransfer.setData('text/session-id', session.id);
+                      }
+                }
                 onClick={() => {
+                  if (performance.now() < suppressCardClickUntilRef.current) return;
                   if (!isEditing) void openClassroom(session.id);
                 }}
+                onPointerDown={(e) =>
+                  startCardPress(cardKey, { kind: 'session', session }, isEditing, e)
+                }
+                onPointerMove={handleCardPointerMove}
+                onPointerUp={clearCardPressTimers}
+                onPointerCancel={clearCardPressTimers}
+                onPointerLeave={clearCardPressTimers}
                 onContextMenu={(e) => openSessionContextMenu(e, session)}
-                className="min-h-[172px] rounded-xl border border-[#DEE0E3] bg-white p-5 flex flex-col justify-between hover:border-[#3370FF] hover:shadow-[0_8px_24px_rgba(31,35,41,0.08)] transition-all cursor-pointer group"
+                className={`spring-press-card min-h-[172px] rounded-xl border bg-white p-5 flex flex-col justify-between cursor-pointer group transition-transform ${
+                  isPressing
+                    ? 'scale-[0.98] border-[#1456F0] bg-[#F5F8FF] ring-2 ring-[#1456F0]/25'
+                    : 'border-[#DEE0E3] hover:border-[#3370FF] hover:shadow-[0_8px_24px_rgba(31,35,41,0.08)]'
+                }`}
               >
-                <div className="flex items-start justify-between">
-                  <div className="w-10 h-10 rounded-lg bg-[#EBF2FF] text-[#1456F0] group-hover:bg-[#1456F0] group-hover:text-white transition-colors flex items-center justify-center">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="w-10 h-10 rounded-lg bg-[#EBF2FF] text-[#1456F0] group-hover:bg-[#1456F0] group-hover:text-white transition-colors flex items-center justify-center shrink-0">
                     <AudioLines className="w-5 h-5" strokeWidth={1.85} />
                   </div>
-                  <span className="text-[14px] text-[#646A73]">
-                    {formatShortDate(session.updatedAt)}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[14px] text-[#646A73]">
+                      {formatShortDate(session.updatedAt)}
+                    </span>
+                    {isMobileInteraction && !isEditing && (
+                      <button
+                        type="button"
+                        data-card-more="true"
+                        aria-label={`更多操作：${session.title}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowMoveFolderPicker(false);
+                          setMobileCardAction({ kind: 'session', session });
+                        }}
+                        className="w-8 h-8 -mr-1.5 -mt-1 rounded-lg hover:bg-[#F2F3F5] active:bg-[#E5E6EB] text-[#646A73] flex items-center justify-center cursor-pointer"
+                      >
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="space-y-2.5 mt-3">
@@ -707,11 +857,273 @@ export const HomeWorkspace: React.FC = () => {
         </main>
       </div>
 
-      <ContextMenu
-        position={menuState.position}
-        items={menuState.items}
-        onClose={() => setMenuState({ position: null, items: [] })}
-      />
+      {!isMobileInteraction && (
+        <ContextMenu
+          position={menuState.position}
+          items={menuState.items}
+          onClose={() => setMenuState({ position: null, items: [] })}
+        />
+      )}
+
+      <DraggableBottomSheet
+        open={Boolean(mobileCardAction)}
+        onClose={() => {
+          setMobileCardAction(null);
+          setShowMoveFolderPicker(false);
+        }}
+        ariaLabel={mobileCardAction?.kind === 'folder' ? '文件夹操作' : '课堂操作'}
+        zIndexClass="z-[60]"
+        maxWidthClass="w-full max-w-lg"
+        panelClassName="bg-white"
+        dataAttributes={{ 'data-mobile-home-sheet': 'true' }}
+        showHandle
+      >
+        {mobileCardAction && (
+          <div
+            style={{ paddingBottom: 'calc(16px + var(--android-safe-bottom, 0px))' }}
+            className="px-4 pt-1 space-y-3.5 max-h-[78vh] overflow-y-auto overscroll-contain-y"
+          >
+            {mobileCardAction.kind === 'folder' ? (
+              <>
+                <div className="rounded-xl border border-[#ECEEF2] bg-[#F7F8FA] px-3.5 py-2.5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-lg bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center shrink-0">
+                      <Folder className="w-4 h-4 fill-[#1456F0]/15" strokeWidth={1.9} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[15px] font-semibold text-[#1F2329] truncate">
+                        {mobileCardAction.folder.name}
+                      </div>
+                      <div className="text-[13px] text-[#646A73]">
+                        {countSessionsInFolder(mobileCardAction.folder.id)} 节课堂
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] divide-y divide-[#ECEEF2] overflow-hidden">
+                  <button
+                    type="button"
+                    data-home-action="rename-folder"
+                    onClick={() => {
+                      const f = mobileCardAction.folder;
+                      setMobileCardAction(null);
+                      handleStartRename(f.id, f.name);
+                    }}
+                    className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                  >
+                    <Pencil className="w-4 h-4 text-[#4E5969] shrink-0" />
+                    <span>重命名文件夹</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-home-action="folder-hotwords"
+                    onClick={() => {
+                      const f = mobileCardAction.folder;
+                      setMobileCardAction(null);
+                      setHotwordFolder(f);
+                      setHotwordsDraft((f.hotwords ?? []).join('\n'));
+                    }}
+                    className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                  >
+                    <Tags className="w-4 h-4 text-[#1456F0] shrink-0" />
+                    <span>配置学科专属热词</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-home-action="new-folder"
+                    onClick={() => {
+                      setMobileCardAction(null);
+                      void handleCreateFolderAndEdit();
+                    }}
+                    className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                  >
+                    <FolderPlus className="w-4 h-4 text-[#4E5969] shrink-0" />
+                    <span>新建同级文件夹</span>
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] overflow-hidden">
+                  <button
+                    type="button"
+                    data-home-action="delete-folder"
+                    onClick={() => {
+                      const fid = mobileCardAction.folder.id;
+                      setMobileCardAction(null);
+                      void deleteFolder(fid);
+                    }}
+                    className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#D83931] active:bg-[#FFECE8] cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4 text-[#D83931] shrink-0" />
+                    <span>删除文件夹</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              (() => {
+                const s = mobileCardAction.session;
+                const moveTargets = folders.filter((f) => f.id !== s.folderId);
+                const canMove = s.folderId !== null || moveTargets.length > 0;
+                return (
+                  <>
+                    <div className="rounded-xl border border-[#ECEEF2] bg-[#F7F8FA] px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-9 h-9 rounded-lg bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center shrink-0">
+                          <AudioLines className="w-4 h-4" strokeWidth={1.9} />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[15px] font-semibold text-[#1F2329] truncate">
+                            {s.title}
+                          </div>
+                          <div className="text-[13px] text-[#646A73] flex items-center gap-3">
+                            <span>{formatDuration(s.durationSeconds)}</span>
+                            <span>{s.speakerCount} 人</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] divide-y divide-[#ECEEF2] overflow-hidden">
+                      <button
+                        type="button"
+                        data-home-action="enter-session"
+                        onClick={() => {
+                          setMobileCardAction(null);
+                          void openClassroom(s.id);
+                        }}
+                        className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                      >
+                        <Mic className="w-4 h-4 text-[#1456F0] shrink-0" />
+                        <span>进入课堂继续录音</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-home-action="notes-export-session"
+                        onClick={() => {
+                          setMobileCardAction(null);
+                          openNotesExportModal(s.id, 'notes');
+                        }}
+                        className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                      >
+                        <BookOpenCheck className="w-4 h-4 text-[#1456F0] shrink-0" />
+                        <span>全课精编笔记与导出</span>
+                      </button>
+                      <button
+                        type="button"
+                        data-home-action="rename-session"
+                        onClick={() => {
+                          setMobileCardAction(null);
+                          handleStartRename(s.id, s.title);
+                        }}
+                        className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                      >
+                        <Pencil className="w-4 h-4 text-[#4E5969] shrink-0" />
+                        <span>重命名课堂</span>
+                      </button>
+
+                      {canMove && (
+                        <div>
+                          <button
+                            type="button"
+                            data-home-action="toggle-move-folder"
+                            onClick={() => setShowMoveFolderPicker((v) => !v)}
+                            className="w-full min-h-[48px] px-4 py-2.5 flex items-center justify-between gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                          >
+                            <span className="inline-flex items-center gap-3">
+                              <FolderInput className="w-4 h-4 text-[#4E5969] shrink-0" />
+                              <span>移入文件夹</span>
+                            </span>
+                            <ChevronRight
+                              className={`w-4 h-4 text-[#8F959E] transition-transform ${
+                                showMoveFolderPicker ? 'rotate-90' : ''
+                              }`}
+                            />
+                          </button>
+
+                          {showMoveFolderPicker && (
+                            <div className="bg-white border-t border-[#ECEEF2] divide-y divide-[#F2F3F5]">
+                              {s.folderId !== null && (
+                                <button
+                                  type="button"
+                                  data-home-action="move-root"
+                                  onClick={() => {
+                                    setMobileCardAction(null);
+                                    setShowMoveFolderPicker(false);
+                                    void moveSessionToFolder(s.id, null);
+                                  }}
+                                  className="w-full min-h-[44px] pl-11 pr-4 py-2 flex items-center gap-2.5 text-[14px] text-[#4E5969] active:bg-[#EBF2FF] cursor-pointer"
+                                >
+                                  <FolderOutput className="w-4 h-4 shrink-0" />
+                                  <span>移回主界面根目录</span>
+                                </button>
+                              )}
+                              {moveTargets.map((f) => (
+                                <button
+                                  key={f.id}
+                                  type="button"
+                                  data-home-action={`move-${f.id}`}
+                                  onClick={() => {
+                                    setMobileCardAction(null);
+                                    setShowMoveFolderPicker(false);
+                                    void moveSessionToFolder(s.id, f.id);
+                                  }}
+                                  className="w-full min-h-[44px] pl-11 pr-4 py-2 flex items-center gap-2.5 text-[14px] text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                                >
+                                  <Folder className="w-4 h-4 text-[#1456F0] shrink-0" />
+                                  <span className="truncate">{f.name}</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        data-home-action="create-folder"
+                        onClick={() => {
+                          setMobileCardAction(null);
+                          void handleCreateFolderAndEdit();
+                        }}
+                        className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#1F2329] active:bg-[#EBF2FF] cursor-pointer"
+                      >
+                        <FolderPlus className="w-4 h-4 text-[#4E5969] shrink-0" />
+                        <span>新建文件夹</span>
+                      </button>
+                    </div>
+
+                    <div className="rounded-2xl border border-[#ECEEF2] bg-[#F8F9FA] overflow-hidden">
+                      <button
+                        type="button"
+                        data-home-action="delete-session"
+                        onClick={() => {
+                          setMobileCardAction(null);
+                          void deleteSession(s.id);
+                        }}
+                        className="w-full min-h-[48px] px-4 py-2.5 flex items-center gap-3 text-[15px] font-medium text-[#D83931] active:bg-[#FFECE8] cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4 text-[#D83931] shrink-0" />
+                        <span>删除课堂</span>
+                      </button>
+                    </div>
+                  </>
+                );
+              })()
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setMobileCardAction(null);
+                setShowMoveFolderPicker(false);
+              }}
+              className="w-full h-11 rounded-xl bg-[#F2F3F5] active:bg-[#E5E6EB] text-[15px] font-medium text-[#1F2329] transition-colors cursor-pointer"
+            >
+              取消
+            </button>
+          </div>
+        )}
+      </DraggableBottomSheet>
 
       <Modal
         open={Boolean(hotwordFolder)}

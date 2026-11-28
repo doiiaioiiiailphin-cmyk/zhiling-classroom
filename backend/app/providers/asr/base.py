@@ -3,7 +3,6 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import ssl
 import sys
@@ -18,6 +17,7 @@ from websockets.legacy.client import Connect, WebSocketClientProtocol
 
 from ...errors import AppError
 from ...schemas import Language, SpeakerMode
+from ...tls import build_tls_ssl_context
 from ..http import UpstreamRejected, endpoint, invalid_response
 
 logger = logging.getLogger(__name__)
@@ -26,19 +26,8 @@ BYTES_PER_MS = SAMPLE_RATE * 2 // 1000
 
 
 def _wss_ssl_context() -> ssl.SSLContext:
-    """为 wss:// 构造带可靠根证书的 SSLContext（兼容 macOS 打包版 Python 无系统 OpenSSL CA 目录的问题）。"""
-    env_ca = os.environ.get("SSL_CERT_FILE")
-    if env_ca and Path(env_ca).is_file():
-        return ssl.create_default_context(cafile=env_ca)
-    try:
-        import certifi  # type: ignore
-
-        ca_file = certifi.where()
-        if ca_file and Path(ca_file).is_file():
-            return ssl.create_default_context(cafile=ca_file)
-    except Exception:
-        pass
-    return ssl.create_default_context()
+    """为 wss:// 构造带可靠根证书的 SSLContext（兼容打包环境缺失 certifi 或外部 CA 环境变量的场景）。"""
+    return build_tls_ssl_context()
 
 
 def pcm_samples(pcm: bytes) -> array:

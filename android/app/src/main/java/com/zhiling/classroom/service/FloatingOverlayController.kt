@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -19,6 +20,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import com.zhiling.classroom.MainActivity
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
@@ -90,6 +94,93 @@ object OverlayBoundsMath {
 }
 
 /**
+ * 纯 Kotlin 四阶龙格-库塔（RK4）物理弹簧引擎，供 Android 原生 Choreographer 与 JVM 单测共用。
+ */
+object OverlaySpringMath {
+    data class SpringState(val value: Double, val velocity: Double, val settled: Boolean)
+
+    private fun rk4Substep(
+        x: Double,
+        v: Double,
+        target: Double,
+        dt: Double,
+        stiffness: Double,
+        damping: Double,
+        invMass: Double,
+    ): Pair<Double, Double> {
+        fun accel(pos: Double, vel: Double): Double =
+            (-stiffness * (pos - target) - damping * vel) * invMass
+
+        val k1x = v
+        val k1v = accel(x, v)
+
+        val halfDt = dt * 0.5
+        val x2 = x + k1x * halfDt
+        val v2 = v + k1v * halfDt
+        val k2x = v2
+        val k2v = accel(x2, v2)
+
+        val x3 = x + k2x * halfDt
+        val v3 = v + k2v * halfDt
+        val k3x = v3
+        val k3v = accel(x3, v3)
+
+        val x4 = x + k3x * dt
+        val v4 = v + k3v * dt
+        val k4x = v4
+        val k4v = accel(x4, v4)
+
+        val nextX = x + ((k1x + 2.0 * k2x + 2.0 * k3x + k4x) * dt) / 6.0
+        val nextV = v + ((k1v + 2.0 * k2v + 2.0 * k3v + k4v) * dt) / 6.0
+        return nextX to nextV
+    }
+
+    fun stepSpring(
+        value: Double,
+        velocity: Double,
+        target: Double,
+        dtSeconds: Double,
+        stiffness: Double = 380.0,
+        damping: Double = 32.0,
+        mass: Double = 1.0,
+        restDisplacementThreshold: Double = 0.45,
+        restVelocityThreshold: Double = 0.8,
+    ): SpringState {
+        val clampedDt = dtSeconds.coerceIn(0.0, 0.05)
+        if (clampedDt <= 0.0) {
+            val atRest = abs(value - target) <= restDisplacementThreshold &&
+                abs(velocity) <= restVelocityThreshold
+            return SpringState(
+                value = if (atRest) target else value,
+                velocity = if (atRest) 0.0 else velocity,
+                settled = atRest,
+            )
+        }
+
+        val maxSubstep = 1.0 / 120.0
+        val steps = max(1, ceil(clampedDt / maxSubstep).toInt())
+        val subDt = clampedDt / steps
+        val invMass = 1.0 / max(mass, 0.01)
+
+        var x = value
+        var v = velocity
+        repeat(steps) {
+            val stepped = rk4Substep(x, v, target, subDt, stiffness, damping, invMass)
+            x = stepped.first
+            v = stepped.second
+        }
+
+        return if (abs(x - target) <= restDisplacementThreshold &&
+            abs(v) <= restVelocityThreshold
+        ) {
+            SpringState(value = target, velocity = 0.0, settled = true)
+        } else {
+            SpringState(value = x, velocity = v, settled = false)
+        }
+    }
+}
+
+/**
  * Android 原生系统级全局悬浮窗控制器（TYPE_APPLICATION_OVERLAY）：
  * - 驻留在 ClassroomEngineService 内，切至 B 站/腾讯会议/雨课堂等任意网课应用时依然置顶显示；
  * - 承载独立透明 WebView（?mode=mini&platform=android&nativeOverlay=1），支持实时字幕、快捷 AI 对话、收起吸边悬浮球；
@@ -118,6 +209,97 @@ class FloatingOverlayController(
     private var savedExpandedW = 0
     private var savedExpandedH = 0
     private var preAiHeightPx = 0
+
+    // Choreographer 120Hz RK4 悬浮窗几何弹簧状态
+    private var springAnimating = false
+    private var animLastFrameNanos = 0L
+    private var springX = 0.0
+    private var springY = 0.0
+    private var springW = 0.0
+    private var springH = 0.0
+    private var velX = 0.0
+    private var velY = 0.0
+    private var velW = 0.0
+    private var velH = 0.0
+    private var targetX = 0.0
+    private var targetY = 0.0
+    private var targetW = 0.0
+    private var targetH = 0.0
+
+    private val springFrameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!springAnimating) return
+            val params = layoutParams ?: run {
+                springAnimating = false
+                return
+            }
+            val dtSec = if (animLastFrameNanos == 0L) {
+                1.0 / 60.0
+            } else {
+                ((frameTimeNanos - animLastFrameNanos) / 1_000_000_000.0).coerceIn(0.001, 0.05)
+            }
+            animLastFrameNanos = frameTimeNanos
+
+            val sx = OverlaySpringMath.stepSpring(springX, velX, targetX, dtSec, stiffness = 400.0, damping = 33.0)
+            val sy = OverlaySpringMath.stepSpring(springY, velY, targetY, dtSec, stiffness = 400.0, damping = 33.0)
+            val sw = OverlaySpringMath.stepSpring(springW, velW, targetW, dtSec, stiffness = 400.0, damping = 33.0)
+            val sh = OverlaySpringMath.stepSpring(springH, velH, targetH, dtSec, stiffness = 400.0, damping = 33.0)
+
+            springX = sx.value; velX = sx.velocity
+            springY = sy.value; velY = sy.velocity
+            springW = sw.value; velW = sw.velocity
+            springH = sh.value; velH = sh.velocity
+
+            params.x = springX.roundToInt()
+            params.y = springY.roundToInt()
+            params.width = springW.roundToInt().coerceAtLeast(1)
+            params.height = sh.value.roundToInt().coerceAtLeast(1)
+            updateWindowLayoutSafe()
+
+            if (sx.settled && sy.settled && sw.settled && sh.settled) {
+                springAnimating = false
+                animLastFrameNanos = 0L
+            } else {
+                Choreographer.getInstance().postFrameCallback(this)
+            }
+        }
+    }
+
+    private fun stopSpringOnMain() {
+        if (!springAnimating) return
+        springAnimating = false
+        animLastFrameNanos = 0L
+        Choreographer.getInstance().removeFrameCallback(springFrameCallback)
+    }
+
+    private fun animateLayoutToOnMain(
+        destX: Int,
+        destY: Int,
+        destW: Int,
+        destH: Int,
+    ) {
+        val params = layoutParams ?: return
+        if (!springAnimating) {
+            springX = params.x.toDouble()
+            springY = params.y.toDouble()
+            springW = params.width.toDouble()
+            springH = params.height.toDouble()
+            velX = 0.0
+            velY = 0.0
+            velW = 0.0
+            velH = 0.0
+        }
+        targetX = destX.toDouble()
+        targetY = destY.toDouble()
+        targetW = destW.toDouble()
+        targetH = destH.toDouble()
+
+        if (!springAnimating) {
+            springAnimating = true
+            animLastFrameNanos = 0L
+            Choreographer.getInstance().postFrameCallback(springFrameCallback)
+        }
+    }
 
     fun isShowing(): Boolean = showing
 
@@ -254,6 +436,7 @@ class FloatingOverlayController(
     }
 
     private fun detachOverlayOnMain() {
+        stopSpringOnMain()
         val root = container
         val wv = webView
         container = null
@@ -274,6 +457,7 @@ class FloatingOverlayController(
     }
 
     private fun clampLayoutToCurrentDisplay() {
+        stopSpringOnMain()
         val params = layoutParams ?: return
         val (screenW, screenH) = screenSize()
         val margin = dp(10f)
@@ -328,6 +512,7 @@ class FloatingOverlayController(
         @JavascriptInterface
         fun moveBy(dxCssPx: Float, dyCssPx: Float) {
             mainHandler.post {
+                stopSpringOnMain()
                 val params = layoutParams ?: return@post
                 val (screenW, screenH) = screenSize()
                 val margin = dp(8f)
@@ -344,9 +529,30 @@ class FloatingOverlayController(
         }
 
         @JavascriptInterface
+        fun snapBubbleToEdge() {
+            mainHandler.post {
+                if (!collapsed) return@post
+                val params = layoutParams ?: return@post
+                val (screenW, screenH) = screenSize()
+                val margin = dp(10f)
+                val bubbleW = params.width.takeIf { it > 0 } ?: dp(96f)
+                val bubbleH = params.height.takeIf { it > 0 } ?: dp(44f)
+                val targetBubbleX = OverlayBoundsMath.snapBubbleX(
+                    centerX = params.x + bubbleW / 2,
+                    screenW = screenW,
+                    bubbleW = bubbleW,
+                    marginPx = margin,
+                )
+                val targetBubbleY = params.y.coerceIn(dp(24f), (screenH - bubbleH - margin).coerceAtLeast(dp(24f)))
+                animateLayoutToOnMain(targetBubbleX, targetBubbleY, bubbleW, bubbleH)
+            }
+        }
+
+        @JavascriptInterface
         fun resizeBy(dwCssPx: Float, dhCssPx: Float) {
             mainHandler.post {
                 if (collapsed) return@post
+                stopSpringOnMain()
                 val params = layoutParams ?: return@post
                 val (screenW, screenH) = screenSize()
                 val margin = dp(8f)
@@ -387,15 +593,14 @@ class FloatingOverlayController(
                     applyFocusableOnMain(false)
                     val bubbleW = dp(96f)
                     val bubbleH = dp(44f)
-                    params.width = bubbleW
-                    params.height = bubbleH
-                    params.x = OverlayBoundsMath.snapBubbleX(
+                    val destX = OverlayBoundsMath.snapBubbleX(
                         centerX = savedExpandedX + savedExpandedW / 2,
                         screenW = screenW,
                         bubbleW = bubbleW,
                         marginPx = margin,
                     )
-                    params.y = savedExpandedY.coerceIn(dp(24f), (screenH - bubbleH - margin).coerceAtLeast(dp(24f)))
+                    val destY = savedExpandedY.coerceIn(dp(24f), (screenH - bubbleH - margin).coerceAtLeast(dp(24f)))
+                    animateLayoutToOnMain(destX, destY, bubbleW, bubbleH)
                 } else {
                     val bubbleW = params.width.takeIf { it > 0 } ?: dp(96f)
                     val clamped = OverlayBoundsMath.expandFromBubble(
@@ -410,16 +615,12 @@ class FloatingOverlayController(
                         minH = dp(168f),
                         marginPx = margin,
                     )
-                    params.x = clamped.x
-                    params.y = clamped.y
-                    params.width = clamped.width
-                    params.height = clamped.height
                     savedExpandedX = clamped.x
                     savedExpandedY = clamped.y
                     savedExpandedW = clamped.width
                     savedExpandedH = clamped.height
+                    animateLayoutToOnMain(clamped.x, clamped.y, clamped.width, clamped.height)
                 }
-                updateWindowLayoutSafe()
             }
         }
 
@@ -438,7 +639,7 @@ class FloatingOverlayController(
                 val (screenW, screenH) = screenSize()
                 val isLandscape = screenW > screenH
                 val margin = dp(10f)
-                val targetH = if (expanded) {
+                val nextTargetH = if (expanded) {
                     preAiHeightPx = params.height
                     minOf(dp(if (isLandscape) 310f else 410f), (screenH * 0.84f).roundToInt())
                 } else {
@@ -448,19 +649,16 @@ class FloatingOverlayController(
                     x = params.x,
                     y = params.y,
                     width = params.width,
-                    height = targetH,
+                    height = nextTargetH,
                     screenW = screenW,
                     screenH = screenH,
                     minW = dp(260f),
                     minH = dp(168f),
                     marginPx = margin,
                 )
-                params.x = clamped.x
-                params.y = clamped.y
-                params.height = clamped.height
                 savedExpandedY = clamped.y
                 savedExpandedH = clamped.height
-                updateWindowLayoutSafe()
+                animateLayoutToOnMain(clamped.x, clamped.y, clamped.width, clamped.height)
             }
         }
 

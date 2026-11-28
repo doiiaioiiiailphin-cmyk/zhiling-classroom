@@ -31,6 +31,7 @@ from .services.updater import AppUpdaterService
 from .services.win_audio import WindowsAudioBackend
 from .services.win_desktop import DesktopEventBus
 from .settings import SettingsStore
+from .tls import build_tls_ssl_context, sanitize_tls_env
 
 logger = logging.getLogger(__name__)
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -128,8 +129,9 @@ def create_app(
             audio = AudioStorage(data_dir / "recordings")
             await audio.recover_deletions(repo)
             attachments = AttachmentStorage(data_dir / "attachments", repo, screen_capturer=screen_capturer)
+            sanitize_tls_env()
             async with httpx.AsyncClient(
-                transport=http_transport, timeout=httpx.Timeout(180, connect=15, pool=15),
+                transport=http_transport, verify=build_tls_ssl_context(), timeout=httpx.Timeout(180, connect=15, pool=15),
                 limits=httpx.Limits(max_connections=40, max_keepalive_connections=12),
                 headers={"User-Agent": "zhiling-classroom/1.0"},
                 follow_redirects=False,
@@ -176,7 +178,7 @@ def create_app(
         JsonCors,
         allow_origins=list(origins),
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Content-Type", "Range"],
+        allow_headers=["Content-Type", "Range", "X-Zhiling-Instance-Token"],
         expose_headers=["Content-Disposition", "Content-Range", "Accept-Ranges"],
     )
     app.add_middleware(LocalOriginGuard, origins=origins)
@@ -197,7 +199,13 @@ def create_app(
 
         @app.get("/")
         async def serve_spa_root():
-            return FileResponse(resolved_dist / "index.html")
+            return FileResponse(
+                resolved_dist / "index.html",
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            )
 
     @app.exception_handler(AppError)
     async def app_error(_: Request, error: AppError):

@@ -201,9 +201,13 @@ def build_windows_update_script(
     log_path: Path,
     version: str = "",
     staged_meta_path: Path | None = None,
+    move_retries: int = 25,
+    move_retry_ms: int = 300,
 ) -> str:
-    """生成 Windows 分离进程热更新 PowerShell 脚本（同盘原子备份、失败自动回滚、注册表版本同步与日志）。"""
+    """生成 Windows 原子目录替换热更新 PowerShell 脚本（同盘暂存、防嵌套重命名、完整回滚与日志）。"""
     staged_str = str(staged_meta_path) if staged_meta_path is not None else ""
+    retries_val = max(1, int(move_retries))
+    retry_ms_val = max(10, int(move_retry_ms))
     return f"""$ErrorActionPreference = 'Stop'
 $OldPid = {int(old_pid)}
 $ZipPath = {_ps_single_quote(str(zip_path))}
@@ -212,19 +216,49 @@ $ExeName = {_ps_single_quote(exe_name)}
 $LogPath = {_ps_single_quote(str(log_path))}
 $NewVersion = {_ps_single_quote(version)}
 $StagedMetaPath = {_ps_single_quote(staged_str)}
+$MoveRetries = {retries_val}
+$MoveRetryMs = {retry_ms_val}
 
 function Write-UpdateLog([string]$Msg) {{
     try {{
         $dir = Split-Path -Parent $LogPath
-        if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Path $dir -Force | Out-Null }}
+        if (-not (Test-Path -LiteralPath $dir)) {{ [void][System.IO.Directory]::CreateDirectory($dir) }}
         $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Msg"
-        Add-Content -Path $LogPath -Value $line -Encoding UTF8
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
     }} catch {{}}
+}}
+
+function Move-Atomically([string]$Src, [string]$Dst, [bool]$IsDir) {{
+    if (-not (Test-Path -LiteralPath $Src)) {{
+        throw "Source path missing for atomic move: $Src"
+    }}
+    if (Test-Path -LiteralPath $Dst) {{
+        throw "Refusing to overwrite or nest into existing destination: $Dst"
+    }}
+    $ParentDir = Split-Path -Parent $Dst
+    if ($ParentDir -and -not (Test-Path -LiteralPath $ParentDir)) {{
+        [void][System.IO.Directory]::CreateDirectory($ParentDir)
+    }}
+    for ($retry = 0; $retry -lt $MoveRetries; $retry++) {{
+        try {{
+            if ($IsDir) {{
+                [System.IO.Directory]::Move($Src, $Dst)
+            }} else {{
+                [System.IO.File]::Move($Src, $Dst)
+            }}
+            return
+        }} catch {{
+            if ($retry -ge ($MoveRetries - 1)) {{
+                throw "Failed to move locked item atomically ($Src -> $Dst): $($_.Exception.Message)"
+            }}
+            Start-Sleep -Milliseconds $MoveRetryMs
+        }}
+    }}
 }}
 
 Write-UpdateLog "Updater started for PID=$OldPid InstallDir=$InstallDir Version=$NewVersion"
 
-# 1. 等待旧主进程完全退出并释放句柄；若超时仍驻留则强制结束避免锁死 _internal
+# 1. 等待旧主进程退出；若超时仍驻留则强制结束，并清理同安装目录下的残留子进程避免锁死 _internal
 $Exited = $false
 for ($i = 0; $i -lt 100; $i++) {{
     if (-not (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) {{
@@ -238,23 +272,39 @@ if (-not $Exited) {{
     Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
 }}
+try {{
+    $InstallDirPrefix = ([System.IO.Path]::GetFullPath($InstallDir)).TrimEnd('\\') + '\\'
+    $Stragglers = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{
+        $_.ExecutablePath -and ($_.ProcessId -ne $PID) -and $_.ExecutablePath.StartsWith($InstallDirPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    }})
+    foreach ($Proc in $Stragglers) {{
+        Write-UpdateLog "Stopping lingering process under install dir: PID=$($Proc.ProcessId) Path=$($Proc.ExecutablePath)"
+        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }}
+    if ($Stragglers.Count -gt 0) {{
+        Start-Sleep -Milliseconds 500
+    }}
+}} catch {{}}
 Start-Sleep -Milliseconds 350
 
 $RunId = [Guid]::NewGuid().ToString("N")
 $WorkRoot = Join-Path (Split-Path -Parent $ZipPath) ("apply_" + $RunId)
 $ExtractDir = Join-Path $WorkRoot "extracted"
-# 备份目录放在安装目录同盘符内，避免跨盘符 Move-Item _internal 目录报错
+# 暂存、备份与失败隔离目录均放在安装目录同卷内，保证 Directory::Move 为单卷原子重命名
+$StageDir = Join-Path $InstallDir (".zhiling_update_stage_" + $RunId)
 $BackupDir = Join-Path $InstallDir (".zhiling_update_backup_" + $RunId)
+$FailedDir = Join-Path $InstallDir (".zhiling_update_failed_" + $RunId)
+$BackedUp = New-Object System.Collections.ArrayList
 
 try {{
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
+    [void][System.IO.Directory]::CreateDirectory($ExtractDir)
     Write-UpdateLog "Extracting $ZipPath -> $ExtractDir"
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $ExtractDir)
 
     $PayloadDir = $ExtractDir
-    if (-not (Test-Path (Join-Path $PayloadDir $ExeName))) {{
-        $Nested = Get-ChildItem -Path $ExtractDir -Directory | Where-Object {{ Test-Path (Join-Path $_.FullName $ExeName) }} | Select-Object -First 1
+    if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $ExeName) -PathType Leaf)) {{
+        $Nested = Get-ChildItem -LiteralPath $ExtractDir -Directory | Where-Object {{ Test-Path -LiteralPath (Join-Path $_.FullName $ExeName) -PathType Leaf }} | Select-Object -First 1
         if ($Nested) {{
             $PayloadDir = $Nested.FullName
         }} else {{
@@ -262,37 +312,59 @@ try {{
         }}
     }}
 
-    # 2. 同盘原子备份旧版可执行文件与 _internal 目录以便失败回滚
-    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
-    foreach ($Entry in @($ExeName, "_internal")) {{
-        $OldItem = Join-Path $InstallDir $Entry
-        if (Test-Path $OldItem) {{
-            Write-UpdateLog "Backing up $OldItem"
-            $Moved = $false
-            for ($retry = 0; $retry -lt 25; $retry++) {{
-                try {{
-                    Move-Item -Path $OldItem -Destination (Join-Path $BackupDir $Entry) -Force
-                    $Moved = $true
-                    break
-                }} catch {{
-                    Start-Sleep -Milliseconds 300
-                }}
-            }}
-            if (-not $Moved) {{
-                throw "Failed to move locked item: $OldItem"
-            }}
+    # 1.5 替换任何现有文件前，先严格校验新包完整性（含 dist 与 certifi 根证书）
+    if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "_internal") -PathType Container)) {{
+        throw "Extracted payload missing _internal directory"
+    }}
+    foreach ($ReqRel in @($ExeName, "_internal\\dist\\index.html", "_internal\\certifi\\cacert.pem")) {{
+        $ReqPath = Join-Path $PayloadDir $ReqRel
+        if (-not (Test-Path -LiteralPath $ReqPath -PathType Leaf)) {{
+            throw "Extracted payload incomplete; missing $ReqRel"
         }}
     }}
 
-    # 3. 覆盖写入新版文件
-    Write-UpdateLog "Copying new payload from $PayloadDir -> $InstallDir"
-    Get-ChildItem -Path $PayloadDir -Force | ForEach-Object {{
-        Copy-Item -Path $_.FullName -Destination $InstallDir -Recurse -Force
+    # 1.8 先复制到安装目录同盘暂存目录，避免磁盘满或拷贝中断破坏现网文件
+    Write-UpdateLog "Staging validated payload into $StageDir"
+    [void][System.IO.Directory]::CreateDirectory($StageDir)
+    Get-ChildItem -LiteralPath $PayloadDir -Force | ForEach-Object {{
+        Copy-Item -LiteralPath $_.FullName -Destination $StageDir -Recurse -Force
+    }}
+    foreach ($ReqRel in @($ExeName, "_internal\\dist\\index.html", "_internal\\certifi\\cacert.pem")) {{
+        $StageCheck = Join-Path $StageDir $ReqRel
+        if (-not (Test-Path -LiteralPath $StageCheck -PathType Leaf)) {{
+            throw "Staged payload verification failed; missing $ReqRel"
+        }}
+    }}
+
+    # 2. 同卷原子备份旧版（先 _internal 后主 exe；Directory::Move 若遇子文件占用会零破坏直接抛错）
+    [void][System.IO.Directory]::CreateDirectory($BackupDir)
+    $OldInternal = Join-Path $InstallDir "_internal"
+    if (Test-Path -LiteralPath $OldInternal) {{
+        Write-UpdateLog "Backing up $OldInternal (atomic)"
+        Move-Atomically -Src $OldInternal -Dst (Join-Path $BackupDir "_internal") -IsDir $true
+        [void]$BackedUp.Add(@{{ Name = "_internal"; IsDir = $true }})
+    }}
+    $OldExePath = Join-Path $InstallDir $ExeName
+    if (Test-Path -LiteralPath $OldExePath) {{
+        Write-UpdateLog "Backing up $OldExePath (atomic)"
+        Move-Atomically -Src $OldExePath -Dst (Join-Path $BackupDir $ExeName) -IsDir $false
+        [void]$BackedUp.Add(@{{ Name = $ExeName; IsDir = $false }})
+    }}
+
+    # 3. 原子切入新版文件（绝不使用会嵌套目录的壳层移动命令）
+    Write-UpdateLog "Swapping new payload from $StageDir -> $InstallDir"
+    Move-Atomically -Src (Join-Path $StageDir "_internal") -Dst (Join-Path $InstallDir "_internal") -IsDir $true
+    Move-Atomically -Src (Join-Path $StageDir $ExeName) -Dst (Join-Path $InstallDir $ExeName) -IsDir $false
+    Get-ChildItem -LiteralPath $StageDir -Force | Where-Object {{ $_.Name -ne $ExeName -and $_.Name -ne "_internal" }} | ForEach-Object {{
+        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force
     }}
 
     $NewExe = Join-Path $InstallDir $ExeName
-    if (-not (Test-Path $NewExe)) {{
-        throw "New executable missing after copy: $NewExe"
+    foreach ($ReqRel in @($ExeName, "_internal\\dist\\index.html", "_internal\\certifi\\cacert.pem")) {{
+        $PostPath = Join-Path $InstallDir $ReqRel
+        if (-not (Test-Path -LiteralPath $PostPath -PathType Leaf)) {{
+            throw "Post-swap verification failed; missing $ReqRel"
+        }}
     }}
 
     # 4. 同步 Windows 控制面板/已安装应用版本号（若通过 NSIS 安装）
@@ -306,7 +378,23 @@ try {{
     }}
 
     # 清理可能从旧版 PyInstaller 继承的环境变量，防止新版启动时读到旧路径或直接退出
-    foreach ($PyiVar in @('_MEIPASS', '_MEIPASS2', '_PYI_ARCHIVE_FILE', '_PYI_APPLICATION_HOME_DIR', '_PYI_PARENT_PROCESS_LEVEL', 'PYTHONHOME', 'PYTHONPATH')) {{
+    foreach ($PyiVar in @(
+        '_MEIPASS',
+        '_MEIPASS2',
+        '_PYI_ARCHIVE_FILE',
+        '_PYI_APPLICATION_HOME_DIR',
+        '_PYI_PARENT_PROCESS_LEVEL',
+        'PYTHONHOME',
+        'PYTHONPATH',
+        'ZHILING_DATA_DIR',
+        'ZHILING_DIST_DIR',
+        'ZHILING_SERVE_DIST',
+        'ZHILING_ALLOWED_ORIGINS',
+        'SSL_CERT_FILE',
+        'REQUESTS_CA_BUNDLE',
+        'WEBVIEW2_DEFAULT_BACKGROUND_COLOR',
+        'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'
+    )) {{
         Remove-Item "Env:$PyiVar" -ErrorAction SilentlyContinue
     }}
 
@@ -318,33 +406,58 @@ try {{
         Write-UpdateLog "Start-Process failed ($($_.Exception.Message)); falling back to explorer.exe"
         Start-Process -FilePath 'explorer.exe' -ArgumentList $NewExe -ErrorAction SilentlyContinue
     }}
-    Remove-Item -Path $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $ZipPath -Force -ErrorAction SilentlyContinue
-    if ($StagedMetaPath -and (Test-Path $StagedMetaPath)) {{
-        Remove-Item -Path $StagedMetaPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+    if ($StagedMetaPath -and (Test-Path -LiteralPath $StagedMetaPath)) {{
+        Remove-Item -LiteralPath $StagedMetaPath -Force -ErrorAction SilentlyContinue
     }}
 }} catch {{
     Write-UpdateLog "Update FAILED: $($_.Exception.Message)"
+    $RollbackOk = $true
     try {{
-        if (Test-Path $BackupDir) {{
+        if (($BackedUp.Count -gt 0) -and (Test-Path -LiteralPath $BackupDir)) {{
             Write-UpdateLog "Rolling back previous version from $BackupDir"
-            foreach ($Entry in @($ExeName, "_internal")) {{
-                $BakItem = Join-Path $BackupDir $Entry
-                $DstItem = Join-Path $InstallDir $Entry
-                if (Test-Path $BakItem) {{
-                    if (Test-Path $DstItem) {{ Remove-Item -Path $DstItem -Recurse -Force -ErrorAction SilentlyContinue }}
-                    Move-Item -Path $BakItem -Destination $DstItem -Force -ErrorAction SilentlyContinue
+            foreach ($Entry in $BackedUp) {{
+                $Name = [string]$Entry.Name
+                $IsDir = [bool]$Entry.IsDir
+                $BakItem = Join-Path $BackupDir $Name
+                $DstItem = Join-Path $InstallDir $Name
+                if (-not (Test-Path -LiteralPath $BakItem)) {{
+                    continue
+                }}
+                try {{
+                    if (Test-Path -LiteralPath $DstItem) {{
+                        [void][System.IO.Directory]::CreateDirectory($FailedDir)
+                        Move-Atomically -Src $DstItem -Dst (Join-Path $FailedDir $Name) -IsDir $IsDir
+                    }}
+                    if (-not (Test-Path -LiteralPath $DstItem)) {{
+                        Move-Atomically -Src $BakItem -Dst $DstItem -IsDir $IsDir
+                    }} else {{
+                        $RollbackOk = $false
+                        Write-UpdateLog "Rollback blocked: destination still exists at $DstItem"
+                    }}
+                }} catch {{
+                    $RollbackOk = $false
+                    Write-UpdateLog "Rollback error for $($Name): $($_.Exception.Message)"
                 }}
             }}
-            Remove-Item -Path $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
         }}
     }} catch {{
+        $RollbackOk = $false
         Write-UpdateLog "Rollback error: $($_.Exception.Message)"
     }}
-    Remove-Item -Path $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($RollbackOk) {{
+        if (Test-Path -LiteralPath $FailedDir) {{ Remove-Item -LiteralPath $FailedDir -Recurse -Force -ErrorAction SilentlyContinue }}
+        if (Test-Path -LiteralPath $BackupDir) {{ Remove-Item -LiteralPath $BackupDir -Recurse -Force -ErrorAction SilentlyContinue }}
+    }} else {{
+        Write-UpdateLog "Preserving backup dir after incomplete rollback: $BackupDir"
+    }}
+    if (Test-Path -LiteralPath $StageDir) {{ Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue }}
+    if (Test-Path -LiteralPath $WorkRoot) {{ Remove-Item -LiteralPath $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue }}
     $OldExe = Join-Path $InstallDir $ExeName
-    if (Test-Path $OldExe) {{
+    if (Test-Path -LiteralPath $OldExe) {{
         Start-Process -FilePath $OldExe -WorkingDirectory $InstallDir -WindowStyle Normal -ErrorAction SilentlyContinue
     }}
 }}
@@ -357,11 +470,13 @@ def build_macos_update_script(
     dmg_path: Path,
     target_app: Path,
     log_path: Path,
+    staged_meta_path: Path | None = None,
 ) -> str:
-    """生成 macOS 分离进程热更新 Shell 脚本（静默挂载 DMG + ditto 原子替换 + 清隔离标记 + 重启）。"""
+    """生成 macOS 分离进程热更新 Shell 脚本（静默极速挂载 DMG + ditto 原子替换 + LS 注册 + 单实例重启）。"""
     q_dmg = shlex.quote(str(dmg_path))
     q_target = shlex.quote(str(target_app))
     q_log = shlex.quote(str(log_path))
+    q_staged = shlex.quote(str(staged_meta_path)) if staged_meta_path is not None else "''"
     return f"""#!/bin/sh
 set -u
 
@@ -369,8 +484,16 @@ OLD_PID={int(old_pid)}
 DMG_PATH={q_dmg}
 TARGET_APP={q_target}
 LOG_PATH={q_log}
+STAGED_META_PATH={q_staged}
 MNT_DIR="/tmp/zhiling-update-mnt-$$"
 BACKUP_APP="${{TARGET_APP}}.zhiling-backup"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+# 清理从旧版 PyInstaller / 运行期继承的环境变量，避免新版启动读取旧路径或旧 CA 路径
+unset _MEIPASS _MEIPASS2 _PYI_ARCHIVE_FILE _PYI_APPLICATION_HOME_DIR _PYI_PARENT_PROCESS_LEVEL
+unset PYTHONHOME PYTHONPATH
+unset ZHILING_DATA_DIR ZHILING_DIST_DIR ZHILING_SERVE_DIST ZHILING_ALLOWED_ORIGINS
+unset SSL_CERT_FILE REQUESTS_CA_BUNDLE
 
 log_msg() {{
     mkdir -p "$(dirname "$LOG_PATH")" 2>/dev/null || true
@@ -384,25 +507,78 @@ cleanup_mount() {{
     fi
 }}
 
+register_app_bundle() {{
+    if [ -x "$LSREGISTER" ] && [ -d "$TARGET_APP" ]; then
+        "$LSREGISTER" -f "$TARGET_APP" >>"$LOG_PATH" 2>&1 || true
+    fi
+}}
+
+launch_app() {{
+    sleep 0.25
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        OPEN_ERR="$(open "$TARGET_APP" 2>&1)"
+        OPEN_RC=$?
+        if [ "$OPEN_RC" -eq 0 ]; then
+            log_msg "Launched $TARGET_APP (attempt $attempt)"
+            osascript - "$TARGET_APP" >/dev/null 2>&1 <<'EOF' || true
+on run argv
+    tell application (item 1 of argv) to activate
+end run
+EOF
+            return 0
+        fi
+        log_msg "WARN: open attempt $attempt failed (rc=$OPEN_RC): $OPEN_ERR"
+        register_app_bundle
+        sleep 0.6
+        attempt=$((attempt + 1))
+    done
+
+    CF_EXEC=""
+    if [ -x /usr/libexec/PlistBuddy ] && [ -f "$TARGET_APP/Contents/Info.plist" ]; then
+        CF_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$TARGET_APP/Contents/Info.plist" 2>/dev/null || true)"
+    fi
+    BIN_EXEC="$TARGET_APP/Contents/MacOS/${{CF_EXEC:-ZhilingClassroom}}"
+    if [ -x "$BIN_EXEC" ]; then
+        log_msg "Fallback: direct detached launch of $BIN_EXEC"
+        nohup "$BIN_EXEC" >/dev/null 2>&1 &
+        return 0
+    fi
+    log_msg "ERROR: Unable to launch $TARGET_APP"
+    return 1
+}}
+
 log_msg "macOS updater started for PID=$OLD_PID TARGET_APP=$TARGET_APP"
 
-# 1. 等待旧主进程完全退出
+# 1. 等待旧主进程退出（超时先 TERM 后 KILL 兜底，避免无限阻塞或误删文件锁）
 i=0
-while [ "$i" -lt 125 ]; do
+while [ "$i" -lt 45 ]; do
     if ! kill -0 "$OLD_PID" 2>/dev/null; then
         break
     fi
     sleep 0.2
     i=$((i + 1))
 done
-sleep 0.6
+if kill -0 "$OLD_PID" 2>/dev/null; then
+    log_msg "WARN: OLD_PID=$OLD_PID still alive after 9s, sending SIGTERM"
+    kill -TERM "$OLD_PID" >/dev/null 2>&1 || true
+    sleep 1.5
+fi
+if kill -0 "$OLD_PID" 2>/dev/null; then
+    log_msg "WARN: OLD_PID=$OLD_PID still alive after SIGTERM, sending SIGKILL"
+    kill -KILL "$OLD_PID" >/dev/null 2>&1 || true
+    sleep 0.4
+fi
+sleep 0.3
 
-# 2. 静默只读挂载 DMG
+# 2. 静默快速只读挂载 DMG（已提前完成 SHA-256 校验，跳过耗时的磁盘映像校验与访达弹窗）
 mkdir -p "$MNT_DIR"
-if ! hdiutil attach -nobrowse -readonly -mountpoint "$MNT_DIR" "$DMG_PATH" >/dev/null 2>&1; then
-    log_msg "ERROR: hdiutil attach failed for $DMG_PATH"
+ATTACH_OUT="$(hdiutil attach -noverify -noautoopen -nobrowse -readonly -mountpoint "$MNT_DIR" "$DMG_PATH" 2>&1)"
+ATTACH_RC=$?
+if [ "$ATTACH_RC" -ne 0 ]; then
+    log_msg "ERROR: hdiutil attach failed (rc=$ATTACH_RC) for $DMG_PATH: $ATTACH_OUT"
     cleanup_mount
-    open -n "$TARGET_APP" >/dev/null 2>&1 || true
+    launch_app || true
     exit 1
 fi
 
@@ -414,7 +590,7 @@ fi
 if [ -z "$SRC_APP" ] || [ ! -d "$SRC_APP" ]; then
     log_msg "ERROR: No .app bundle found inside mounted DMG"
     cleanup_mount
-    open -n "$TARGET_APP" >/dev/null 2>&1 || true
+    launch_app || true
     exit 1
 fi
 
@@ -427,18 +603,22 @@ if [ -d "$TARGET_APP" ]; then
     else
         log_msg "ERROR: Cannot move $TARGET_APP (insufficient permission?)"
         cleanup_mount
-        open -n "$TARGET_APP" >/dev/null 2>&1 || true
+        launch_app || true
         exit 1
     fi
 fi
 
-if ditto "$SRC_APP" "$TARGET_APP" >/dev/null 2>&1; then
+if ditto "$SRC_APP" "$TARGET_APP" >>"$LOG_PATH" 2>&1; then
     xattr -dr com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1 || true
     rm -rf "$BACKUP_APP" 2>/dev/null || true
     cleanup_mount
     rm -f "$DMG_PATH" 2>/dev/null || true
+    if [ -n "$STAGED_META_PATH" ] && [ -f "$STAGED_META_PATH" ]; then
+        rm -f "$STAGED_META_PATH" 2>/dev/null || true
+    fi
+    register_app_bundle
     log_msg "Update succeeded. Launching $TARGET_APP"
-    open -n "$TARGET_APP" >/dev/null 2>&1 || true
+    launch_app || true
     exit 0
 else
     log_msg "ERROR: ditto failed, rolling back"
@@ -447,7 +627,8 @@ else
         mv "$BACKUP_APP" "$TARGET_APP" 2>/dev/null || true
     fi
     cleanup_mount
-    open -n "$TARGET_APP" >/dev/null 2>&1 || true
+    register_app_bundle
+    launch_app || true
     exit 1
 fi
 """
@@ -507,6 +688,8 @@ class AppUpdaterService:
         self.platform_name, self.arch_name = _detect_platform_arch(platform_name, arch_name)
         self._executable_override = executable_override
         self._lock = asyncio.Lock()
+        self._apply_lock = asyncio.Lock()
+        self._apply_scheduled = False
         self._cached_at = 0.0
         self._cached_result: UpdateCheckResult | None = None
 
@@ -825,92 +1008,106 @@ class AppUpdaterService:
         self._staged_meta_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async def apply_staged_update(self) -> UpdateApplyResult:
-        meta = self._read_staged_meta()
-        if not meta:
-            raise AppError(400, "UPDATE_NOT_DOWNLOADED", "请先下载新版本安装包")
+        async with self._apply_lock:
+            if self._apply_scheduled:
+                staged_meta = self._read_staged_meta() or {}
+                return UpdateApplyResult(
+                    scheduled=True,
+                    mode="auto-replace",
+                    version=str(staged_meta.get("version") or ""),
+                    download_path=str(staged_meta.get("filePath") or ""),
+                    message="更新脚本已在执行中，软件即将自动退出并重启。",
+                )
 
-        file_path = Path(str(meta.get("filePath") or ""))
-        if not file_path.is_file():
-            raise AppError(400, "UPDATE_FILE_MISSING", "已下载的更新包不存在，请重新下载")
+            meta = self._read_staged_meta()
+            if not meta:
+                raise AppError(400, "UPDATE_NOT_DOWNLOADED", "请先下载新版本安装包")
 
-        expected_sha = str(meta.get("expectedSha256") or meta.get("sha256") or "").lower().strip()
-        actual_sha = await asyncio.to_thread(self._compute_sha256, file_path)
-        if expected_sha and actual_sha != expected_sha:
-            file_path.unlink(missing_ok=True)
-            raise AppError(502, "UPDATE_CHECKSUM_MISMATCH", "安装前二次校验失败，更新包已损坏，请重新下载")
+            file_path = Path(str(meta.get("filePath") or ""))
+            if not file_path.is_file():
+                raise AppError(400, "UPDATE_FILE_MISSING", "已下载的更新包不存在，请重新下载")
 
-        version = str(meta.get("version") or "")
-        if not self.is_frozen:
+            expected_sha = str(meta.get("expectedSha256") or meta.get("sha256") or "").lower().strip()
+            actual_sha = await asyncio.to_thread(self._compute_sha256, file_path)
+            if expected_sha and actual_sha != expected_sha:
+                file_path.unlink(missing_ok=True)
+                raise AppError(502, "UPDATE_CHECKSUM_MISMATCH", "安装前二次校验失败，更新包已损坏，请重新下载")
+
+            version = str(meta.get("version") or "")
+            if not self.is_frozen:
+                return UpdateApplyResult(
+                    scheduled=False,
+                    mode="dev-manual",
+                    version=version,
+                    download_path=str(file_path),
+                    message="当前为源码开发运行模式，已将校验通过的新版安装包保存在本地目录，请手动安装或打包测试。",
+                )
+
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self.logs_dir / "updater.log"
+
+            if self.platform_name == "win32":
+                install_dir = self.current_executable.parent
+                exe_name = self.current_executable.name
+                script_path = file_path.parent / "apply_update.ps1"
+                script_body = build_windows_update_script(
+                    old_pid=os.getpid(),
+                    zip_path=file_path,
+                    install_dir=install_dir,
+                    exe_name=exe_name,
+                    log_path=log_path,
+                    version=version,
+                    staged_meta_path=self._staged_meta_path(),
+                )
+                script_path.write_text(script_body, encoding="utf-8-sig")
+
+                _launch_windows_update_script(
+                    script_path,
+                    require_elevation=not _can_write_directory(install_dir),
+                )
+                self._apply_scheduled = True
+
+                return UpdateApplyResult(
+                    scheduled=True,
+                    mode="auto-replace",
+                    version=version,
+                    download_path=str(file_path),
+                    message="更新脚本已就绪，软件即将自动退出、替换新版并重启。",
+                )
+
+            if self.platform_name == "darwin":
+                target_app = _resolve_macos_app_bundle(self.current_executable)
+                script_path = file_path.parent / "apply_update.sh"
+                script_body = build_macos_update_script(
+                    old_pid=os.getpid(),
+                    dmg_path=file_path,
+                    target_app=target_app,
+                    log_path=log_path,
+                    staged_meta_path=self._staged_meta_path(),
+                )
+                script_path.write_text(script_body, encoding="utf-8", newline="\n")
+                os.chmod(script_path, 0o755)
+                subprocess.Popen(
+                    ["/bin/sh", str(script_path)],
+                    start_new_session=True,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._apply_scheduled = True
+                return UpdateApplyResult(
+                    scheduled=True,
+                    mode="auto-replace",
+                    version=version,
+                    download_path=str(file_path),
+                    message="更新脚本已就绪，应用即将自动退出、替换新版 .app 并重新启动。",
+                )
+
             return UpdateApplyResult(
                 scheduled=False,
                 mode="dev-manual",
                 version=version,
                 download_path=str(file_path),
-                message="当前为源码开发运行模式，已将校验通过的新版安装包保存在本地目录，请手动安装或打包测试。",
+                message="当前系统暂不支持自动替换，已为您下载好最新安装包。",
             )
-
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self.logs_dir / "updater.log"
-
-        if self.platform_name == "win32":
-            install_dir = self.current_executable.parent
-            exe_name = self.current_executable.name
-            script_path = file_path.parent / "apply_update.ps1"
-            script_body = build_windows_update_script(
-                old_pid=os.getpid(),
-                zip_path=file_path,
-                install_dir=install_dir,
-                exe_name=exe_name,
-                log_path=log_path,
-                version=version,
-                staged_meta_path=self._staged_meta_path(),
-            )
-            script_path.write_text(script_body, encoding="utf-8-sig")
-
-            _launch_windows_update_script(
-                script_path,
-                require_elevation=not _can_write_directory(install_dir),
-            )
-
-            return UpdateApplyResult(
-                scheduled=True,
-                mode="auto-replace",
-                version=version,
-                download_path=str(file_path),
-                message="更新脚本已就绪，软件即将自动退出、替换新版并重启。",
-            )
-
-        if self.platform_name == "darwin":
-            target_app = _resolve_macos_app_bundle(self.current_executable)
-            script_path = file_path.parent / "apply_update.sh"
-            script_body = build_macos_update_script(
-                old_pid=os.getpid(),
-                dmg_path=file_path,
-                target_app=target_app,
-                log_path=log_path,
-            )
-            script_path.write_text(script_body, encoding="utf-8", newline="\n")
-            os.chmod(script_path, 0o755)
-            subprocess.Popen(
-                ["/bin/sh", str(script_path)],
-                start_new_session=True,
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return UpdateApplyResult(
-                scheduled=True,
-                mode="auto-replace",
-                version=version,
-                download_path=str(file_path),
-                message="更新脚本已就绪，应用即将自动退出、替换新版 .app 并重新启动。",
-            )
-
-        return UpdateApplyResult(
-            scheduled=False,
-            mode="dev-manual",
-            version=version,
-            download_path=str(file_path),
-            message="当前系统暂不支持自动替换，已为您下载好最新安装包。",
-        )

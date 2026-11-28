@@ -19,6 +19,8 @@ export interface ActiveMarqueeVisual {
 
 interface UseMarqueeAutoScrollOptions {
   enabled: boolean;
+  /** 移动端/安卓交互模式：批量勾选仅允许按住左侧勾选轨上下连选，禁用桌面矩形框选 */
+  mobileMode?: boolean;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   orderedIds: string[];
   idToIndex: Map<string, number>;
@@ -77,6 +79,7 @@ function isBlockingInteractiveTarget(target: EventTarget | null): boolean {
 
 export function useMarqueeAutoScroll({
   enabled,
+  mobileMode = false,
   scrollRef,
   orderedIds,
   idToIndex,
@@ -293,14 +296,18 @@ export function useMarqueeAutoScroll({
       const container = scrollRef.current;
       if (!container) return;
 
-      // 鼠标/触控笔：容器内任意位置按左键拖动即可拉出蓝框选框
-      // 触控手指：仅在左侧勾选轨（data-batch-checkbox-rail="true"）按下时触发连续滑选，正文区保留原生滚动
+      // 桌面鼠标/触控笔：容器内任意位置按左键拖动即可拉出蓝框选框
+      // 移动端/触控及安卓预览：仅在左侧勾选轨（data-batch-checkbox-rail="true"）按下时触发连续滑选，正文区保留列表拖动滚动
       const targetEl = e.target instanceof Element ? e.target : null;
       const isTouch = e.pointerType === 'touch';
+      const useMobileRailMode = isTouch || mobileMode;
       const onCheckboxRail = Boolean(targetEl?.closest('[data-batch-checkbox-rail="true"]'));
 
-      if (isTouch) {
-        if (!onCheckboxRail) return;
+      if (useMobileRailMode) {
+        if (!onCheckboxRail || (!isTouch && e.button !== 0)) return;
+        if (!isTouch) {
+          e.preventDefault();
+        }
       } else if (e.button !== 0) {
         return;
       }
@@ -332,7 +339,7 @@ export function useMarqueeAutoScroll({
 
       sessionRef.current = {
         pointerId: e.pointerId,
-        kind: isTouch ? 'rail' : 'marquee',
+        kind: useMobileRailMode ? 'rail' : 'marquee',
         startClientX: e.clientX,
         startClientY: e.clientY,
         lastClientX: e.clientX,

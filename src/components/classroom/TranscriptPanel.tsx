@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
 import { useMarqueeAutoScroll } from '../../hooks/useMarqueeAutoScroll';
+import { useOverscrollSpring } from '../../hooks/useOverscrollSpring';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
 import {
@@ -32,9 +33,9 @@ import {
 } from '../../utils/classroomScrollMemory';
 import {
   getPasteShortcutLabel,
-  isAndroidPlatform,
   useViewportLayout,
 } from '../../utils/desktopBridge';
+import { triggerHaptic } from '../../utils/springPhysics';
 import {
   mapStickyAnchorsToUtterances,
   PAPER_THEMES,
@@ -58,7 +59,7 @@ type TranscriptUtterance = KnowledgeSegment['utterances'][number];
 
 const LONG_PRESS_MS = 420;
 const LONG_PRESS_FEEDBACK_MS = 110;
-const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+const LONG_PRESS_MOVE_TOLERANCE_PX = 8;
 
 function isUtteranceInteractiveTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
@@ -234,11 +235,11 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
         return;
       }
       clearLongPressTimers();
-      if (hideDesktopHoverBar) {
-        onOpenMobileActions(utterance, displayedText, { x: e.clientX, y: e.clientY });
-      } else {
-        onOpenDesktopContextMenu(e, utterance, displayedText);
+      // 移动端/安卓模式彻底屏蔽桌面右键菜单，所有记录操作均通过长按触发
+      if (enableLongPress) {
+        return;
       }
+      onOpenDesktopContextMenu(e, utterance, displayedText);
     };
 
     const handleRowBatchClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -326,17 +327,23 @@ const UtteranceRow: React.FC<UtteranceRowProps> = React.memo(
             : undefined
         }
       >
-        {/* 批量删除左侧勾选轨（触控端按住此轨上下滑动可连选并触发边缘自动滚动） */}
+        {/* 批量删除左侧勾选轨（触控与安卓预览端按住此轨上下滑动可连选并触发边缘自动滚动） */}
         {isBatchMode && (
           <div
             data-batch-checkbox-rail="true"
-            className="relative z-20 -ml-1 -my-1 px-1.5 py-1.5 self-stretch flex items-start pt-1.5 shrink-0 touch-none"
+            className={`relative z-20 self-stretch flex items-start shrink-0 touch-none select-none ${
+              enableLongPress
+                ? '-ml-2 -my-1.5 pl-2.5 pr-3 py-2 cursor-ns-resize'
+                : '-ml-1 -my-1 px-1.5 py-1.5 pt-1.5'
+            }`}
           >
             <span
               role="checkbox"
               aria-checked={isSelected}
               aria-label={`选择 [${utterance.timestampText}] 的转写记录`}
               className={`w-5 h-5 rounded-md border-[1.5px] flex items-center justify-center transition-all ${
+                enableLongPress ? 'mt-0.5' : ''
+              } ${
                 isSelected
                   ? 'bg-[#1456F0] border-[#1456F0] text-white shadow-[0_2px_6px_rgba(20,86,240,0.28)]'
                   : 'bg-white border-[#C9CDD4] group-hover:border-[#1456F0]'
@@ -711,6 +718,7 @@ interface SegmentCardProps {
   enableResegment: boolean;
   enableHighlight: boolean;
   enableBubble: boolean;
+  compactMobileLayout: boolean;
   showDiarization: boolean;
   hideDesktopHoverBar: boolean;
   enableLongPress: boolean;
@@ -758,6 +766,7 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
     enableResegment,
     enableHighlight,
     enableBubble,
+    compactMobileLayout,
     showDiarization,
     hideDesktopHoverBar,
     enableLongPress,
@@ -784,23 +793,37 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
   }) => {
     const borderShapeClass =
       isFirstChunk && isLastChunk
-        ? 'rounded-xl border p-5'
+        ? compactMobileLayout
+          ? 'rounded-xl border p-3.5'
+          : 'rounded-xl border p-5'
         : isFirstChunk
-          ? 'rounded-t-xl border border-b-0 px-5 pt-5 pb-2.5'
+          ? compactMobileLayout
+            ? 'rounded-t-xl border border-b-0 px-3.5 pt-3.5 pb-2'
+            : 'rounded-t-xl border border-b-0 px-5 pt-5 pb-2.5'
           : isLastChunk
-            ? 'rounded-b-xl border border-t-0 px-5 pt-2.5 pb-5'
-            : 'border-x px-5 py-2.5';
+            ? compactMobileLayout
+              ? 'rounded-b-xl border border-t-0 px-3.5 pt-2 pb-3.5'
+              : 'rounded-b-xl border border-t-0 px-5 pt-2.5 pb-5'
+            : compactMobileLayout
+              ? 'border-x px-3.5 py-2'
+              : 'border-x px-5 py-2.5';
 
     return (
-      <div className={`flex items-start gap-3 ${isLastChunk ? 'pb-4' : ''}`}>
-        {enableBubble && (
+      <div
+        className={`${
+          enableBubble && !compactMobileLayout ? 'flex items-start gap-3 ' : ''
+        }${isLastChunk ? 'pb-4' : ''}`}
+      >
+        {enableBubble && !compactMobileLayout && (
           <div className={isFirstChunk ? 'pt-3 shrink-0' : 'w-9 shrink-0'}>
             {isFirstChunk && <KnowledgeBubblePopover segment={segment} />}
           </div>
         )}
 
         <article
-          className={`flex-1 min-w-0 bg-white shadow-[0_2px_8px_rgba(31,35,41,0.03)] space-y-3.5 transition-all ${borderShapeClass} ${
+          className={`min-w-0 bg-white shadow-[0_2px_8px_rgba(31,35,41,0.03)] space-y-3.5 transition-all ${
+            enableBubble && !compactMobileLayout ? 'flex-1 ' : 'w-full '
+          }${borderShapeClass} ${
             isFocusedSegment && isFirstChunk && isLastChunk
               ? 'border-[#1456F0] ring-2 ring-[#1456F0]/20'
               : isFocusedSegment
@@ -808,14 +831,26 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
                 : 'border-[#DEE0E3]'
           }`}
         >
-          {isFirstChunk && enableResegment && segment.topicTitle && (
-            <div className="flex items-center gap-2 border-b border-[#F2F3F5] pb-2.5">
-              <span className="w-2 h-2 rounded-full bg-[#1456F0] shrink-0" />
-              <h3 className="text-[15px] font-semibold text-[#1F2329]">
-                {segment.topicTitle}
-              </h3>
-            </div>
-          )}
+          {isFirstChunk &&
+            ((enableResegment && segment.topicTitle) || (enableBubble && compactMobileLayout)) && (
+              <div className="flex items-center justify-between gap-2 border-b border-[#F2F3F5] pb-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  {enableResegment && segment.topicTitle ? (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-[#1456F0] shrink-0" />
+                      <h3 className="text-[15px] font-semibold text-[#1F2329] truncate">
+                        {segment.topicTitle}
+                      </h3>
+                    </>
+                  ) : (
+                    <span className="text-[14px] font-medium text-[#646A73]">本段知识点</span>
+                  )}
+                </div>
+                {enableBubble && compactMobileLayout && (
+                  <KnowledgeBubblePopover segment={segment} compact />
+                )}
+              </div>
+            )}
 
           <div className="space-y-3">
             {visibleUtterances.map((utt) => {
@@ -911,8 +946,8 @@ const SegmentCard: React.FC<SegmentCardProps> = React.memo(
 
 SegmentCard.displayName = 'SegmentCard';
 
-const LiveRecordingBanner: React.FC<{ enableBubble: boolean }> = React.memo(
-  ({ enableBubble }) => {
+const LiveRecordingBanner: React.FC<{ indentForBubble: boolean }> = React.memo(
+  ({ indentForBubble }) => {
     const isRecording = useAppStore((s) => s.activeSession?.status === 'recording');
     const livePartialUtterance = useAppStore((s) => s.livePartialUtterance);
 
@@ -920,8 +955,9 @@ const LiveRecordingBanner: React.FC<{ enableBubble: boolean }> = React.memo(
 
     return (
       <div
+        data-live-recording-banner="true"
         className={`mt-4 flex items-center gap-3 rounded-xl border border-[#BEDAFF] bg-[#EBF2FF]/75 px-4 py-3.5 text-[14px] text-[#1456F0] ${
-          enableBubble ? 'ml-12' : ''
+          indentForBubble ? 'ml-12' : ''
         }`}
       >
         <div className="flex items-center gap-1 h-4 shrink-0">
@@ -1059,8 +1095,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   const showNotice = useAppStore((s) => s.showNotice);
 
   const viewport = useViewportLayout();
+  const isMobileInteraction = viewport.isMobileTouchLayout;
   const hideDesktopHoverBar = viewport.isCompactWidth;
-  const enableLongPress = viewport.isCompactPhoneLayout || isAndroidPlatform();
+  const enableLongPress = isMobileInteraction;
   const useBottomSheetForActions = viewport.isCompactWidth;
 
   const [focusedIds, setFocusedIds] = useState<{
@@ -1324,6 +1361,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     syncSelectionOnScroll,
   } = useMarqueeAutoScroll({
     enabled: batchDeleteMode && !pendingDelete,
+    mobileMode: isMobileInteraction,
     scrollRef,
     orderedIds,
     idToIndex,
@@ -1333,11 +1371,18 @@ export const TranscriptPanel: React.FC = React.memo(() => {
     edgeZonePx: 68,
   });
 
+  const transcriptOverscroll = useOverscrollSpring({
+    enabled: isMobileInteraction,
+    disabled: isDraggingSelection,
+    scrollRef,
+  });
+
   const handleToggleSelectUtterance = useCallback(
     (utteranceId: string, shiftKey: boolean) => {
       if (shouldSuppressRowClick()) return;
       const idx = idToIndex.get(utteranceId);
       if (idx === undefined) return;
+      triggerHaptic('selection');
 
       if (shiftKey && lastClickedOrderIndexRef.current !== null) {
         const anchor = lastClickedOrderIndexRef.current;
@@ -1889,6 +1934,10 @@ export const TranscriptPanel: React.FC = React.memo(() => {
 
   const handleTranscriptAreaContextMenu = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
+      if (isMobileInteraction) {
+        e.preventDefault();
+        return;
+      }
       if (hideDesktopHoverBar) return;
       if (e.target instanceof Element && e.target.closest('input, textarea')) return;
       if (orderedIds.length === 0) return;
@@ -1948,6 +1997,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
       handleRequestDeleteSelected,
       handleToggleSelectAll,
       hideDesktopHoverBar,
+      isMobileInteraction,
       orderedIds.length,
       selectedIds.size,
     ]
@@ -2048,7 +2098,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
   ]);
 
   const handleMouseUpSelection = () => {
-    if (enableLongPress || batchDeleteMode) return;
+    if (isMobileInteraction || enableLongPress || batchDeleteMode) return;
     const sel = window.getSelection();
     const text = sel?.toString().trim() ?? '';
     if (!text || text.length < 2 || !sel || sel.rangeCount === 0) {
@@ -2082,31 +2132,36 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         viewport.isCompactWidth ? (
           <div
             data-batch-toolbar="mobile"
-            className="h-12 px-3.5 bg-white border-b border-[#DCE4F7] flex items-center justify-between gap-2 shrink-0"
+            className="bg-white border-b border-[#DCE4F7] shrink-0"
           >
-            <button
-              type="button"
-              data-batch-cancel="true"
-              onClick={exitBatchDeleteMode}
-              className="px-2.5 py-1.5 rounded-lg text-[15px] text-[#4E5969] active:bg-[#F2F3F5] cursor-pointer whitespace-nowrap"
-            >
-              取消
-            </button>
-            <span
-              data-batch-selected-count={selectedIds.size}
-              className="text-[15px] font-semibold text-[#1F2329] tabular-nums"
-            >
-              已选 {selectedIds.size} 条
-            </span>
-            <button
-              type="button"
-              data-batch-select-all="true"
-              onClick={handleToggleSelectAll}
-              disabled={orderedIds.length === 0}
-              className="px-2.5 py-1.5 rounded-lg text-[15px] font-medium text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 cursor-pointer whitespace-nowrap"
-            >
-              {allVisibleSelected ? '取消全选' : '全选'}
-            </button>
+            <div className="h-12 px-3.5 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                data-batch-cancel="true"
+                onClick={exitBatchDeleteMode}
+                className="px-2.5 py-1.5 rounded-lg text-[15px] text-[#4E5969] active:bg-[#F2F3F5] cursor-pointer whitespace-nowrap"
+              >
+                取消
+              </button>
+              <span
+                data-batch-selected-count={selectedIds.size}
+                className="text-[15px] font-semibold text-[#1F2329] tabular-nums"
+              >
+                已选 {selectedIds.size} 条
+              </span>
+              <button
+                type="button"
+                data-batch-select-all="true"
+                onClick={handleToggleSelectAll}
+                disabled={orderedIds.length === 0}
+                className="px-2.5 py-1.5 rounded-lg text-[15px] font-medium text-[#1456F0] active:bg-[#EBF2FF] disabled:opacity-40 cursor-pointer whitespace-nowrap"
+              >
+                {allVisibleSelected ? '取消全选' : '全选'}
+              </button>
+            </div>
+            <div className="px-3.5 py-1.5 bg-[#F5F8FF] border-t border-[#E8EEF9] text-[13px] text-[#4E5969] text-center">
+              轻点勾选 · 按住左侧勾选列上下拖动可连续点选
+            </div>
           </div>
         ) : (
           <div
@@ -2143,7 +2198,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
               </span>
 
               <span className="hidden xl:inline text-[14px] text-[#646A73] truncate">
-                按住左键拖拽选框可批量圈选，移近顶/底部自动滚动
+                {isMobileInteraction
+                  ? '轻点勾选 · 按住左侧勾选列上下滑选，靠近边缘自动滚动'
+                  : '按住左键拖拽选框可批量圈选，移近顶/底部自动滚动'}
               </span>
             </div>
 
@@ -2240,8 +2297,8 @@ export const TranscriptPanel: React.FC = React.memo(() => {
             if (selectionBar) setSelectionBar(null);
           }}
           onMouseUp={handleMouseUpSelection}
-          className={`flex-1 overflow-y-auto ${
-            batchDeleteMode || isDraggingSelection ? 'select-none' : ''
+          className={`flex-1 overflow-y-auto overscroll-contain-y ${
+            isMobileInteraction || batchDeleteMode || isDraggingSelection ? 'select-none' : ''
           } ${
             viewport.isCompactWidth
               ? batchDeleteMode
@@ -2250,8 +2307,9 @@ export const TranscriptPanel: React.FC = React.memo(() => {
               : 'px-5 py-5'
           }`}
         >
+        <div ref={transcriptOverscroll.contentRef} className="min-h-full flex flex-col">
         {renderedSegments.length === 0 && !isRecording ? (
-          <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
+          <div className="flex-1 flex flex-col items-center justify-center text-center px-6 space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
               <AudioLines className="w-6 h-6" strokeWidth={1.8} />
             </div>
@@ -2294,6 +2352,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
                         enableResegment={enableResegment}
                         enableHighlight={enableHighlight}
                         enableBubble={enableBubble}
+                        compactMobileLayout={viewport.isCompactWidth}
                         showDiarization={showDiarization}
                         hideDesktopHoverBar={hideDesktopHoverBar}
                         enableLongPress={enableLongPress}
@@ -2324,9 +2383,12 @@ export const TranscriptPanel: React.FC = React.memo(() => {
               </div>
             )}
 
-            <LiveRecordingBanner enableBubble={enableBubble} />
+            <LiveRecordingBanner
+              indentForBubble={!viewport.isCompactWidth && enableBubble && renderedSegments.length > 0}
+            />
           </>
         )}
+        </div>
         </div>
 
         {/* 桌面端矩形拖拽选框覆盖层 */}
@@ -2377,7 +2439,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         <div
           data-mobile-batch-footer="true"
           style={{ paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))' }}
-          className="shrink-0 bg-white border-t border-[#ECEEF2] px-4 pt-2.5 space-y-2 shadow-[0_-6px_20px_rgba(31,35,41,0.06)] z-20"
+          className="animate-sheet-up shrink-0 bg-white border-t border-[#ECEEF2] px-4 pt-2.5 space-y-2 shadow-[0_-6px_20px_rgba(31,35,41,0.06)] z-20"
         >
           <p className="text-[14px] text-[#646A73] text-center">
             点击记录勾选，或按住左侧选框上下滑选（靠近边缘自动滚动）
@@ -2387,7 +2449,7 @@ export const TranscriptPanel: React.FC = React.memo(() => {
             data-batch-delete-trigger="true"
             disabled={selectedIds.size === 0}
             onClick={handleRequestDeleteSelected}
-            className="w-full h-11 rounded-xl bg-[#D83931] active:bg-[#B42318] disabled:bg-[#E5E6EB] disabled:text-[#8F959E] disabled:cursor-not-allowed text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            className="spring-press w-full h-11 rounded-xl bg-[#D83931] active:bg-[#B42318] disabled:bg-[#E5E6EB] disabled:text-[#8F959E] disabled:cursor-not-allowed text-white text-[15px] font-medium inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <Trash2 className="w-4 h-4 shrink-0" />
             <span>
@@ -2627,12 +2689,14 @@ export const TranscriptPanel: React.FC = React.memo(() => {
         );
       })()}
 
-      {/* 桌面端与平板鼠标右键菜单 */}
-      <ContextMenu
-        position={desktopContextMenu.position}
-        items={desktopContextMenu.items}
-        onClose={() => setDesktopContextMenu({ position: null, items: [] })}
-      />
+      {/* 桌面端鼠标右键菜单（移动端与安卓端统一通过长按操作，不弹出右键菜单） */}
+      {!isMobileInteraction && (
+        <ContextMenu
+          position={desktopContextMenu.position}
+          items={desktopContextMenu.items}
+          onClose={() => setDesktopContextMenu({ position: null, items: [] })}
+        />
+      )}
 
       {/* 单条 / 批量删除转写记录确认弹窗 */}
       <Modal

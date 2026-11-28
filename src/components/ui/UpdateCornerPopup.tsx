@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
+import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
 import { useAppStore } from '../../store/useAppStore';
 import {
   getDesktopBridge,
@@ -50,9 +51,22 @@ export const UpdateCornerPopup: React.FC = () => {
   const ignoreAvailableUpdateVersion = useAppStore((s) => s.ignoreAvailableUpdateVersion);
   const { isCompactPhoneLayout } = useViewportLayout();
 
-  if (!appUpdate.popupVisible) return null;
+  const hasDisplayableStatus =
+    appUpdate.status !== 'idle' &&
+    appUpdate.status !== 'checking' &&
+    appUpdate.status !== 'up-to-date';
+  const isOpen = Boolean(appUpdate.popupVisible && hasDisplayableStatus);
+  const { shouldRender, isVisible } = useAnimatedPresence(isOpen, 180);
 
-  const { status, info, progress, errorMessage, manualDownloadPath } = appUpdate;
+  const cachedStateRef = useRef(appUpdate);
+  if (isOpen) {
+    cachedStateRef.current = appUpdate;
+  }
+
+  if (!shouldRender) return null;
+
+  const activeUpdate = isOpen ? appUpdate : cachedStateRef.current;
+  const { status, info, progress, errorMessage, manualDownloadPath } = activeUpdate;
   if (status === 'idle' || status === 'checking' || status === 'up-to-date') {
     return null;
   }
@@ -302,7 +316,7 @@ export const UpdateCornerPopup: React.FC = () => {
     </>
   );
 
-  // 紧凑手机端（含横屏短视口）：改为居中弹窗 + 安全区留白 + 内部滚动，绝不贴底被导航栏遮挡或超出屏幕底部
+  // 紧凑手机端（含横屏短视口）：居中弹窗 + 120Hz 弹簧弹出 + 安全区留白 + 内部滚动，绝不贴底被导航栏遮挡或超出屏幕底部
   const popupNode = isCompactPhoneLayout ? (
     <div
       role="presentation"
@@ -311,7 +325,9 @@ export const UpdateCornerPopup: React.FC = () => {
         paddingTop: 'calc(16px + var(--android-safe-top, 0px))',
         paddingBottom: 'calc(16px + var(--android-safe-bottom, 0px))',
       }}
-      className="fixed inset-0 z-[85] flex items-center justify-center px-4 bg-[#1F2329]/35 backdrop-blur-[1.5px]"
+      className={`fixed inset-0 z-[85] flex items-center justify-center px-4 bg-[#1F2329]/38 transition-opacity duration-200 ${
+        isVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      }`}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !isBusy) {
           dismissUpdatePopup();
@@ -323,7 +339,16 @@ export const UpdateCornerPopup: React.FC = () => {
         aria-modal="true"
         aria-label="软件版本更新提示"
         data-update-popup="true"
-        className="w-full max-w-[368px] max-h-full rounded-[16px] border border-[#DCE4F7] bg-white shadow-[0_20px_48px_rgba(20,86,240,0.18),0_4px_16px_rgba(31,35,41,0.12)] overflow-hidden flex flex-col"
+        style={{
+          transitionTimingFunction: isVisible
+            ? 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))'
+            : 'cubic-bezier(0.32, 0.72, 0, 1)',
+        }}
+        className={`w-full max-w-[368px] max-h-full rounded-[16px] border border-[#DCE4F7] bg-white shadow-[0_20px_48px_rgba(20,86,240,0.18),0_4px_16px_rgba(31,35,41,0.12)] overflow-hidden flex flex-col transition-[transform,opacity] ${
+          isVisible
+            ? 'duration-[300ms] opacity-100 scale-100 translate-y-0'
+            : 'duration-[180ms] opacity-0 scale-[0.94] translate-y-3'
+        }`}
       >
         {cardContent}
       </aside>
@@ -336,8 +361,15 @@ export const UpdateCornerPopup: React.FC = () => {
       style={{
         bottom: 'calc(20px + var(--android-safe-bottom, 0px))',
         maxHeight: 'calc(100% - 40px - var(--android-safe-top, 0px) - var(--android-safe-bottom, 0px))',
+        transitionTimingFunction: isVisible
+          ? 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))'
+          : 'cubic-bezier(0.32, 0.72, 0, 1)',
       }}
-      className="fixed right-5 z-[85] w-[376px] max-w-[calc(100vw-32px)] rounded-[14px] border border-[#DCE4F7] bg-white/98 backdrop-blur-md shadow-[0_14px_40px_rgba(20,86,240,0.16),0_2px_10px_rgba(31,35,41,0.08)] overflow-hidden flex flex-col transition-all"
+      className={`fixed right-5 z-[85] w-[376px] max-w-[calc(100vw-32px)] rounded-[14px] border border-[#DCE4F7] bg-white/98 backdrop-blur-md shadow-[0_14px_40px_rgba(20,86,240,0.16),0_2px_10px_rgba(31,35,41,0.08)] overflow-hidden flex flex-col transition-[transform,opacity] ${
+        isVisible
+          ? 'duration-[320ms] opacity-100 scale-100 translate-y-0'
+          : 'duration-[180ms] opacity-0 scale-[0.94] translate-y-3 pointer-events-none'
+      }`}
     >
       {cardContent}
     </aside>

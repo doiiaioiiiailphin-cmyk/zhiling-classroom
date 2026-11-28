@@ -13,6 +13,8 @@ import {
 } from '@floating-ui/react';
 import { MoreHorizontal, type LucideIcon } from 'lucide-react';
 import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
+import { useViewportLayout } from '../../utils/desktopBridge';
+import { triggerHaptic } from '../../utils/springPhysics';
 import { Tooltip } from './Tooltip';
 
 export interface GridMenuItem {
@@ -37,7 +39,8 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
   title = '功能导航',
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const { shouldRender, isVisible } = useAnimatedPresence(isOpen, 150);
+  const { isCompactPhoneLayout } = useViewportLayout();
+  const { shouldRender, isVisible } = useAnimatedPresence(isOpen, 170);
 
   const { refs, floatingStyles, context, isPositioned } = useFloating({
     open: isOpen,
@@ -62,8 +65,10 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
       ref={refs.setReference}
       type="button"
       aria-label={tooltip}
-      {...getReferenceProps()}
-      className={`w-10 h-10 rounded-lg border inline-flex items-center justify-center shrink-0 transition-all duration-150 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1456F0]/25 app-no-drag ${
+      {...getReferenceProps({
+        onClick: () => triggerHaptic('selection'),
+      })}
+      className={`spring-press w-10 h-10 rounded-lg border inline-flex items-center justify-center shrink-0 transition-[border-color,background-color,color,transform] duration-150 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#1456F0]/25 app-no-drag ${
         isOpen
           ? 'border-[#3370FF] bg-[#EBF2FF] text-[#1456F0] shadow-xs'
           : 'border-[#DEE0E3] bg-white text-[#1F2329] hover:border-[#3370FF] hover:text-[#1456F0] hover:bg-[#F0F4FF]/50'
@@ -81,6 +86,15 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
 
       {shouldRender && (
         <FloatingPortal>
+          {isCompactPhoneLayout && (
+            <div
+              aria-hidden="true"
+              onClick={() => setIsOpen(false)}
+              className={`fixed inset-0 z-[69] bg-[#0F172A]/16 transition-opacity duration-200 ${
+                isVisible && isPositioned ? 'opacity-100' : 'opacity-0 pointer-events-none'
+              }`}
+            />
+          )}
           <div
             ref={refs.setFloating}
             style={{
@@ -91,11 +105,19 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
             className="z-[70] focus:outline-none app-no-drag"
           >
             <div
-              className={`w-[min(356px,calc(100vw-24px))] max-h-[calc(100vh-72px)] overflow-y-auto origin-top-right rounded-2xl border border-[#DEE0E3] bg-white/98 backdrop-blur-md p-3.5 shadow-[0_18px_44px_rgba(31,35,41,0.16)] transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+              className={`w-[min(356px,calc(100vw-24px))] max-h-[calc(100vh-72px)] overflow-y-auto overscroll-contain-y origin-top-right rounded-2xl border border-[#DEE0E3] p-3.5 shadow-[0_18px_44px_rgba(31,35,41,0.16)] transition-[transform,opacity] ${
+                isCompactPhoneLayout ? 'bg-white' : 'bg-white/98 backdrop-blur-md'
+              } ${
                 isVisible && isPositioned
-                  ? 'opacity-100 scale-100 translate-y-0'
-                  : 'opacity-0 scale-[0.93] -translate-y-1.5 pointer-events-none'
+                  ? 'duration-[280ms] opacity-100 scale-100 translate-y-0'
+                  : 'duration-[160ms] opacity-0 scale-[0.92] -translate-y-2 pointer-events-none'
               }`}
+              style={{
+                transitionTimingFunction:
+                  isVisible && isPositioned
+                    ? 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))'
+                    : 'cubic-bezier(0.32, 0.72, 0, 1)',
+              }}
             >
               <div className="px-1.5 pb-2.5 flex items-center justify-between">
                 <span className="text-[14px] font-semibold text-[#646A73]">
@@ -112,10 +134,11 @@ export const MoreGridMenu: React.FC<MoreGridMenuProps> = ({
                       type="button"
                       disabled={item.disabled}
                       onClick={() => {
+                        triggerHaptic('selection');
                         setIsOpen(false);
                         item.onClick();
                       }}
-                      className={`group relative rounded-xl border p-2.5 flex flex-col items-center justify-center gap-2 text-center transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.96] ${
+                      className={`spring-press group relative rounded-xl border p-2.5 flex flex-col items-center justify-center gap-2 text-center transition-[transform,background-color,border-color,color,box-shadow] duration-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                         item.active
                           ? 'border-[#BEDAFF] bg-[#EBF2FF] text-[#1456F0]'
                           : 'border-transparent bg-[#F8F9FA] text-[#1F2329] hover:-translate-y-0.5 hover:border-[#D6E4FF] hover:bg-[#F0F4FF] hover:shadow-[0_6px_16px_rgba(20,86,240,0.08)]'

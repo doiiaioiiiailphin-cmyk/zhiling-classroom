@@ -21,6 +21,7 @@ export interface AndroidBridgeRaw {
 export interface AndroidOverlayBridgeRaw {
   moveBy?: (dxCssPx: number, dyCssPx: number) => void;
   resizeBy?: (dwCssPx: number, dhCssPx: number) => void;
+  snapBubbleToEdge?: () => void;
   setCollapsed?: (collapsed: boolean) => void;
   setFocusable?: (focusable: boolean) => void;
   setAiExpanded?: (expanded: boolean) => void;

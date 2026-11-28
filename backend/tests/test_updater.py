@@ -181,19 +181,88 @@ class CnbAutoUpdaterTests(unittest.TestCase):
         self.assertIn("$OldPid = 4321", ps1)
         self.assertIn("O''Brien", ps1)
         self.assertIn("ExtractToDirectory", ps1)
+        self.assertIn("[System.IO.Directory]::Move", ps1)
+        self.assertIn("[System.IO.File]::Move", ps1)
+        self.assertIn(r"_internal\certifi\cacert.pem", ps1)
+        self.assertIn(r"_internal\dist\index.html", ps1)
+        self.assertIn("$StageDir = Join-Path $InstallDir", ps1)
+        self.assertIn("Win32_Process", ps1)
+        self.assertIn("StartsWith($InstallDirPrefix", ps1)
+        self.assertNotIn("Move-Item", ps1)
         self.assertIn("Rolling back previous version", ps1)
+        self.assertIn("'ZHILING_DATA_DIR'", ps1)
+        self.assertIn("'SSL_CERT_FILE'", ps1)
 
         sh = build_macos_update_script(
             old_pid=9876,
             dmg_path=Path("/Users/test user/Library/Application Support/ZhilingClassroom/updates/0.2.0/app.dmg"),
             target_app=Path("/Applications/ZhilingClassroom.app"),
             log_path=Path("/Users/test user/Library/Application Support/ZhilingClassroom/logs/updater.log"),
+            staged_meta_path=Path("/Users/test user/Library/Application Support/ZhilingClassroom/updates/staged.json"),
         )
         self.assertIn("OLD_PID=9876", sh)
-        self.assertIn("hdiutil attach -nobrowse -readonly", sh)
+        self.assertIn("hdiutil attach -noverify -noautoopen -nobrowse -readonly", sh)
         self.assertIn("ditto", sh)
         self.assertIn("xattr -dr com.apple.quarantine", sh)
-        self.assertIn("open -n", sh)
+        self.assertIn("unset _MEIPASS", sh)
+        self.assertIn("unset ZHILING_DATA_DIR", sh)
+        self.assertIn('kill -TERM "$OLD_PID"', sh)
+        self.assertIn("lsregister", sh)
+        self.assertIn('rm -f "$STAGED_META_PATH"', sh)
+        self.assertIn('open "$TARGET_APP"', sh)
+        self.assertIn("osascript", sh)
+        import re
+        self.assertIsNone(re.search(r"(?:^|\s)open\s+-n(?:\s|$)", sh))
+
+    def test_apply_staged_update_is_idempotent_when_called_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dmg = root / "updates" / "0.2.0" / "ZhilingClassroom-macOS-arm64.dmg"
+            dmg.parent.mkdir(parents=True)
+            dmg_bytes = b"fake-dmg-payload" * 16
+            dmg.write_bytes(dmg_bytes)
+            sha = hashlib.sha256(dmg_bytes).hexdigest()
+
+            staged = root / "updates" / "staged.json"
+            staged.write_text(
+                json.dumps(
+                    {
+                        "version": "0.2.0",
+                        "filePath": str(dmg),
+                        "sha256": sha,
+                        "expectedSha256": sha,
+                        "platform": "darwin",
+                        "arch": "arm64",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_exe = root / "ZhilingClassroom.app" / "Contents" / "MacOS" / "ZhilingClassroom"
+            fake_exe.parent.mkdir(parents=True)
+            fake_exe.write_bytes(b"bin")
+
+            updater = AppUpdaterService(
+                data_dir=root,
+                http=httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200))),
+                current_version="0.1.12",
+                platform_name="darwin",
+                arch_name="arm64",
+                frozen_override=True,
+                executable_override=fake_exe,
+            )
+
+            async def scenario():
+                with patch("backend.app.services.updater.subprocess.Popen") as mock_popen:
+                    first, second = await asyncio.gather(
+                        updater.apply_staged_update(),
+                        updater.apply_staged_update(),
+                    )
+                    self.assertTrue(first.scheduled)
+                    self.assertTrue(second.scheduled)
+                    self.assertEqual(mock_popen.call_count, 1)
+                await updater.http.aclose()
+
+            asyncio.run(scenario())
 
     def test_fastapi_update_routes_contract(self):
         payload_bytes = b"PK\x03\x04route-test-zip" * 20
@@ -303,6 +372,8 @@ class CnbAutoUpdaterTests(unittest.TestCase):
             zip_path.parent.mkdir(parents=True)
             with zipfile.ZipFile(zip_path, "w") as zf:
                 zf.writestr("ZhilingClassroom/_internal/new.txt", "new-v0.1.4")
+                zf.writestr("ZhilingClassroom/_internal/dist/index.html", "<html>new</html>")
+                zf.writestr("ZhilingClassroom/_internal/certifi/cacert.pem", "dummy-ca")
                 zf.writestr("ZhilingClassroom/FakeApp.cmd", f"@echo NEW_OK>\"{marker}\"\r\n")
 
             staged = root / "updates" / "staged.json"
@@ -335,9 +406,171 @@ class CnbAutoUpdaterTests(unittest.TestCase):
             self.assertIn("Update installed successfully", log_text)
             self.assertEqual((install_dir / "_internal" / "new.txt").read_text(encoding="utf-8"), "new-v0.1.4")
             self.assertFalse((install_dir / "_internal" / "old.txt").exists())
+            self.assertFalse((install_dir / "_internal" / "_internal").exists())
             self.assertTrue(marker.is_file(), "Replaced executable must be relaunched")
             self.assertFalse(staged.exists(), "staged.json must be cleaned up after success")
             self.assertFalse(zip_path.exists(), "zip archive must be cleaned up after success")
+
+    def test_windows_atomic_swap_with_where_exe_and_incomplete_zip_rejection(self):
+        import sys
+        import time
+        import zipfile
+        from backend.app.services.updater import (
+            _launch_windows_update_script,
+            build_windows_update_script,
+        )
+
+        if sys.platform != "win32":
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "install"
+            (install_dir / "_internal" / "dist").mkdir(parents=True)
+            (install_dir / "_internal" / "certifi").mkdir(parents=True)
+            (install_dir / "_internal" / "dist" / "index.html").write_text("v1-index", encoding="utf-8")
+            (install_dir / "_internal" / "certifi" / "cacert.pem").write_text("v1-ca", encoding="utf-8")
+            old_marker = root / "old-relaunched.txt"
+            (install_dir / "ZhilingClassroom.cmd").write_text(f"@echo OLD>\"{old_marker}\"\r\n", encoding="utf-8")
+
+            # First verify an incomplete zip (missing certifi/cacert.pem) aborts BEFORE touching install_dir
+            bad_zip = root / "updates" / "0.1.14-bad" / "ZhilingClassroom-Windows-x86_64.zip"
+            bad_zip.parent.mkdir(parents=True)
+            with zipfile.ZipFile(bad_zip, "w") as zf:
+                zf.writestr("ZhilingClassroom/_internal/dist/index.html", "bad-index")
+                zf.writestr("ZhilingClassroom/ZhilingClassroom.cmd", "@echo BAD\r\n")
+            bad_log = root / "logs" / "bad-updater.log"
+            bad_script = bad_zip.parent / "apply_update.ps1"
+            bad_script.write_text(
+                build_windows_update_script(
+                    old_pid=999999,
+                    zip_path=bad_zip,
+                    install_dir=install_dir,
+                    exe_name="ZhilingClassroom.cmd",
+                    log_path=bad_log,
+                    version="0.1.14",
+                    move_retries=2,
+                    move_retry_ms=20,
+                ),
+                encoding="utf-8-sig",
+            )
+            proc_bad = _launch_windows_update_script(bad_script, require_elevation=False)
+            self.assertEqual(proc_bad.wait(timeout=15), 0)
+            deadline = time.monotonic() + 5.0
+            while not old_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.15)
+            self.assertTrue(old_marker.is_file())
+            self.assertIn("Extracted payload incomplete; missing _internal\\certifi\\cacert.pem", bad_log.read_text(encoding="utf-8"))
+            self.assertEqual((install_dir / "_internal" / "dist" / "index.html").read_text(encoding="utf-8"), "v1-index")
+            self.assertEqual((install_dir / "_internal" / "certifi" / "cacert.pem").read_text(encoding="utf-8"), "v1-ca")
+
+            # Now verify valid zip swaps cleanly and leaves zero backups or nested _internal
+            new_marker = root / "new-launched.txt"
+            zip_path = root / "updates" / "0.1.14" / "ZhilingClassroom-Windows-x86_64.zip"
+            zip_path.parent.mkdir(parents=True)
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("ZhilingClassroom/_internal/dist/index.html", "v2-index")
+                zf.writestr("ZhilingClassroom/_internal/certifi/cacert.pem", "v2-ca")
+                zf.writestr("ZhilingClassroom/ZhilingClassroom.cmd", f"@echo NEW>\"{new_marker}\"\r\n")
+
+            log_path = root / "logs" / "updater.log"
+            script_path = zip_path.parent / "apply_update.ps1"
+            script_path.write_text(
+                build_windows_update_script(
+                    old_pid=999999,
+                    zip_path=zip_path,
+                    install_dir=install_dir,
+                    exe_name="ZhilingClassroom.cmd",
+                    log_path=log_path,
+                    version="0.1.14",
+                    move_retries=3,
+                    move_retry_ms=50,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            proc = _launch_windows_update_script(script_path, require_elevation=False)
+            self.assertEqual(proc.wait(timeout=15), 0)
+            deadline = time.monotonic() + 5.0
+            while not new_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.15)
+            self.assertTrue(new_marker.is_file())
+
+            self.assertIn("Update installed successfully", log_path.read_text(encoding="utf-8"))
+            self.assertEqual((install_dir / "_internal" / "dist" / "index.html").read_text(encoding="utf-8"), "v2-index")
+            self.assertEqual((install_dir / "_internal" / "certifi" / "cacert.pem").read_text(encoding="utf-8"), "v2-ca")
+            self.assertFalse((install_dir / "_internal" / "_internal").exists())
+            self.assertFalse(any(p.name.startswith(".zhiling_update_") for p in install_dir.iterdir()))
+
+    def test_windows_locked_internal_aborts_atomically_without_corruption_or_nesting(self):
+        import sys
+        import time
+        import zipfile
+        from backend.app.services.updater import (
+            _launch_windows_update_script,
+            build_windows_update_script,
+        )
+
+        if sys.platform != "win32":
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "install"
+            (install_dir / "_internal" / "dist").mkdir(parents=True)
+            (install_dir / "_internal" / "certifi").mkdir(parents=True)
+            (install_dir / "_internal" / "dist" / "index.html").write_text("v1-index", encoding="utf-8")
+            (install_dir / "_internal" / "certifi" / "cacert.pem").write_text("v1-ca", encoding="utf-8")
+            locked_file = install_dir / "_internal" / "locked.bin"
+            locked_file.write_bytes(b"locked-handle")
+            old_marker = root / "old-relaunched.txt"
+            (install_dir / "ZhilingClassroom.cmd").write_text(f"@echo OLD>\"{old_marker}\"\r\n", encoding="utf-8")
+
+            zip_path = root / "updates" / "0.1.14" / "ZhilingClassroom-Windows-x86_64.zip"
+            zip_path.parent.mkdir(parents=True)
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("ZhilingClassroom/_internal/dist/index.html", "v2-index")
+                zf.writestr("ZhilingClassroom/_internal/certifi/cacert.pem", "v2-ca")
+                zf.writestr("ZhilingClassroom/ZhilingClassroom.cmd", "@echo NEW\r\n")
+
+            log_path = root / "logs" / "updater.log"
+            script_path = zip_path.parent / "apply_update.ps1"
+            script_path.write_text(
+                build_windows_update_script(
+                    old_pid=999999,
+                    zip_path=zip_path,
+                    install_dir=install_dir,
+                    exe_name="ZhilingClassroom.cmd",
+                    log_path=log_path,
+                    version="0.1.14",
+                    move_retries=2,
+                    move_retry_ms=50,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            lock_fh = locked_file.open("r+b")
+            try:
+                proc = _launch_windows_update_script(script_path, require_elevation=False)
+                self.assertEqual(proc.wait(timeout=15), 0)
+            finally:
+                lock_fh.close()
+
+            deadline = time.monotonic() + 5.0
+            while not old_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.15)
+            self.assertTrue(old_marker.is_file())
+
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("Update FAILED:", log_text)
+            self.assertEqual((install_dir / "_internal" / "dist" / "index.html").read_text(encoding="utf-8"), "v1-index")
+            self.assertEqual((install_dir / "_internal" / "certifi" / "cacert.pem").read_text(encoding="utf-8"), "v1-ca")
+            self.assertFalse((install_dir / "_internal" / "_internal").exists())
+            self.assertFalse(any(p.name.startswith(".zhiling_update_stage_") for p in install_dir.iterdir()))
+            self.assertTrue(zip_path.is_file(), "Zip archive should be preserved on failed update")
 
     def test_app_version_and_katex_css_alignment(self):
         from backend.app.version import APP_VERSION

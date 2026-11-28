@@ -473,6 +473,24 @@ async def apply_app_update(request: Request) -> Data[UpdateApplyResult]:
     return Data(data=await request.app.state.updater.apply_staged_update())
 
 
+@router.post("/desktop/activate")
+async def activate_desktop_window(request: Request):
+    """Focus the running desktop instance after validating its per-launch token."""
+    import hmac
+    from fastapi.responses import JSONResponse
+
+    if bool(getattr(request.app.state, "shutting_down", False)):
+        return JSONResponse(status_code=409, content={"detail": "shutting_down"})
+    expected_token = str(getattr(request.app.state, "instance_token", "") or "")
+    provided_token = request.headers.get("X-Zhiling-Instance-Token", "")
+    if not expected_token or not hmac.compare_digest(provided_token, expected_token):
+        return JSONResponse(status_code=403, content={"detail": "forbidden"})
+    activator = getattr(request.app.state, "activate_window", None)
+    if callable(activator):
+        activator()
+    return {"data": {"activated": True}}
+
+
 @ws_router.websocket("/audio/loopback")
 async def audio_loopback_stream(websocket: WebSocket, deviceId: str = "default"):
     await websocket.app.state.win_audio.serve_loopback(websocket, deviceId)

@@ -24,6 +24,7 @@ import {
   isAndroidPlatform,
   isDesktopShell,
   isInteractiveDragBlocker,
+  useViewportLayout,
 } from './utils/desktopBridge';
 
 const IS_MINI_OVERLAY_MODE =
@@ -545,6 +546,17 @@ export const App: React.FC = () => {
   );
 
   const isAndroid = isAndroidPlatform();
+  const { isCompactPhoneLayout } = useViewportLayout();
+  const prevActiveViewRef = useRef(activeView);
+  const viewTransitionClass =
+    !isCompactPhoneLayout || prevActiveViewRef.current === activeView
+      ? ''
+      : activeView === 'classroom'
+        ? 'animate-mobile-classroom-enter'
+        : 'animate-mobile-home-enter';
+  useEffect(() => {
+    prevActiveViewRef.current = activeView;
+  }, [activeView]);
 
   // Android 物理/手势返回键智能分层接管：弹窗 -> 便签 -> 退出课堂 -> 退出文件夹 -> 后台最小化
   useEffect(() => {
@@ -672,9 +684,13 @@ export const App: React.FC = () => {
             <span>正在载入课堂工作台...</span>
           </div>
         ) : activeView === 'classroom' ? (
-          <ClassroomView />
+          <div key="classroom-stage" className={`h-full w-full ${viewTransitionClass}`}>
+            <ClassroomView />
+          </div>
         ) : (
-          <HomeWorkspace />
+          <div key="home-stage" className={`h-full w-full ${viewTransitionClass}`}>
+            <HomeWorkspace />
+          </div>
         )}
       </div>
 

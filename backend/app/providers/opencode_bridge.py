@@ -19,6 +19,7 @@ from types import ModuleType
 import httpx
 
 from ..errors import AppError
+from ..tls import build_tls_ssl_context
 from .opencode_runtime import OPENCODE_ARTIFACTS, OPENCODE_VERSION, DownloadProgress, install_cli, matches_cli
 from .platform_hooks import resolve_opencode_platform_spec
 
@@ -41,7 +42,11 @@ class OpenCodeBridge:
         self.directory = directory
         self.network = network
         self.save_catalog = save_catalog
-        self.loopback = httpx.AsyncClient(trust_env=False, timeout=httpx.Timeout(100, connect=3))
+        self.loopback = httpx.AsyncClient(
+            trust_env=False,
+            verify=build_tls_ssl_context(),
+            timeout=httpx.Timeout(100, connect=3),
+        )
         self.lock = asyncio.Lock()
         spec = resolve_opencode_platform_spec(runtime_dir or directory, OPENCODE_VERSION)
         self.cli_artifact = OPENCODE_ARTIFACTS.get(spec.npm_package_hint)

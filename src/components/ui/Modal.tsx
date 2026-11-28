@@ -1,6 +1,7 @@
 import React, { useEffect, useId } from 'react';
 import { X } from 'lucide-react';
 import { useAnimatedPresence } from '../../hooks/useAnimatedPresence';
+import { useViewportLayout } from '../../utils/desktopBridge';
 import { IconButton } from './IconButton';
 
 interface ModalProps {
@@ -26,7 +27,8 @@ export const Modal: React.FC<ModalProps> = ({
   children,
 }) => {
   const modalId = useId();
-  const { shouldRender, isVisible } = useAnimatedPresence(open, 160);
+  const { isCompactPhoneLayout } = useViewportLayout();
+  const { shouldRender, isVisible } = useAnimatedPresence(open, 170);
 
   useEffect(() => {
     if (!open) return;
@@ -56,20 +58,23 @@ export const Modal: React.FC<ModalProps> = ({
         paddingTop: 'calc(12px + var(--android-safe-top, 0px))',
         paddingBottom: 'calc(12px + var(--android-safe-bottom, 0px))',
       }}
-      className={`fixed inset-0 ${layerClass} flex items-center justify-center px-3 sm:px-4 transition-all duration-160 ${
-        isVisible
-          ? 'bg-[#1F2329]/35 backdrop-blur-[1.5px] opacity-100'
-          : 'bg-[#1F2329]/0 opacity-0 pointer-events-none'
-      }`}
+      className={`fixed inset-0 ${layerClass} flex items-center justify-center px-3 sm:px-4 transition-opacity duration-200 ${
+        isCompactPhoneLayout ? 'bg-[#1F2329]/38' : 'bg-[#1F2329]/35 backdrop-blur-[1.5px]'
+      } ${isVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && closable) onClose();
       }}
     >
       <div
-        className={`w-full ${widthClass} rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_20px_48px_rgba(31,35,41,0.18)] overflow-hidden flex flex-col max-h-full transition-all duration-180 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        style={{
+          transitionTimingFunction: isVisible
+            ? 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))'
+            : 'cubic-bezier(0.32, 0.72, 0, 1)',
+        }}
+        className={`w-full ${widthClass} rounded-2xl border border-[#DEE0E3] bg-white shadow-[0_20px_48px_rgba(31,35,41,0.18)] overflow-hidden flex flex-col max-h-full transition-[transform,opacity] ${
           isVisible
-            ? 'opacity-100 scale-100 translate-y-0'
-            : 'opacity-0 scale-[0.96] translate-y-2'
+            ? 'duration-[300ms] opacity-100 scale-100 translate-y-0'
+            : 'duration-[170ms] opacity-0 scale-[0.94] translate-y-3'
         }`}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#ECEEF2] px-4 sm:px-6 py-3.5 sm:py-4 shrink-0">
@@ -83,7 +88,7 @@ export const Modal: React.FC<ModalProps> = ({
             onClick={onClose}
           />
         </div>
-        <div className="flex-1 overflow-y-auto">{children}</div>
+        <div className="flex-1 overflow-y-auto overscroll-contain-y">{children}</div>
       </div>
     </div>
   );

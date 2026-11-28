@@ -33,8 +33,11 @@ import {
   keyboardEventToHotkeyCombo,
   useViewportLayout,
 } from '../../utils/desktopBridge';
+import { useOverscrollSpring } from '../../hooks/useOverscrollSpring';
+import { triggerHaptic } from '../../utils/springPhysics';
 import { ProviderIcon } from '../icons/ProviderIcons';
 import { IconButton } from '../ui/IconButton';
+import { MobileSpringPage } from '../ui/MobileSpringPage';
 import { Modal } from '../ui/Modal';
 import { Select } from '../ui/Select';
 import { Switch } from '../ui/Switch';
@@ -93,6 +96,13 @@ export const SettingsModal: React.FC = () => {
   const { isCompactPhoneLayout, isShortLandscape } = useViewportLayout();
   // 手机窄屏/矮横屏使用独立全屏嵌套设置页；平板大屏与桌面端一致采用类电脑分栏窗口
   const useMobilePageLayout = isCompactPhoneLayout;
+  const mobileOverscroll = useOverscrollSpring({ enabled: useMobilePageLayout && settingsOpen });
+  const {
+    reset: resetMobileOverscroll,
+    bindScrollRef: bindMobileScrollRef,
+    scrollRef: mobileScrollRef,
+    contentRef: mobileContentRef,
+  } = mobileOverscroll;
 
   const [llmPickerOpen, setLlmPickerOpen] = useState(false);
   const [asrPickerOpen, setAsrPickerOpen] = useState(false);
@@ -109,13 +119,12 @@ export const SettingsModal: React.FC = () => {
       setActiveTab(settingsDefaultTab ?? 'llm');
       setMobileSection(settingsDefaultTab ?? null);
       setMobileNavMotion('none');
+      resetMobileOverscroll();
     } else {
       setLlmPickerOpen(false);
       setAsrPickerOpen(false);
-      setMobileSection(null);
-      setMobileNavMotion('none');
     }
-  }, [settingsOpen, settingsDefaultTab]);
+  }, [settingsOpen, settingsDefaultTab, resetMobileOverscroll]);
 
   useEffect(() => {
     if (!settingsOpen || IS_MOCK_MODE) return;
@@ -144,8 +153,11 @@ export const SettingsModal: React.FC = () => {
       return true;
     }
     if (mobileSection !== null) {
+      triggerHaptic('selection');
       setMobileNavMotion('pop');
       setMobileSection(null);
+      mobileOverscroll.reset();
+      mobileOverscroll.scrollRef.current?.scrollTo({ top: 0 });
       return true;
     }
     setSettingsOpen(false);
@@ -243,9 +255,12 @@ export const SettingsModal: React.FC = () => {
   const generalSummarySubtitle = `${activeAudioModeLabel} · 导出 ${defaultExportLabel} · 热词 ${settings.globalHotwords.length} 个`;
 
   const openMobileSection = (section: SettingsTabKey) => {
+    triggerHaptic('selection');
     setActiveTab(section);
     setMobileNavMotion('push');
     setMobileSection(section);
+    resetMobileOverscroll();
+    mobileScrollRef.current?.scrollTo({ top: 0 });
   };
 
   const handleFetchLlmModels = async () => {
@@ -301,7 +316,7 @@ export const SettingsModal: React.FC = () => {
     appUpdate.status === 'verifying' ||
     appUpdate.status === 'applying';
 
-  const currentVersionLabel = `v${appUpdate.info?.currentVersion || '0.1.13'}`;
+  const currentVersionLabel = `v${appUpdate.info?.currentVersion || '0.1.14'}`;
 
   const renderMobileSubpageContent = (section: SettingsTabKey) => {
     if (section === 'llm') {
@@ -1236,7 +1251,13 @@ export const SettingsModal: React.FC = () => {
   return (
     <>
       {useMobilePageLayout ? (
-        settingsOpen ? (
+        <MobileSpringPage
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          enableSwipeBack={mobileSection === null}
+          zIndexClassName="z-50"
+          className="bg-[#F5F6F7]"
+        >
           <div
             role="dialog"
             aria-modal="true"
@@ -1249,7 +1270,7 @@ export const SettingsModal: React.FC = () => {
                   }
                 : undefined
             }
-            className="fixed inset-0 z-50 bg-[#F5F6F7] flex flex-col"
+            className="h-full w-full flex flex-col"
           >
             {/* 独立手机设置页顶部导航栏（横屏自动紧凑高度） */}
             <header
@@ -1262,7 +1283,7 @@ export const SettingsModal: React.FC = () => {
                   type="button"
                   onClick={() => handleMobileBack()}
                   aria-label={mobileSection ? '返回设置主页' : '关闭设置'}
-                  className="w-10 h-10 rounded-full flex items-center justify-center text-[#1F2329] active:bg-[#F2F3F5] transition-colors cursor-pointer shrink-0"
+                  className="spring-press w-10 h-10 rounded-full flex items-center justify-center text-[#1F2329] active:bg-[#F2F3F5] transition-colors cursor-pointer shrink-0"
                 >
                   <ChevronLeft className="w-6 h-6" strokeWidth={2} />
                 </button>
@@ -1275,16 +1296,20 @@ export const SettingsModal: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setSettingsOpen(false)}
-                  className="px-3 py-1.5 rounded-lg text-[15px] font-medium text-[#1456F0] active:bg-[#EBF2FF] transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                  className="spring-press px-3 py-1.5 rounded-lg text-[15px] font-medium text-[#1456F0] active:bg-[#EBF2FF] transition-colors cursor-pointer shrink-0 whitespace-nowrap"
                 >
                   完成
                 </button>
               )}
             </header>
 
-            {/* 页面主体：一级分组列表 或 二级嵌套板块详情 */}
-            <div className="flex-1 overflow-y-auto px-4 py-4">
+            {/* 页面主体：一级分组列表 或 二级嵌套板块详情，附带顶/底橡皮筋回弹 */}
+            <div
+              ref={bindMobileScrollRef}
+              className="flex-1 overflow-y-auto overscroll-contain-y px-4 py-4"
+            >
               <div
+                ref={mobileContentRef}
                 key={mobileSection ?? 'root'}
                 className={`max-w-2xl mx-auto pb-6 ${
                   mobileSection !== null
@@ -1416,7 +1441,7 @@ export const SettingsModal: React.FC = () => {
                                 setSettingsOpen(false);
                                 void startOneClickAppUpdate();
                               }}
-                              className="min-h-9 px-3 py-1.5 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] text-white text-[14px] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                              className="spring-press min-h-9 px-3 py-1.5 rounded-xl bg-[#1456F0] hover:bg-[#3370FF] text-white text-[14px] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                             >
                               <Download className="w-4 h-4 shrink-0" />
                               <span>立即更新</span>
@@ -1428,7 +1453,7 @@ export const SettingsModal: React.FC = () => {
                               onClick={() =>
                                 void checkForAppUpdates({ silent: false, force: true })
                               }
-                              className="min-h-9 px-3 py-1.5 rounded-xl bg-[#F5F6F7] hover:bg-[#EBEDF0] border border-[#E5E6EB] text-[#1F2329] text-[14px] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-60 cursor-pointer"
+                              className="spring-press min-h-9 px-3 py-1.5 rounded-xl bg-[#F5F6F7] hover:bg-[#EBEDF0] border border-[#E5E6EB] text-[#1F2329] text-[14px] font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-60 cursor-pointer"
                             >
                               {appUpdate.status === 'checking' ? (
                                 <Loader2 className="w-4 h-4 animate-spin text-[#1456F0] shrink-0" />
@@ -1471,7 +1496,7 @@ export const SettingsModal: React.FC = () => {
               </div>
             </div>
           </div>
-        ) : null
+        </MobileSpringPage>
       ) : (
         <Modal
           open={settingsOpen}

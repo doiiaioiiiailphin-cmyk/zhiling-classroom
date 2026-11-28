@@ -55,14 +55,52 @@ async function responseError(response: Response): Promise<ApiRequestError> {
   return new ApiRequestError(body?.error?.message || `HTTP ${response.status}`, body?.error?.code);
 }
 
+const RETRYABLE_IDEMPOTENT_METHODS = new Set(['GET', 'HEAD']);
+const TRANSIENT_FETCH_RETRY_DELAYS_MS = [120, 320];
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const hasBody = init?.body !== undefined && init?.body !== null;
+  const isFormData = typeof FormData !== 'undefined' && hasBody && init?.body instanceof FormData;
+  const headers: Record<string, string> = {};
+  if (hasBody && !isFormData) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const mergedInit: RequestInit = {
     ...init,
-  });
+    method,
+    headers: {
+      ...headers,
+      ...(init?.headers as Record<string, string> | undefined),
+    },
+    ...(init?.cache === undefined && RETRYABLE_IDEMPOTENT_METHODS.has(method)
+      ? { cache: 'no-store' as RequestCache }
+      : {}),
+  };
+
+  const maxAttempts = RETRYABLE_IDEMPOTENT_METHODS.has(method)
+    ? 1 + TRANSIENT_FETCH_RETRY_DELAYS_MS.length
+    : 1;
+
+  let response: Response | undefined;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, mergedInit);
+      break;
+    } catch (error) {
+      lastError = error;
+      const aborted = init?.signal?.aborted;
+      const isNetworkTypeError = error instanceof TypeError;
+      if (aborted || !isNetworkTypeError || attempt >= maxAttempts - 1) {
+        throw error;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, TRANSIENT_FETCH_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  if (!response) {
+    throw lastError instanceof Error ? lastError : new Error('Load failed');
+  }
 
   if (!response.ok) throw await responseError(response);
 
@@ -803,8 +841,8 @@ export const api = {
   checkAppUpdates(force = false): Promise<UpdateCheckResult> {
     if (IS_MOCK_MODE) {
       return Promise.resolve({
-        currentVersion: '0.1.13',
-        latestVersion: '0.1.13',
+        currentVersion: '0.1.14',
+        latestVersion: '0.1.14',
         hasUpdate: false,
         releaseTitle: '',
         releaseNotes: '',

@@ -9,6 +9,7 @@ import com.zhiling.classroom.audio.WavStorage
 import com.zhiling.classroom.export.SessionExporter
 import com.zhiling.classroom.model.*
 import com.zhiling.classroom.service.OverlayBoundsMath
+import com.zhiling.classroom.service.OverlaySpringMath
 import com.zhiling.classroom.settings.SettingsManager
 import com.zhiling.classroom.update.AndroidUpdater
 import kotlinx.serialization.encodeToString
@@ -306,5 +307,39 @@ class ZhilingCoreTests {
         assertEquals(2, decodedRes.deletedCount)
         assertEquals(listOf("u-1", "u-2"), decodedRes.deletedIds)
         assertTrue(decodedRes.segments.isEmpty())
+    }
+
+    @Test
+    fun testOverlaySpringMathConvergesSmoothly() {
+        // 验证 120Hz 下 RK4 弹簧可稳定收敛至目标位置，且能安全消化卡顿大步长
+        var state = OverlaySpringMath.SpringState(value = 24.0, velocity = 600.0, settled = false)
+        var frames = 0
+        while (!state.settled && frames < 360) {
+            state = OverlaySpringMath.stepSpring(
+                value = state.value,
+                velocity = state.velocity,
+                target = 960.0,
+                dtSeconds = 1.0 / 120.0,
+                stiffness = 400.0,
+                damping = 33.0,
+            )
+            frames += 1
+        }
+        assertTrue("RK4 spring should settle within 3s at 120Hz", state.settled)
+        assertEquals(960.0, state.value, 0.001)
+        assertEquals(0.0, state.velocity, 0.001)
+
+        // 卡顿帧大 dt（0.25s）也不得发散爆炸
+        val spike = OverlaySpringMath.stepSpring(
+            value = 100.0,
+            velocity = 200.0,
+            target = 500.0,
+            dtSeconds = 0.25,
+            stiffness = 400.0,
+            damping = 33.0,
+        )
+        assertTrue(spike.value.isFinite())
+        assertTrue(spike.velocity.isFinite())
+        assertTrue(spike.value in 90.0..580.0)
     }
 }

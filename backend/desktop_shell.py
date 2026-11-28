@@ -13,11 +13,13 @@
 import base64
 import ctypes
 import faulthandler
+import hashlib
 import io
 import json
 import multiprocessing
 import os
 from pathlib import Path
+import secrets
 import signal
 import socket
 import subprocess
@@ -25,6 +27,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.request
 import webbrowser
 
@@ -48,17 +51,15 @@ if sys.platform == "win32":
 
 
 def _configure_tls_ca_bundle() -> None:
-    """在 macOS / 打包版 Python 环境下绑定 certifi 根证书，避免 OpenSSL 找不到系统 CA 导致 wss:// 与 HTTPS 校验失败。"""
-    existing = os.environ.get("SSL_CERT_FILE")
-    if existing and Path(existing).is_file():
-        return
+    """在 macOS / 打包版 Python 环境下清理失效环境变量并绑定存在的 certifi 根证书。"""
+    if not getattr(sys, "frozen", False):
+        backend_dir = str(Path(__file__).resolve().parent.parent / "backend")
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
     try:
-        import certifi  # type: ignore
+        from app.tls import configure_tls_ca_bundle
 
-        ca_path = Path(certifi.where())
-        if ca_path.is_file():
-            os.environ["SSL_CERT_FILE"] = str(ca_path)
-            os.environ.setdefault("REQUESTS_CA_BUNDLE", str(ca_path))
+        configure_tls_ca_bundle()
     except Exception:
         pass
 
@@ -192,6 +193,24 @@ def _init_win32_process_identity() -> None:
         pass
 
 
+def bind_free_port(preferred: int = 8000) -> tuple[int, socket.socket]:
+    """Atomically bind a loopback TCP port and keep the socket open until uvicorn starts."""
+    for candidate in (preferred, 0):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            elif hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind(("127.0.0.1", candidate))
+            return int(sock.getsockname()[1]), sock
+        except OSError:
+            sock.close()
+            if candidate == 0:
+                raise
+    raise OSError("Unable to bind loopback port")
+
+
 def find_free_port(preferred: int = 8000) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         if s.connect_ex(("127.0.0.1", preferred)) != 0:
@@ -204,17 +223,195 @@ def find_free_port(preferred: int = 8000) -> int:
 def wait_server_ready(
     port: int,
     server_thread: threading.Thread | None = None,
+    server: object | None = None,
     timeout_s: float = 15.0,
 ) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                return True
+        server_started = server is None or bool(getattr(server, "started", False))
+        if server_started:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    return True
         if server_thread is not None and not server_thread.is_alive():
             return False
         time.sleep(0.08)
     return False
+
+
+class SingleInstanceGuard:
+    """Enforce a single desktop instance per data_dir and hand off focus on duplicate launch."""
+
+    def __init__(self, data_dir: Path, *, enabled: bool = True) -> None:
+        self._data_dir = Path(data_dir).resolve()
+        self._enabled = enabled
+        self._lock_path = self._data_dir / ".desktop-instance.lock"
+        self._info_path = self._data_dir / ".desktop-instance.json"
+        self.token = secrets.token_urlsafe(32)
+        self._posix_fd: int | None = None
+        self._win_mutex: int | None = None
+        self._acquired = False
+
+    @staticmethod
+    def _win32_kernel32():
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        return kernel32
+
+    def try_acquire(self) -> bool:
+        if not self._enabled:
+            self._acquired = True
+            return True
+        if self._acquired:
+            return True
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            kernel32 = self._win32_kernel32()
+            norm_path = str(self._data_dir).lower()
+            digest = hashlib.sha256(norm_path.encode("utf-8")).hexdigest()[:24]
+            mutex_name = f"Local\\ZhilingClassroom-{digest}"
+            ctypes.set_last_error(0)
+            handle = kernel32.CreateMutexW(None, True, mutex_name)
+            last_err = ctypes.get_last_error()
+            if not handle:
+                return False
+            if last_err == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
+                return False
+            self._win_mutex = int(handle)
+            self._acquired = True
+            return True
+
+        import fcntl
+
+        fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                os.set_inheritable(fd, False)
+            except Exception:
+                pass
+            self._posix_fd = fd
+            self._acquired = True
+            return True
+        except OSError:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            return False
+
+    def write_runtime_info(self, port: int) -> None:
+        if not self._enabled or not self._acquired:
+            return
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "pid": os.getpid(),
+            "port": port,
+            "token": self.token,
+            "started_at": time.time(),
+        }
+        tmp_path = self._data_dir / f".desktop-instance.{os.getpid()}.tmp"
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, self._info_path)
+
+    def _request_existing_activation(self) -> str:
+        """Ask the lock holder to focus its window. Returns activated|shutting_down|unreachable."""
+        try:
+            raw = self._info_path.read_text(encoding="utf-8")
+            info = json.loads(raw)
+        except Exception:
+            return "unreachable"
+        port = info.get("port")
+        token = str(info.get("token") or "")
+        if not isinstance(port, int) or port <= 0 or not token:
+            return "unreachable"
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/desktop/activate",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Zhiling-Instance-Token": token,
+            },
+        )
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=1.5) as resp:
+                if 200 <= resp.status < 300:
+                    return "activated"
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                return "shutting_down"
+            return "unreachable"
+        except Exception:
+            return "unreachable"
+        return "unreachable"
+
+    def acquire_or_activate(self, wait_timeout_s: float = 8.0) -> str:
+        """Acquire primary lock, or activate existing instance / wait out updater exit."""
+        if self.try_acquire():
+            return "acquired"
+        deadline = time.monotonic() + max(1.0, wait_timeout_s)
+        saw_shutting_down = False
+        probe_deadline = time.monotonic() + min(2.5, max(0.5, wait_timeout_s * 0.35))
+        while time.monotonic() < deadline:
+            status = self._request_existing_activation()
+            if status == "activated":
+                return "activated"
+            if status == "shutting_down":
+                saw_shutting_down = True
+            time.sleep(0.18)
+            if self.try_acquire():
+                return "acquired"
+            if not saw_shutting_down and status == "unreachable" and time.monotonic() >= probe_deadline:
+                # Primary may be mid-startup (not listening yet) or mid-crash; keep polling lock
+                probe_deadline = deadline
+        return "already_running"
+
+    def release(self) -> None:
+        if not self._enabled:
+            self._acquired = False
+            return
+        try:
+            if self._info_path.is_file():
+                try:
+                    info = json.loads(self._info_path.read_text(encoding="utf-8"))
+                    if info.get("pid") == os.getpid():
+                        self._info_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if self._posix_fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(self._posix_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                os.close(self._posix_fd)
+            except Exception:
+                pass
+            self._posix_fd = None
+        if self._win_mutex is not None and sys.platform == "win32":
+            kernel32 = self._win32_kernel32()
+            mutex_handle = wintypes.HANDLE(self._win_mutex)
+            try:
+                kernel32.ReleaseMutex(mutex_handle)
+            except Exception:
+                pass
+            try:
+                kernel32.CloseHandle(mutex_handle)
+            except Exception:
+                pass
+            self._win_mutex = None
+        self._acquired = False
 
 
 def _show_error_dialog(message: str) -> None:
@@ -515,7 +712,13 @@ def main() -> None:
     if is_self_test:
         data_dir = (app_home / "self_test_data").resolve()
 
-    port = find_free_port(8000 if not is_self_test else 18765)
+    instance_guard = SingleInstanceGuard(data_dir, enabled=not is_self_test)
+    lock_result = instance_guard.acquire_or_activate(wait_timeout_s=8.0)
+    if lock_result != "acquired":
+        print(f"ZHILING_SINGLE_INSTANCE: exiting duplicate launch ({lock_result})", flush=True)
+        return
+
+    port, bound_sock = bind_free_port(8000 if not is_self_test else 18765)
     allowed_origins = (
         f"http://127.0.0.1:{port}",
         f"http://localhost:{port}",
@@ -540,6 +743,9 @@ def main() -> None:
         enable_os_hotkeys=not is_self_test,
         serve_dist=True,
     )
+    fastapi_app.state.instance_token = instance_guard.token
+    fastapi_app.state.shutting_down = False
+    fastapi_app.state.activate_window = None
 
     server_config = uvicorn.Config(
         fastapi_app,
@@ -551,19 +757,31 @@ def main() -> None:
         ws_max_queue=64,
         ws_ping_interval=30.0,
         ws_ping_timeout=120.0,
+        timeout_keep_alive=65,
         log_config=None,
         access_log=False,
     )
     server = uvicorn.Server(server_config)
-    server_thread = threading.Thread(target=server.run, name="zhiling-uvicorn", daemon=True)
+    server_thread = threading.Thread(
+        target=lambda: server.run(sockets=[bound_sock]),
+        name="zhiling-uvicorn",
+        daemon=True,
+    )
     server_thread.start()
 
-    if not wait_server_ready(port, server_thread=server_thread):
+    if not wait_server_ready(port, server_thread=server_thread, server=server):
+        try:
+            bound_sock.close()
+        except Exception:
+            pass
+        instance_guard.release()
         log_hint = app_home / "logs" / "desktop.log"
         msg = f"本地课堂后端服务启动失败，请查看日志：\n{log_hint}"
         if not is_self_test:
             _show_error_dialog(msg)
         sys.exit(msg)
+
+    instance_guard.write_runtime_info(port)
 
     platform_tag = "macos" if sys.platform == "darwin" else "windows"
     base_url = f"http://127.0.0.1:{port}" if (dist_dir / "index.html").is_file() else "http://localhost:5173"
@@ -581,8 +799,14 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
         finally:
+            fastapi_app.state.shutting_down = True
             server.should_exit = True
             server_thread.join(timeout=8.0)
+            try:
+                bound_sock.close()
+            except Exception:
+                pass
+            instance_guard.release()
         return
 
     webview.settings["ALLOW_DOWNLOADS"] = True
@@ -1409,6 +1633,8 @@ def main() -> None:
 
         def quit_for_update(self) -> bool:
             """热更新脚本拉起后极速退出桌面宿主与后端服务，缩短等待时间并确保 100% 释放文件句柄。"""
+            fastapi_app.state.shutting_down = True
+
             def _shutdown() -> None:
                 time.sleep(0.12)
                 try:
@@ -1416,28 +1642,48 @@ def main() -> None:
                 except Exception:
                     pass
                 mini_win = windows.pop("mini", None)
-                if mini_win is not None:
-                    try:
-                        mini_win.destroy()  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
                 if sys.platform == "win32":
+                    if mini_win is not None:
+                        try:
+                            mini_win.destroy()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                     hwnd = get_hwnd("main")
                     if hwnd:
                         try:
                             _u32.ShowWindow(wintypes.HWND(hwnd), 0)  # SW_HIDE 立即反馈退出
                         except Exception:
                             pass
-                    # Windows 下直接短暂等待响应回传后极速退出，避免 WinForms destroy + server_thread.join 阻塞 7 秒
-                    time.sleep(0.35)
-                    os._exit(0)
-                main_win = windows.get("main")
-                if main_win is not None:
                     try:
-                        main_win.destroy()  # type: ignore[attr-defined]
+                        server_thread.join(timeout=0.8)
                     except Exception:
                         pass
-                time.sleep(1.5)
+                    try:
+                        bound_sock.close()
+                    except Exception:
+                        pass
+                    instance_guard.release()
+                    # Windows 下短暂等待 WAL/句柄释放后极速退出，避免 WinForms destroy 阻塞 7 秒
+                    time.sleep(0.25)
+                    os._exit(0)
+                from desktop_macos import hide_macos_window_immediate, terminate_macos_app
+
+                if mini_win is not None:
+                    hide_macos_window_immediate(mini_win)
+                main_win = windows.get("main")
+                if main_win is not None:
+                    hide_macos_window_immediate(main_win)
+                try:
+                    server_thread.join(timeout=2.0)
+                except Exception:
+                    pass
+                try:
+                    bound_sock.close()
+                except Exception:
+                    pass
+                instance_guard.release()
+                terminate_macos_app()
+                time.sleep(1.0)
                 os._exit(0)
 
             threading.Thread(target=_shutdown, name="zhiling-update-quit", daemon=True).start()
@@ -1463,6 +1709,7 @@ def main() -> None:
                 return False
 
     bridge = DesktopBridge()
+    fastapi_app.state.activate_window = bridge.focus_main_window
     main_win = webview.create_window(
         "知聆课堂",
         main_url,
@@ -1599,8 +1846,14 @@ def main() -> None:
             icon=str(icon_path) if (icon_path and sys.platform != "darwin") else None,
         )
     finally:
+        fastapi_app.state.shutting_down = True
         server.should_exit = True
         server_thread.join(timeout=8.0)
+        try:
+            bound_sock.close()
+        except Exception:
+            pass
+        instance_guard.release()
 
 
 if __name__ == "__main__":

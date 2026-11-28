@@ -346,6 +346,212 @@ class MacOSPortTests(unittest.TestCase):
 
             asyncio.run(asyncio.wait_for(scenario(), timeout=8.0))
 
+    def test_single_instance_guard_and_activate_endpoint_and_atomic_bind(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import threading
+        import uvicorn
+        from fastapi.testclient import TestClient
+        import backend.desktop_shell as desktop_shell
+        from backend.app.main import create_app
+
+        port_a, sock_a = desktop_shell.bind_free_port(0)
+        port_b = 0
+        sock_b = None
+        try:
+            port_b, sock_b = desktop_shell.bind_free_port(port_a)
+            self.assertNotEqual(port_b, port_a)
+        finally:
+            sock_a.close()
+            if sock_b is not None:
+                sock_b.close()
+
+        with tempfile.TemporaryDirectory() as uv_tmp:
+            uv_port, uv_sock = desktop_shell.bind_free_port(0)
+            uv_app = create_app(data_dir=Path(uv_tmp), enable_os_hotkeys=False, serve_dist=False)
+            uv_server = uvicorn.Server(uvicorn.Config(uv_app, host="127.0.0.1", port=uv_port, log_config=None))
+            uv_thread = threading.Thread(target=lambda: uv_server.run(sockets=[uv_sock]), daemon=True)
+            uv_thread.start()
+            try:
+                self.assertTrue(desktop_shell.wait_server_ready(uv_port, server_thread=uv_thread, server=uv_server))
+            finally:
+                uv_server.should_exit = True
+                uv_thread.join(timeout=5.0)
+                try:
+                    uv_sock.close()
+                except Exception:
+                    pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            dist_dir = root / "dist"
+            dist_dir.mkdir(parents=True)
+            (dist_dir / "index.html").write_text("<html><body>ok</body></html>", encoding="utf-8")
+
+            guard1 = desktop_shell.SingleInstanceGuard(data_dir, enabled=True)
+            guard2 = desktop_shell.SingleInstanceGuard(data_dir, enabled=True)
+            try:
+                self.assertTrue(guard1.try_acquire())
+                self.assertFalse(guard2.try_acquire())
+
+                received_tokens: list[str] = []
+
+                class _ActivateHandler(BaseHTTPRequestHandler):
+                    def do_POST(self):
+                        if self.path == "/api/v1/desktop/activate":
+                            received_tokens.append(self.headers.get("X-Zhiling-Instance-Token", ""))
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(b'{"data":{"activated":true}}')
+                            return
+                        self.send_response(404)
+                        self.end_headers()
+
+                    def log_message(self, format, *args):
+                        return
+
+                httpd = HTTPServer(("127.0.0.1", 0), _ActivateHandler)
+                srv_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                srv_thread.start()
+                try:
+                    guard1.write_runtime_info(httpd.server_address[1])
+                    res = guard2.acquire_or_activate(wait_timeout_s=2.0)
+                    self.assertEqual(res, "activated")
+                    self.assertEqual(received_tokens, [guard1.token])
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    srv_thread.join(timeout=2.0)
+
+                activated_calls = 0
+
+                def _activate_cb():
+                    nonlocal activated_calls
+                    activated_calls += 1
+
+                app = create_app(
+                    data_dir=data_dir,
+                    dist_dir=dist_dir,
+                    enable_os_hotkeys=False,
+                    serve_dist=True,
+                )
+                app.state.instance_token = guard1.token
+                app.state.shutting_down = False
+                app.state.activate_window = _activate_cb
+
+                with TestClient(app, base_url="http://localhost") as client:
+                    root_resp = client.get("/")
+                    self.assertEqual(root_resp.status_code, 200)
+                    self.assertIn("no-store", root_resp.headers.get("cache-control", "").lower())
+
+                    bad_resp = client.post("/api/v1/desktop/activate", headers={"X-Zhiling-Instance-Token": "wrong"})
+                    self.assertEqual(bad_resp.status_code, 403)
+                    self.assertEqual(activated_calls, 0)
+
+                    ok_resp = client.post(
+                        "/api/v1/desktop/activate",
+                        headers={"X-Zhiling-Instance-Token": guard1.token},
+                    )
+                    self.assertEqual(ok_resp.status_code, 200)
+                    self.assertEqual(ok_resp.json()["data"]["activated"], True)
+                    self.assertEqual(activated_calls, 1)
+
+                    app.state.shutting_down = True
+                    shutting_resp = client.post(
+                        "/api/v1/desktop/activate",
+                        headers={"X-Zhiling-Instance-Token": guard1.token},
+                    )
+                    self.assertEqual(shutting_resp.status_code, 409)
+            finally:
+                guard2.release()
+                guard1.release()
+
+            guard3 = desktop_shell.SingleInstanceGuard(data_dir, enabled=True)
+            try:
+                self.assertTrue(guard3.try_acquire())
+            finally:
+                guard3.release()
+
+    def test_corrupted_legacy_archive_workspace_loads_gracefully(self):
+        from fastapi.testclient import TestClient
+        from backend.app.db import ClassSession, Message, Segment, SessionAttachment
+        from backend.app.main import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(
+                data_dir=Path(tmp),
+                enable_os_hotkeys=False,
+                serve_dist=False,
+            )
+            with TestClient(app, base_url="http://localhost") as client:
+                created = client.post("/api/v1/sessions", json={})
+                self.assertEqual(created.status_code, 201)
+                session_id = created.json()["data"]["session"]["id"]
+
+                async def _seed_legacy_corrupt_rows():
+                    async with app.state.repo.db.write() as db:
+                        sess = await db.get(ClassSession, session_id)
+                        assert sess is not None
+                        sess.status = "ended"
+                        sess.audio_file_path = str(Path(tmp) / "missing_legacy.wav")
+                        sess.study_note_json = "{truncated-study-note"
+                        sess.flashcards_json = json.dumps(
+                            [
+                                {"id": "fc1", "front": "Valid Q", "back": "Valid A", "tag": "legacy"},
+                                {"broken": True},
+                            ]
+                        )
+                        db.add(
+                            Segment(
+                                id="seg_corrupt_1",
+                                session_id=session_id,
+                                order_index=0,
+                                topic_title="Legacy Topic",
+                                detailed_explanation="{not-valid-explanation-json",
+                            )
+                        )
+                        db.add(
+                            SessionAttachment(
+                                id="att_legacy_1",
+                                session_id=session_id,
+                                kind="file",
+                                file_name="legacy.pdf",
+                                mime_type="application/pdf",
+                                file_path="legacy.pdf",
+                                size_bytes=123,
+                            )
+                        )
+                        db.add(
+                            Message(
+                                id="msg_corrupt_1",
+                                session_id=session_id,
+                                role="system",
+                                content="Legacy reply",
+                                attachment_ids_json="{bad-json-ids",
+                            )
+                        )
+
+                asyncio.run(_seed_legacy_corrupt_rows())
+
+                self.assertEqual(app.state.audio.existing_duration_ms("../invalid-id"), 0)
+
+                ws_resp = client.get(f"/api/v1/sessions/{session_id}/workspace")
+                self.assertEqual(ws_resp.status_code, 200)
+                ws = ws_resp.json()["data"]
+                self.assertEqual(ws["session"]["status"], "idle")
+                self.assertEqual(len(ws["segments"]), 1)
+                self.assertIsNone(ws["segments"][0].get("detailedExplanation"))
+                self.assertIsNone(ws.get("studyNote"))
+                self.assertEqual(len(ws["flashcards"]), 1)
+                self.assertEqual(ws["flashcards"][0]["id"], "fc1")
+                self.assertEqual(len(ws["attachments"]), 1)
+                self.assertEqual(ws["attachments"][0]["kind"], "material")
+                self.assertEqual(len(ws["messages"]), 1)
+                self.assertEqual(ws["messages"][0]["role"], "assistant")
+                self.assertEqual(ws["messages"][0]["content"], "Legacy reply")
+                self.assertFalse(ws.get("hasAudio", False))
+
 
 if __name__ == "__main__":
     unittest.main()

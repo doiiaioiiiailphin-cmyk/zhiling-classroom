@@ -73,6 +73,8 @@ export interface MiniOverlayViewProps {
   onRequestClose?: () => void;
   onPreviewMove?: (dx: number, dy: number) => void;
   onPreviewResize?: (dw: number, dh: number) => void;
+  onPreviewBubbleSnapEdge?: () => void;
+  onPreviewOpStateChange?: (active: boolean) => void;
   onPreviewCollapseChange?: (collapsed: boolean) => void;
   onPreviewAiExpandChange?: (expanded: boolean) => void;
 }
@@ -94,6 +96,8 @@ export const MiniOverlayView: React.FC<MiniOverlayViewProps> = ({
   onRequestClose,
   onPreviewMove,
   onPreviewResize,
+  onPreviewBubbleSnapEdge,
+  onPreviewOpStateChange,
   onPreviewCollapseChange,
   onPreviewAiExpandChange,
 }) => {
@@ -471,6 +475,7 @@ export const MiniOverlayView: React.FC<MiniOverlayViewProps> = ({
   ) => {
     if (mode === 'move' && isInteractiveDragBlocker(e.target)) return;
     e.currentTarget.setPointerCapture(e.pointerId);
+    onPreviewOpStateChange?.(true);
     const ptX = overlayBridge ? e.screenX : e.clientX;
     const ptY = overlayBridge ? e.screenY : e.clientY;
     pointerDragRef.current = {
@@ -509,11 +514,17 @@ export const MiniOverlayView: React.FC<MiniOverlayViewProps> = ({
   const endPointerOp = (e: React.PointerEvent<HTMLElement>) => {
     const state = pointerDragRef.current;
     pointerDragRef.current = null;
+    onPreviewOpStateChange?.(false);
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
-    if (state?.mode === 'bubble' && !state.moved) {
-      handleToggleCollapse(false);
+    if (state?.mode === 'bubble') {
+      if (!state.moved) {
+        handleToggleCollapse(false);
+      } else {
+        overlayBridge?.snapBubbleToEdge?.();
+        onPreviewBubbleSnapEdge?.();
+      }
     }
   };
 
@@ -556,7 +567,8 @@ export const MiniOverlayView: React.FC<MiniOverlayViewProps> = ({
               handleToggleCollapse(false);
             }
           }}
-          className="h-full w-full rounded-full bg-[#1456F0] hover:bg-[#3370FF] text-white border-2 border-white/90 shadow-[0_8px_24px_rgba(20,86,240,0.36)] flex items-center justify-center gap-1.5 px-3 select-none touch-none cursor-pointer active:scale-95 transition-transform"
+          style={{ transitionTimingFunction: 'var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1))' }}
+          className="spring-press h-full w-full rounded-full bg-[#1456F0] hover:bg-[#3370FF] text-white border-2 border-white/90 shadow-[0_8px_24px_rgba(20,86,240,0.36)] flex items-center justify-center gap-1.5 px-3 select-none touch-none cursor-pointer"
         >
           <span
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
@@ -572,7 +584,7 @@ export const MiniOverlayView: React.FC<MiniOverlayViewProps> = ({
 
     return (
       <div
-        className={`relative h-full w-full rounded-2xl border border-[#CFD9EA] bg-white/96 backdrop-blur-md shadow-[0_14px_38px_rgba(20,30,55,0.22)] flex flex-col overflow-hidden select-none ${motionClass}`}
+        className={`relative h-full w-full rounded-2xl border border-[#CFD9EA] bg-white shadow-[0_14px_38px_rgba(20,30,55,0.22)] flex flex-col overflow-hidden select-none ${motionClass}`}
       >
         {/* 手机端悬浮小窗顶栏：整条空白区支持触控拖动，右侧集成录音/静音/标不懂/AI对话/收起/关闭 */}
         <div

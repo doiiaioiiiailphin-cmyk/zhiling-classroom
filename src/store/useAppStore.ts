@@ -2417,6 +2417,9 @@ export const useAppStore = create<AppStoreState>((set, get) => {
     },
 
     applyReadyAppUpdate: async () => {
+      if (get().appUpdate.status === 'applying') {
+        return;
+      }
       if (get().activeSession?.status === 'recording') {
         showNotice('error', '请先暂停当前课堂录音，再执行重启安装');
         return;

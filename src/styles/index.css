@@ -250,11 +250,75 @@ html.mini-overlay-mode #root {
   animation: streamCaretPulse 0.85s ease-in-out infinite;
 }
 
+/* === 120Hz 物理弹簧动效令牌与移动触控质感规范 === */
+:root {
+  /* 近似 RK4 snappy (k=480, d=36) */
+  --spring-snappy: linear(
+    0, 0.008, 0.032, 0.072, 0.128, 0.197, 0.278, 0.366, 0.459, 0.553, 0.644,
+    0.728, 0.804, 0.869, 0.922, 0.963, 0.992, 1.012, 1.022, 1.025, 1.022,
+    1.016, 1.01, 1.004, 1.001, 0.999, 0.999, 1
+  );
+  /* 近似 RK4 sheet (k=380, d=32) */
+  --spring-sheet: linear(
+    0, 0.006, 0.025, 0.058, 0.104, 0.162, 0.231, 0.308, 0.391, 0.478, 0.566,
+    0.651, 0.731, 0.805, 0.87, 0.924, 0.966, 0.997, 1.017, 1.028, 1.031,
+    1.028, 1.021, 1.013, 1.006, 1.001, 0.999, 0.999, 1
+  );
+  /* 近似 RK4 page (k=420, d=39, 临界阻尼无回弹晃动) */
+  --spring-page: linear(
+    0, 0.007, 0.028, 0.062, 0.109, 0.167, 0.234, 0.308, 0.386, 0.466, 0.545,
+    0.622, 0.695, 0.761, 0.821, 0.873, 0.917, 0.952, 0.979, 0.998, 1.009,
+    1.012, 1.01, 1.006, 1.002, 1, 1
+  );
+  /* 近似 RK4 expressive (k=340, d=24, 灵动弹性微过冲) */
+  --spring-expressive: linear(
+    0, 0.009, 0.036, 0.082, 0.145, 0.223, 0.314, 0.415, 0.521, 0.629, 0.735,
+    0.834, 0.923, 0.999, 1.059, 1.102, 1.126, 1.132, 1.123, 1.103, 1.077,
+    1.051, 1.027, 1.009, 0.997, 0.992, 0.991, 0.994, 0.998, 1.001, 1.002, 1
+  );
+}
+
+/* 消除 Android WebView 点击高亮灰框，保留原生手感 */
+html,
+body,
+button,
+a,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.spring-press {
+  touch-action: manipulation;
+  transition: transform 240ms var(--spring-snappy, cubic-bezier(0.22, 1, 0.36, 1)),
+    opacity 160ms ease-out;
+}
+
+.spring-press:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.spring-press-card {
+  touch-action: manipulation;
+  transition: transform 260ms var(--spring-snappy, cubic-bezier(0.22, 1, 0.36, 1)),
+    box-shadow 220ms ease-out,
+    border-color 180ms ease-out;
+}
+
+.spring-press-card:active {
+  transform: scale(0.985);
+}
+
+/* 禁用 Android WebView 默认边缘拉扯灰光，交给物理橡皮筋弹簧接管 */
+.overscroll-contain-y {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* 移动端独立设置页与嵌套子页面原生推入/返回过渡动画 */
 @keyframes mobileSettingsPageIn {
   from {
     opacity: 0;
-    transform: translate3d(20px, 0, 0);
+    transform: translate3d(28px, 0, 0);
   }
   to {
     opacity: 1;
@@ -265,7 +329,7 @@ html.mini-overlay-mode #root {
 @keyframes mobileSettingsRootBack {
   from {
     opacity: 0.72;
-    transform: translate3d(-12px, 0, 0);
+    transform: translate3d(-16px, 0, 0);
   }
   to {
     opacity: 1;
@@ -274,11 +338,41 @@ html.mini-overlay-mode #root {
 }
 
 .animate-mobile-page-in {
-  animation: mobileSettingsPageIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: mobileSettingsPageIn 0.28s var(--spring-page, cubic-bezier(0.22, 1, 0.36, 1)) both;
 }
 
 .animate-mobile-root-back {
-  animation: mobileSettingsRootBack 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: mobileSettingsRootBack 0.24s var(--spring-page, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+@keyframes mobileClassroomEnter {
+  from {
+    opacity: 0.88;
+    transform: translate3d(24px, 0, 0) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes mobileHomeEnter {
+  from {
+    opacity: 0.9;
+    transform: translate3d(-16px, 0, 0) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.animate-mobile-classroom-enter {
+  animation: mobileClassroomEnter 0.28s var(--spring-page, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+.animate-mobile-home-enter {
+  animation: mobileHomeEnter 0.24s var(--spring-page, cubic-bezier(0.22, 1, 0.36, 1)) both;
 }
 
 /* 移动端长按转写记录操作抽屉动效与系统长按菜单抑制 */
@@ -313,5 +407,46 @@ html.mini-overlay-mode #root {
 }
 
 .animate-sheet-up {
-  animation: mobileSheetSlideUp 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: mobileSheetSlideUp 0.32s var(--spring-sheet, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+/* 3D 记忆闪卡弹簧翻转 */
+.flashcard-perspective {
+  perspective: 1200px;
+}
+
+.flashcard-inner {
+  transform-style: preserve-3d;
+  transition: transform 0.52s var(--spring-expressive, cubic-bezier(0.22, 1, 0.36, 1));
+  will-change: transform;
+}
+
+.flashcard-inner.is-flipped {
+  transform: rotateY(180deg);
+}
+
+.flashcard-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flashcard-face-back {
+  transform: rotateY(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-mobile-page-in,
+  .animate-mobile-root-back,
+  .animate-mobile-classroom-enter,
+  .animate-mobile-home-enter,
+  .animate-sheet-backdrop,
+  .animate-sheet-up {
+    animation-duration: 0.01ms !important;
+  }
+
+  .spring-press,
+  .spring-press-card,
+  .flashcard-inner {
+    transition-duration: 0.01ms !important;
+  }
 }

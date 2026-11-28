@@ -11,6 +11,7 @@ import {
   Radio,
   X,
 } from 'lucide-react';
+import { useOverscrollSpring } from '../../hooks/useOverscrollSpring';
 import { useSmoothStream } from '../../hooks/useSmoothStream';
 import { useVirtualList } from '../../hooks/useVirtualList';
 import { useAppStore } from '../../store/useAppStore';
@@ -20,7 +21,11 @@ import {
   savePanelScroll,
   type PanelScrollSnapshot,
 } from '../../utils/classroomScrollMemory';
-import { getPasteShortcutLabel, isAndroidPlatform } from '../../utils/desktopBridge';
+import {
+  getPasteShortcutLabel,
+  isAndroidPlatform,
+  useViewportLayout,
+} from '../../utils/desktopBridge';
 import { IconButton } from '../ui/IconButton';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { Modal } from '../ui/Modal';
@@ -223,10 +228,8 @@ const ChatComposer: React.FC<ChatComposerProps> = React.memo(
     <div
       className={
         mobileDockMode
-          ? `@container px-3 pt-2 pb-[calc(12px+env(safe-area-inset-bottom,0px))] border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md shadow-[0_-6px_22px_rgba(31,35,41,0.05)] shrink-0 space-y-2 origin-bottom-right transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-              mobileDockVisible
-                ? 'translate-y-0 opacity-100 scale-100'
-                : 'translate-y-[108%] opacity-0 scale-[0.94] pointer-events-none'
+          ? `@container px-3 pt-2 pb-[calc(12px+env(safe-area-inset-bottom,0px))] border-t border-[#ECEEF2] bg-white/95 backdrop-blur-md shadow-[0_-6px_22px_rgba(31,35,41,0.05)] shrink-0 space-y-2 ${
+              mobileDockVisible ? '' : 'pointer-events-none'
             }`
           : '@container px-4 pt-2.5 pb-4 border-t border-[#ECEEF2] bg-white shrink-0 space-y-2.5'
       }
@@ -508,6 +511,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(
     estimateSize,
     gap: 24,
     overscanPx: 800,
+  });
+
+  const { isMobileTouchLayout } = useViewportLayout();
+  const chatOverscroll = useOverscrollSpring({
+    enabled: isMobileTouchLayout,
+    scrollRef,
   });
 
   const cancelPendingRestore = useCallback(() => {
@@ -808,47 +817,49 @@ export const ChatPanel: React.FC<ChatPanelProps> = React.memo(
         onPointerDown={cancelPendingRestore}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
-        className={`flex-1 overflow-y-auto ${mobileDockMode ? 'px-4 py-4' : 'px-6 py-5'}`}
+        className={`flex-1 overflow-y-auto overscroll-contain-y ${mobileDockMode ? 'px-4 py-4' : 'px-6 py-5'}`}
       >
-        {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center px-6 space-y-3">
-            <div className="w-12 h-12 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
-              <MessageSquareText className="w-6 h-6" strokeWidth={1.8} />
+        <div ref={chatOverscroll.contentRef} className="min-h-full flex flex-col">
+          {messages.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center px-6 space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-[#EBF2FF] text-[#1456F0] flex items-center justify-center">
+                <MessageSquareText className="w-6 h-6" strokeWidth={1.8} />
+              </div>
+              <div className="text-[16px] font-medium text-[#1F2329]">
+                基于本堂课实时内容的多模态 AI 助教
+              </div>
+              <p className="max-w-sm text-[14px] leading-relaxed text-[#4E5969]">
+                {mobileDockMode
+                  ? '课堂转写与讲义会自动作为上下文。您可随时发送文字或图片提问、点击下方快捷胶囊追回走神内容，或点右下角按钮切回转写记录。'
+                  : '右侧课堂转写与讲义会自动作为上下文。您可随时粘贴板书截图、点击下方快捷胶囊追回走神内容，或点击回答中的时间戳直达原话。'}
+              </p>
             </div>
-            <div className="text-[16px] font-medium text-[#1F2329]">
-              基于本堂课实时内容的多模态 AI 助教
+          ) : (
+            <div
+              ref={contentWrapperRef}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '24px',
+                paddingTop: `${range.topSpacerPx}px`,
+                paddingBottom: `${range.bottomSpacerPx + 8}px`,
+              }}
+            >
+              {visibleMessages.map((msg) => {
+                const itemKey = msg.clientKey ?? msg.id;
+                return (
+                  <div key={itemKey} data-virtual-key={itemKey} ref={measureElement}>
+                    <ChatMessageRow
+                      message={msg}
+                      onTimestampClick={handleTimestampJump}
+                      onPreviewImage={setPreviewAttachment}
+                    />
+                  </div>
+                );
+              })}
             </div>
-            <p className="max-w-sm text-[14px] leading-relaxed text-[#4E5969]">
-              {mobileDockMode
-                ? '课堂转写与讲义会自动作为上下文。您可随时发送文字或图片提问、点击下方快捷胶囊追回走神内容，或点右下角按钮切回转写记录。'
-                : '右侧课堂转写与讲义会自动作为上下文。您可随时粘贴板书截图、点击下方快捷胶囊追回走神内容，或点击回答中的时间戳直达原话。'}
-            </p>
-          </div>
-        ) : (
-          <div
-            ref={contentWrapperRef}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '24px',
-              paddingTop: `${range.topSpacerPx}px`,
-              paddingBottom: `${range.bottomSpacerPx + 8}px`,
-            }}
-          >
-            {visibleMessages.map((msg) => {
-              const itemKey = msg.clientKey ?? msg.id;
-              return (
-                <div key={itemKey} data-virtual-key={itemKey} ref={measureElement}>
-                  <ChatMessageRow
-                    message={msg}
-                    onTimestampClick={handleTimestampJump}
-                    onPreviewImage={setPreviewAttachment}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <ChatComposer
